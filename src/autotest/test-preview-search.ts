@@ -4,6 +4,7 @@
  */
 
 import type { AutotestContext, TestResult } from './types'
+import { buildChangeDirectoryCommand, type TerminalShellKind } from '../utils/terminal-command'
 
 const FIXTURE_FILE = 'test/preview-search-complex.md'
 const SEARCH_KEYWORD = 'system'
@@ -12,6 +13,14 @@ const CENTERING_TOLERANCE = 0.22
 const MIN_EXPECTED_MATCHES = 20
 const NAV_STRIDE = 5
 const INTER_NAV_MS = 60
+
+async function resolveTerminalShellKind(terminalId: string): Promise<TerminalShellKind | undefined> {
+  try {
+    return (await window.electronAPI.terminal.getInputCapabilities(terminalId)).shellKind
+  } catch {
+    return undefined
+  }
+}
 
 function isCenteringAcceptable(
   activeCenter: { offset: number; containerHeight: number } | null,
@@ -33,7 +42,7 @@ function isCenteringAcceptable(
 }
 
 export async function testPreviewSearch(ctx: AutotestContext): Promise<TestResult[]> {
-  const { log, sleep, assert, cancelled, waitFor } = ctx
+  const { log, sleep, assert, cancelled, waitFor, reopenProjectEditor, rootPath, terminalId } = ctx
   const results: TestResult[] = []
   const record = (name: string, ok: boolean, detail?: Record<string, unknown>) => {
     assert(name, ok, detail)
@@ -66,13 +75,32 @@ export async function testPreviewSearch(ctx: AutotestContext): Promise<TestResul
     'getPreviewSearchActiveCenter',
   ] as const
 
-  const missingMethods = requiredMethods.filter(m => typeof (api as Record<string, unknown>)[m] !== 'function')
+  const missingMethods = requiredMethods.filter(m => typeof (api as unknown as Record<string, unknown>)[m] !== 'function')
   record('PS-01-api-available', missingMethods.length === 0, {
     missing: missingMethods,
     available: requiredMethods.length - missingMethods.length,
   })
   if (missingMethods.length > 0) return results
   if (cancelled()) return results
+
+  const fixtureRootPath = window.electronAPI.debug.autotestCwd || rootPath
+  if (api.getRootPath?.() !== fixtureRootPath) {
+    const shellKind = await resolveTerminalShellKind(terminalId)
+    const cdCommand = buildChangeDirectoryCommand(window.electronAPI.platform, fixtureRootPath, shellKind)
+    await window.electronAPI.terminal.write(terminalId, cdCommand)
+    await sleep(500)
+    await window.electronAPI.git.notifyTerminalActivity(terminalId)
+    await sleep(500)
+    await reopenProjectEditor('preview-search-root')
+    const rootReady = await waitFor('PS-01-root-ready', () => {
+      return window.__onwardProjectEditorDebug?.getRootPath?.() === fixtureRootPath
+    }, 8000, 120)
+    record('PS-01-root-ready', rootReady, {
+      expectedRoot: fixtureRootPath,
+      actualRoot: window.__onwardProjectEditorDebug?.getRootPath?.() ?? null
+    })
+    if (!rootReady || cancelled()) return results
+  }
 
   // ----------------------------------------------------------------
   // PS-02: Open fixture and search bar

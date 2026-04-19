@@ -647,6 +647,7 @@ export function GitDiffViewer({
   const [diffResult, setDiffResult] = useState<GitDiffResult | null>(null)
   const [selectedFile, setSelectedFile] = useState<GitFileStatus | null>(null)
   const [fileContents, setFileContents] = useState<Record<string, FileContentState>>({})
+  const diffResultRef = useRef<GitDiffResult | null>(null)
   const fileContentsRef = useRef<Record<string, FileContentState>>({})
   const inFlightRef = useRef<Partial<Record<string, Promise<void>>>>({})
   const loadTokenRef = useRef(0)
@@ -711,6 +712,10 @@ export function GitDiffViewer({
   const modifiedDecorationsRef = useRef<monacoTypes.editor.IEditorDecorationsCollection | null>(null)
   const selectedFileRef = useRef<GitFileStatus | null>(null)
   const lastSelectedFileRef = useRef<GitFileStatus | null>(null)
+  const visibleFileListRef = useRef<GitFileStatus[]>([])
+  const visibleRepoItemsRef = useRef<RepoFilterTreeItem[]>([])
+  const lastOpenScopeRef = useRef<string | null | undefined>(undefined)
+  const resetDiffOnNextLoadRef = useRef(true)
   const [diffRevealPhase, setDiffRevealPhase] = useState<DiffRevealPhase>('idle')
   const diffRevealPhaseRef = useRef<DiffRevealPhase>('idle')
   const diffRevealTimeoutRef = useRef<number | null>(null)
@@ -807,6 +812,15 @@ export function GitDiffViewer({
     t('gitDiff.repo.current'),
     (repo) => repo.changeCount > 0 || Boolean(repo.loading) || !repo.isSubmodule
   ), [cwd, diffResult?.cwd, diffResult?.repos, expandedRepoRoots, t])
+  useEffect(() => {
+    diffResultRef.current = diffResult
+  }, [diffResult])
+  useEffect(() => {
+    visibleFileListRef.current = visibleFileList
+  }, [visibleFileList])
+  useEffect(() => {
+    visibleRepoItemsRef.current = visibleRepoItems
+  }, [visibleRepoItems])
   const setRepoExpanded = useCallback((repoRoot: string, expanded: boolean) => {
     const key = normalizeRepoRoot(repoRoot)
     if (!key) return false
@@ -1211,6 +1225,10 @@ export function GitDiffViewer({
   }, [measureDiffSplitState])
 
   const detachDiffEditor = useCallback(() => {
+    if (isPanel) {
+      disposeDiffEditorBindings()
+      return
+    }
     disposeDiffEditorBindings()
     const editor = diffEditorRef.current
     const modelUrisToDispose = new Set<string>()
@@ -1249,13 +1267,16 @@ export function GitDiffViewer({
     modifiedDecorationsRef.current = null
     diffEditorRef.current = null
     monacoRef.current = null
-  }, [disposeDiffEditorBindings])
+  }, [disposeDiffEditorBindings, isPanel])
 
   // Load Git Diff data
   const resetViewerState = useCallback(() => {
     setDiffResult(null)
+    diffResultRef.current = null
     setSelectedFile(null)
+    selectedFileRef.current = null
     setFileContents({})
+    fileContentsRef.current = {}
     repoFilterRef.current = null
     setRepoFilter(null)
     setExpandedRepoRoots(new Set())
@@ -1509,16 +1530,23 @@ export function GitDiffViewer({
     }
   }, [resetViewerState])
 
-  // Synchronously clear stale state before paint to prevent old diff flash
+  // Clear stale state before paint only when the backing cwd changes.
   useLayoutEffect(() => {
     if (isOpen) {
+      const nextScope = cwd ?? null
+      const shouldReset = lastOpenScopeRef.current !== nextScope
+      lastOpenScopeRef.current = nextScope
+      resetDiffOnNextLoadRef.current = shouldReset
       timingRef.current = {
         openRequestedAt,
         shellShownAt: performance.now(),
         cwdReadyAt,
         diffLoadedAt: null
       }
-      resetViewerState()
+      if (shouldReset) {
+        lastSelectedFileRef.current = null
+        resetViewerState()
+      }
     }
   }, [cwdReadyAt, isOpen, openRequestedAt, resetViewerState])
 
@@ -1534,7 +1562,9 @@ export function GitDiffViewer({
   // Load data when opening (async, after paint)
   useEffect(() => {
     if (isOpen) {
-      loadDiff({ reset: true })
+      const reset = resetDiffOnNextLoadRef.current
+      resetDiffOnNextLoadRef.current = false
+      loadDiff({ reset, force: !reset })
     }
   }, [isOpen, loadDiff])
 
@@ -1550,6 +1580,11 @@ export function GitDiffViewer({
   }, [fileContents])
 
   const wasOpenRef = useRef(false)
+  const isOpenRef = useRef(isOpen)
+  useEffect(() => {
+    isOpenRef.current = isOpen
+  }, [isOpen])
+
   useEffect(() => {
     if (isOpen) {
       diffRestoreCycleRef.current += 1
@@ -1950,6 +1985,8 @@ export function GitDiffViewer({
       }
       memory.selectedFileKey = nextKey
     }
+    selectedFileRef.current = file
+    lastSelectedFileRef.current = file
     setSelectedFile(file)
   }, [captureDiffView, enterDiffWaiting, getFileKey, getMemoryStore, isDraftDirty, selectedFileKey, t])
 
@@ -2863,21 +2900,24 @@ export function GitDiffViewer({
       return
     }
     const api: GitDiffDebugApi = {
-      isOpen: () => isOpen,
-      getFileList: () => diffResult?.files ?? [],
-      getVisibleFileList: () => visibleFileList,
-      getRepoList: () => diffResult?.repos ?? [],
-      getVisibleRepoItems: () => visibleRepoItems,
+      isOpen: () => isOpenRef.current,
+      getFileList: () => diffResultRef.current?.files ?? [],
+      getVisibleFileList: () => visibleFileListRef.current,
+      getRepoList: () => diffResultRef.current?.repos ?? [],
+      getVisibleRepoItems: () => visibleRepoItemsRef.current,
       setRepoExpanded,
       setRepoFilter: updateRepoFilter,
-      getSelectedFile: () => (selectedFile ? {
-        filename: selectedFile.filename,
-        originalFilename: selectedFile.originalFilename,
-        status: selectedFile.status,
-        changeType: selectedFile.changeType
-      } : null),
+      getSelectedFile: () => {
+        const file = selectedFileRef.current
+        return file ? {
+          filename: file.filename,
+          originalFilename: file.originalFilename,
+          status: file.status,
+          changeType: file.changeType
+        } : null
+      },
       selectFileByPath: (path: string) => {
-        const files = diffResult?.files ?? []
+        const files = diffResultRef.current?.files ?? []
         const target = files.find((file) =>
           file.filename === path || file.originalFilename === path
         )
@@ -2888,7 +2928,7 @@ export function GitDiffViewer({
         return false
       },
       selectFileByIndex: (index: number) => {
-        const files = diffResult?.files ?? []
+        const files = diffResultRef.current?.files ?? []
         const target = files[index]
         if (target) {
           handleFileSelect(target)
@@ -2897,7 +2937,8 @@ export function GitDiffViewer({
         return false
       },
       isSelectedReady: () => {
-        const key = selectedFileKey
+        const file = selectedFileRef.current
+        const key = file ? getFileKey(file) : null
         if (!key) return false
         const state = fileContentsRef.current[key]
         return Boolean(state && !state.loading && !state.error && !state.isBinary)
@@ -2980,7 +3021,8 @@ export function GitDiffViewer({
       },
       dragSplitViewRatio: async (ratio: number) => dragDiffSplitRatio(ratio),
       getImagePreviewState: () => {
-        const key = selectedFileKey
+        const file = selectedFileRef.current
+        const key = file ? getFileKey(file) : null
         if (!key) return null
         const state = fileContentsRef.current[key]
         if (!state) return null
@@ -3032,6 +3074,7 @@ export function GitDiffViewer({
     visibleFileList,
     visibleRepoItems,
     dragDiffSplitRatio,
+    getFileKey,
     measureDiffSplitState,
     handleDeny,
     handleFileSelect,

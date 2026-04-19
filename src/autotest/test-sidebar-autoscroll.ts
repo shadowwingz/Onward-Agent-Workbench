@@ -99,7 +99,7 @@ export async function testSidebarAutoscroll(ctx: AutotestContext): Promise<TestR
     'scrollFileBrowserToFraction',
     'getOutlineSymbolCount'
   ] as const
-  const missing = required.filter(m => typeof (api as Record<string, unknown>)[m] !== 'function')
+  const missing = required.filter(m => typeof (api as unknown as Record<string, unknown>)[m] !== 'function')
   record('SA-01-api-available', missing.length === 0, { missing })
   if (missing.length > 0) return results
   if (cancelled()) return results

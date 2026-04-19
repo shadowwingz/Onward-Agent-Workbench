@@ -75,6 +75,7 @@ export async function testPromptIntegrity(ctx: AutotestContext): Promise<TestRes
   const platform = window.electronAPI.platform
   const separator = platform === 'win32' ? '\\' : '/'
   const fixturePath = joinPlatformPath(separator, rootPath, 'test', 'fixtures', 'prompt-capture-stdin.cjs')
+  const shellReadyFixturePath = joinPlatformPath(separator, rootPath, 'test', 'fixtures', 'prompt-shell-ready.cjs')
   const outputDir = `test-prompt-integrity-${Date.now()}`
   const selectedTerminal = () => senderApi()?.getSelectedTerminalIds()[0] ?? terminalId
 
@@ -83,14 +84,22 @@ export async function testPromptIntegrity(ctx: AutotestContext): Promise<TestRes
   }
 
   const waitForShellReady = async (label: string) => {
-    const marker = `__PROMPT_INTEGRITY_READY_${label}_${Date.now()}__`
-    const command = platform === 'win32'
-      ? `Write-Output '${marker}'`
-      : `printf '${marker}\\n'`
+    const safeLabel = label.replace(/[^a-zA-Z0-9_-]/g, '-')
+    const outputRelativePath = `${outputDir}/${safeLabel}-shell-ready.txt`
+    const outputAbsolutePath = joinPlatformPath(separator, rootPath, outputDir, `${safeLabel}-shell-ready.txt`)
+    const command = `node "${shellReadyFixturePath}" "${outputAbsolutePath}"`
     await window.electronAPI.terminal.write(selectedTerminal(), `${command}\r`)
-    return await waitFor(`${label}:shell-ready`, () => {
-      return (terminalApi()?.getTailText(selectedTerminal(), 60) ?? '').includes(marker)
-    }, 8000, 120)
+
+    const startedAt = Date.now()
+    while (Date.now() - startedAt < 8000) {
+      const readResult = await window.electronAPI.project.readFile(rootPath, outputRelativePath)
+      if (readResult.success && readResult.content === 'ready') {
+        return true
+      }
+      await sleep(120)
+    }
+    log('timeout', { label: `${label}:shell-ready`, timeoutMs: 8000 })
+    return false
   }
 
   const clearPromptEditor = async () => {
@@ -201,15 +210,23 @@ export async function testPromptIntegrity(ctx: AutotestContext): Promise<TestRes
     content: string,
     enableBracketedPaste: boolean
   ) => {
+    const selectionReadyForCase = await ensureSelection()
     const capture = await startCapture(label, enableBracketedPaste)
     const actionResult = await runPromptAction(action, content)
     await sleep(200)
-    const stopped = await stopCapture(label)
+    const stoppedByTail = await stopCapture(label)
     const captureResult = await readCaptureResult(capture.outputRelativePath)
+    const ready = capture.ready || captureResult?.stopReason === 'marker'
+    const stopped = stoppedByTail || captureResult?.stopReason === 'marker'
     await clearPromptEditor()
+    if (stopped) {
+      await sleep(250)
+    }
     const shellReady = await waitForShellReady(`${label}:after`)
     return {
+      selectionReadyForCase,
       ...capture,
+      ready,
       ...actionResult,
       stopped,
       captureResult,
@@ -259,6 +276,7 @@ export async function testPromptIntegrity(ctx: AutotestContext): Promise<TestRes
       const expectedPayload = normalizePromptForTransport(prompt)
       record('PI-01-send-multiline-with-bracketed-paste', Boolean(
         result.ready &&
+        result.selectionReadyForCase &&
         result.capabilityReady &&
         result.clicked &&
         result.idle &&
@@ -284,6 +302,7 @@ export async function testPromptIntegrity(ctx: AutotestContext): Promise<TestRes
       const expectedPayload = normalizePromptForTransport(prompt)
       record('PI-02-send-and-execute-multiline-with-bracketed-paste', Boolean(
         result.ready &&
+        result.selectionReadyForCase &&
         result.capabilityReady &&
         result.clicked &&
         result.idle &&
@@ -312,6 +331,7 @@ export async function testPromptIntegrity(ctx: AutotestContext): Promise<TestRes
       const actualLineCount = captureResult?.payloadUtf8?.split('\r').length ?? 0
       record('PI-03-send-large-multiline-preserves-all-lines', Boolean(
         result.ready &&
+        result.selectionReadyForCase &&
         result.capabilityReady &&
         result.clicked &&
         result.idle &&
@@ -338,6 +358,7 @@ export async function testPromptIntegrity(ctx: AutotestContext): Promise<TestRes
       const blockedNotice = result.noticeSeen || Boolean(result.notice) || await waitForNotice('pi04:blocked')
       record('PI-04-send-blocked-without-bracketed-paste', Boolean(
         result.ready &&
+        result.selectionReadyForCase &&
         result.capabilityReady &&
         result.clicked &&
         result.idle &&
@@ -364,6 +385,7 @@ export async function testPromptIntegrity(ctx: AutotestContext): Promise<TestRes
       const blockedNotice = result.noticeSeen || Boolean(result.notice) || await waitForNotice('pi05:blocked')
       record('PI-05-send-and-execute-blocked-without-bracketed-paste', Boolean(
         result.ready &&
+        result.selectionReadyForCase &&
         result.capabilityReady &&
         result.clicked &&
         result.idle &&

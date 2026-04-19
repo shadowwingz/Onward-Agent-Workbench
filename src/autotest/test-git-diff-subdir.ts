@@ -155,6 +155,19 @@ export async function testGitDiffSubdir(ctx: AutotestContext): Promise<TestResul
     } else {
       await termExec(`echo "autotest-marker-$(date +%s)" > "${TEST_MARKER_FILE}"`, 'create-marker')
     }
+    let markerCreated = false
+    const markerWaitStartedAt = performance.now()
+    while (!markerCreated && performance.now() - markerWaitStartedAt < 5000) {
+      const result = await window.electronAPI.project.readFile(rootPath, markerRelPath)
+      markerCreated = result.success && Boolean(result.content?.includes('autotest-marker'))
+      if (!markerCreated) {
+        await sleep(120)
+      }
+    }
+    _assert('SD-02-marker-created-before-diff', markerCreated, {
+      markerRelPath
+    })
+    if (!markerCreated || cancelled()) return results
     // Wait extra for git watcher to detect file changes
     await window.electronAPI.git.notifyTerminalActivity(terminalId)
     await sleep(800)

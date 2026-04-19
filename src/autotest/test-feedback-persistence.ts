@@ -142,9 +142,11 @@ export async function testFeedbackPersistenceVerify(ctx: AutotestContext): Promi
       () => {
         const item = queryElement<HTMLElement>('[data-testid="feedback-history-item"]')
         const title = queryElement<HTMLElement>('[data-testid="feedback-history-title"]')?.textContent?.trim()
-        return Boolean(item) &&
+        if (!item) return false
+        return (
           item.getAttribute('data-feedback-status') === 'pending_submission' &&
           title === 'Feedback persistence seed record'
+        )
       },
       3000,
       40

@@ -26,6 +26,18 @@ const BRACKET_DISABLE = `${ESC}[?2004l`
 let settled = false
 const chunks = []
 
+function restoreInputMode() {
+  if (process.stdin.isTTY && typeof process.stdin.setRawMode === 'function') {
+    try {
+      process.stdin.setRawMode(false)
+    } catch {
+      // Ignore teardown errors; the process is exiting and the fixture has already written its result.
+    }
+  }
+  process.stdin.pause()
+  process.stdin.removeAllListeners('data')
+}
+
 function ensureParentDir(filePath) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true })
 }
@@ -81,6 +93,7 @@ function finalize(captured, reason) {
     ensureParentDir(outputPath)
     fs.writeFileSync(outputPath, JSON.stringify(buildCaptureResult(captured, reason), null, 2))
   } finally {
+    restoreInputMode()
     if (enableBracketedPaste) {
       process.stdout.write(BRACKET_DISABLE)
     }
@@ -101,6 +114,7 @@ function finalizeTimeout() {
     hex: captured.toString('hex'),
     timeout: true
   }, null, 2))
+  restoreInputMode()
   if (enableBracketedPaste) {
     process.stdout.write(BRACKET_DISABLE)
   }

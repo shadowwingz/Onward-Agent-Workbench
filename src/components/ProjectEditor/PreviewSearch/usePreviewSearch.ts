@@ -106,10 +106,12 @@ function setActiveHighlight(marks: HTMLElement[], index: number, scrollContainer
   // Skip scroll when the mark is already near the viewport center to avoid jitter
   if (Math.abs(offset) <= 5) return
   const maxScroll = scrollContainer.scrollHeight - scrollContainer.clientHeight
+  const targetTop = Math.max(0, Math.min(maxScroll, scrollContainer.scrollTop + offset))
   scrollContainer.scrollTo({
-    top: Math.max(0, Math.min(maxScroll, scrollContainer.scrollTop + offset)),
-    behavior: 'smooth',
+    top: targetTop,
+    behavior: 'auto',
   })
+  scrollContainer.scrollTop = targetTop
 }
 
 export function usePreviewSearch({

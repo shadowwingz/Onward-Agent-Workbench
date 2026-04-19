@@ -19,7 +19,7 @@ interface SearchPanelProps {
   onClose: () => void
   buildFileIndex: () => Promise<string[]>
   getFileIndex: () => string[]
-  searchInputRef?: RefObject<HTMLInputElement | null>
+  searchInputRef?: RefObject<HTMLInputElement>
 }
 
 function getBaseName(path: string): string {

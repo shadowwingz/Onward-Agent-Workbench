@@ -252,7 +252,7 @@ export function validateExportPayload(
     }
   }
 
-  return { valid: true, payload: data as PromptExportPayload }
+  return { valid: true, payload: data as unknown as PromptExportPayload }
 }
 
 export function parsePromptExportPayload(

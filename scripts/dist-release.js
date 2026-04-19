@@ -167,6 +167,7 @@ console.log(`Resolved release OS: ${releaseOs}`)
 
 run('node', [join(__dirname, 'check-chinese-comments.js')])
 run('node', [join(__dirname, 'compile-changelog.js')])
+run('pnpm', ['typecheck'])
 // Generate third-party license notices for binary distribution
 run('pnpm', ['generate-notices'])
 run('electron-vite', ['build'])

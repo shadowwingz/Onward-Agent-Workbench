@@ -236,6 +236,13 @@ export const TerminalGrid = memo(function TerminalGrid({
   }, [gitDiffOpen, gitHistoryOpen, projectEditorOpenInGrid])
 
   const activePanelShellState = activeSubpage ? panelShellStates[activeSubpage] ?? null : null
+  const lastPanelShellStateRef = useRef<SubpagePanelShellState | null>(null)
+  if (activePanelShellState) {
+    lastPanelShellStateRef.current = activePanelShellState
+  } else if (!anySubpageOpen) {
+    lastPanelShellStateRef.current = null
+  }
+  const renderedPanelShellState = activePanelShellState ?? (anySubpageOpen ? lastPanelShellStateRef.current : null)
   const activeSubpageSelect = activePanelShellState?.onSelect
 
   useEffect(() => {
@@ -1624,15 +1631,15 @@ export const TerminalGrid = memo(function TerminalGrid({
           data-active-subpage={activeSubpage ?? ''}
           aria-hidden={!anySubpageOpen}
         >
-          {anySubpageOpen && activePanelShellState && (
+          {anySubpageOpen && renderedPanelShellState && (
             <SubpagePanelShell
-              current={activePanelShellState.current}
-              onSelect={activePanelShellState.onSelect}
-              actions={activePanelShellState.actions}
-              workingDirectoryLabel={activePanelShellState.workingDirectoryLabel}
-              workingDirectoryPath={activePanelShellState.workingDirectoryPath}
-              metaExtra={activePanelShellState.metaExtra}
-              taskTitle={activePanelShellState.taskTitle}
+              current={renderedPanelShellState.current}
+              onSelect={renderedPanelShellState.onSelect}
+              actions={renderedPanelShellState.actions}
+              workingDirectoryLabel={renderedPanelShellState.workingDirectoryLabel}
+              workingDirectoryPath={renderedPanelShellState.workingDirectoryPath}
+              metaExtra={renderedPanelShellState.metaExtra}
+              taskTitle={renderedPanelShellState.taskTitle}
             />
           )}
           <div className={`terminal-grid-subpage-body ${isSubpageSwitching ? 'is-switching' : ''}`}>

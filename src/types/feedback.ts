@@ -41,11 +41,11 @@ export interface FeedbackSubmissionInput {
 
 export interface FeedbackAppContext {
   locale: AppLocale
-  platform: 'darwin' | 'win32' | 'linux'
+  platform: 'darwin' | 'win32' | 'linux' | 'unknown'
   productName: string
   version: string
   buildChannel: 'dev' | 'prod'
-  releaseChannel: 'daily' | 'stable' | 'unknown'
+  releaseChannel: 'daily' | 'dev' | 'stable' | 'unknown'
   releaseOs: 'macos' | 'windows' | 'linux' | 'unknown'
   createdAt: number
 }

@@ -306,12 +306,13 @@ function createWindow(displayName: string): void {
   })
 
   if (mainWindow.webContents) {
-    mainWindow.webContents.on('did-finish-load', async () => {
-      log('[Window] did-finish-load', mainWindow?.webContents.getURL())
-      if (shouldLog && mainWindow) {
+    const windowForEvents = mainWindow
+    windowForEvents.webContents.on('did-finish-load', async () => {
+      log('[Window] did-finish-load', windowForEvents.webContents.getURL())
+      if (shouldLog && !windowForEvents.isDestroyed()) {
         const logDomInfo = async (label: string) => {
           try {
-            const info = await mainWindow.webContents.executeJavaScript(`(() => {
+            const info = await windowForEvents.webContents.executeJavaScript(`(() => {
               const root = document.getElementById('root')
               const rootRect = root ? root.getBoundingClientRect() : null
               const bodyStyle = window.getComputedStyle(document.body)
@@ -345,11 +346,11 @@ function createWindow(displayName: string): void {
         setTimeout(() => void logDomInfo('t=3000'), 3000)
       }
 
-      if (process.env.ONWARD_DEBUG_CAPTURE === '1' && mainWindow) {
+      if (process.env.ONWARD_DEBUG_CAPTURE === '1' && !windowForEvents.isDestroyed()) {
         const capture = (label: string, delay: number) => {
           setTimeout(async () => {
             try {
-              const image = await mainWindow.webContents.capturePage()
+              const image = await windowForEvents.webContents.capturePage()
               const outputPath = join(app.getPath('temp'), `onward-debug-${label}.png`)
               writeFileSync(outputPath, image.toPNG())
               log('[Window] capturePage saved', outputPath)
@@ -512,7 +513,7 @@ app.whenReady().then(() => {
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow()
+      createWindow(appInfo.displayName)
     } else if (mainWindow) {
       // macOS: Show window when clicking Dock icon
       getTrayManager().showWindow()

@@ -90,11 +90,12 @@ function readIndex(): ChangelogIndexFile {
   const entries: ChangelogEntry[] = []
   for (const entry of parsed.entries) {
     if (!entry || typeof entry !== 'object') continue
-    const localeMap = (entry as Partial<ChangelogEntry>).markdown
-    const channel = normalizeChannel((entry as Partial<ChangelogEntry>).channel)
+    const rawEntry = entry as Partial<ChangelogEntry>
+    const localeMap = rawEntry.markdown
+    const channel = normalizeChannel(rawEntry.channel)
     if (
-      typeof (entry as Partial<ChangelogEntry>).tag !== 'string' ||
-      typeof (entry as Partial<ChangelogEntry>).version !== 'string' ||
+      typeof rawEntry.tag !== 'string' ||
+      typeof rawEntry.version !== 'string' ||
       !channel ||
       !localeMap ||
       typeof localeMap.en !== 'string' ||
@@ -103,18 +104,18 @@ function readIndex(): ChangelogIndexFile {
       continue
     }
 
-    const htmlMap = (entry as Partial<ChangelogEntry>).html
+    const htmlMap = rawEntry.html
+    const tag = rawEntry.tag
+    const version = rawEntry.version
+    const previousTag = typeof rawEntry.previousTag === 'string' ? rawEntry.previousTag : null
+    const publishedAt = typeof rawEntry.publishedAt === 'string' ? rawEntry.publishedAt : null
 
     entries.push({
-      tag: (entry as Partial<ChangelogEntry>).tag,
-      version: (entry as Partial<ChangelogEntry>).version,
+      tag,
+      version,
       channel,
-      previousTag: typeof (entry as Partial<ChangelogEntry>).previousTag === 'string'
-        ? (entry as Partial<ChangelogEntry>).previousTag
-        : null,
-      publishedAt: typeof (entry as Partial<ChangelogEntry>).publishedAt === 'string'
-        ? (entry as Partial<ChangelogEntry>).publishedAt
-        : null,
+      previousTag,
+      publishedAt,
       markdown: {
         en: localeMap.en,
         ...(typeof localeMap['zh-CN'] === 'string' ? { 'zh-CN': localeMap['zh-CN'] } : {})

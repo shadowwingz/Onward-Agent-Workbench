@@ -8,7 +8,7 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT_DIR/test/resolve-dev-app-bin.sh"
 APP_BIN="${1:-$(resolve_dev_app_bin "$ROOT_DIR" || true)}"
 LOG_FILE="${2:-/tmp/onward-project-editor-markdown-session-restore-autotest.log}"
-FIXTURE_ROOT="${3:-/Users/yingyun/Projects/LLM_Implementation_Projects/Harness Engineering-claude}"
+FIXTURE_ROOT="${3:-$ROOT_DIR/test/fixtures/project-editor-markdown-session-restore}"
 
 if [[ -z "$APP_BIN" || ! -x "$APP_BIN" ]]; then
   echo "ERROR: app binary not found or not executable: ${APP_BIN:-<empty>}" >&2
@@ -17,8 +17,11 @@ if [[ -z "$APP_BIN" || ! -x "$APP_BIN" ]]; then
 fi
 
 if [[ ! -d "$FIXTURE_ROOT" ]]; then
-  echo "ERROR: fixture root not found: $FIXTURE_ROOT" >&2
-  exit 1
+  if [[ $# -ge 3 ]]; then
+    echo "ERROR: fixture root not found: $FIXTURE_ROOT" >&2
+    exit 1
+  fi
+  mkdir -p "$FIXTURE_ROOT"
 fi
 
 rm -f "$LOG_FILE"

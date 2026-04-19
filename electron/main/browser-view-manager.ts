@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { BrowserWindow, WebContentsView, session } from 'electron'
+import { BrowserWindow, WebContentsView, session, type Event as ElectronEvent, type WebContents } from 'electron'
 
 const BROWSER_PARTITION = 'persist:browser'
 
@@ -16,6 +16,13 @@ interface BrowserViewInfo {
   attached: boolean
   isFullscreen: boolean
   savedBounds: { x: number; y: number; width: number; height: number } | null
+}
+
+type WebContentsWithFrameNavigation = WebContents & {
+  on(
+    event: 'will-frame-navigate',
+    listener: (event: ElectronEvent, details: { url?: string } | string) => void
+  ): WebContents
 }
 
 class BrowserViewManager {
@@ -289,11 +296,14 @@ class BrowserViewManager {
       }
     })
 
-    wc.on('will-frame-navigate', (event, details: unknown) => {
+    ;(wc as WebContentsWithFrameNavigation).on('will-frame-navigate', (
+      event: ElectronEvent,
+      details: { url?: string } | string
+    ) => {
       const url = typeof details === 'string'
         ? details
-        : typeof (details as { url?: unknown })?.url === 'string'
-          ? (details as { url: string }).url
+        : typeof details.url === 'string'
+          ? details.url
           : null
       if (url && !isAllowedUrl(url)) {
         event.preventDefault()

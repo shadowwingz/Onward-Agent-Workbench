@@ -250,6 +250,7 @@ export interface AppState {
 export interface AppStateAPI {
   load: () => Promise<AppState>
   save: (state: AppState) => Promise<boolean>
+  onFlushPendingState: (callback: () => void | Promise<void>) => void
 }
 
 export type GitChangeType = 'unstaged' | 'staged' | 'untracked'
@@ -282,6 +283,7 @@ export interface GitFileStatus {
   changeType: GitChangeType
   repoRoot?: string
   repoLabel?: string
+  isSubmoduleEntry?: boolean
 }
 
 // Git Diff results
@@ -837,6 +839,7 @@ export interface DebugAPI {
   feedbackReset: () => Promise<void>
   feedbackSetMockIssues: (issues: FeedbackDebugRemoteIssue[]) => Promise<void>
   feedbackGetLastOpenedUrl: () => Promise<string | null>
+  readTelemetryLog: () => Promise<string>
   quit: () => Promise<void>
 }
 
@@ -922,6 +925,8 @@ export interface BrowserAPI {
   hide: (id: string) => Promise<boolean>
   getNavState: (id: string) => Promise<BrowserNavState | null>
   clearCookies: (maxAge?: number) => Promise<{ removed: number }>
+  setRememberCookies: (rememberCookies: boolean) => Promise<{ rememberCookies: boolean }>
+  showCookieMenu: (options: { rememberCookies: boolean; labels: { remember: string; clearDay: string; clearWeek: string; clearAll: string } }) => Promise<{ action: string; rememberCookies?: boolean } | null>
   onUrlChanged: (callback: (id: string, url: string) => void) => () => void
   onTitleChanged: (callback: (id: string, title: string) => void) => () => void
   onLoadingChanged: (callback: (id: string, isLoading: boolean) => void) => () => void

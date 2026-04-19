@@ -136,9 +136,7 @@ class TelemetryService {
     // Flush Azure SDK
     if (this.client) {
       try {
-        await new Promise<void>((resolve) => {
-          this.client!.flush({ callback: () => resolve() })
-        })
+        await Promise.resolve(this.client.flush())
       } catch {}
       this.stopAzureSdk()
     }
@@ -255,7 +253,7 @@ class TelemetryService {
       const appInsights = require('applicationinsights') as typeof import('applicationinsights')
       appInsights.setup(TELEMETRY_CONNECTION_STRING)
         .setAutoCollectExceptions(false)
-        .setAutoCollectPerformance(false)
+        .setAutoCollectPerformance(false, false)
         .setAutoCollectConsole(false)
         .setAutoCollectRequests(false)
         .setAutoCollectDependencies(false)

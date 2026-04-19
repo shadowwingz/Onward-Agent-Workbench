@@ -267,9 +267,11 @@ export async function testSubpageNavigation(ctx: AutotestContext): Promise<TestR
   })
   if (!editorOpened || cancelled()) return results
 
+  let initialShellNode: HTMLElement | null = null
   const initialShell = await waitFor('subpage-navigation-shell-editor-visible', () => {
     const shells = getVisibleSubpageShells()
-    return shells.length === 1 ? shells[0] : false
+    initialShellNode = shells.length === 1 ? shells[0] : null
+    return Boolean(initialShellNode)
   }, 8000)
   _assert('SN-01A-shared-shell-visible-on-editor', Boolean(initialShell), {
     visibleShells: getVisibleSubpageShells().length
@@ -294,17 +296,19 @@ export async function testSubpageNavigation(ctx: AutotestContext): Promise<TestR
 
   const clickedDiffFromEditor = clickSubpageButton('diff')
   const diffOpened = clickedDiffFromEditor && await waitForGitDiffOpen('from-editor')
+  let diffShellNode: HTMLElement | null = null
   const diffShell = await waitFor('subpage-navigation-shell-diff-visible', () => {
     const shells = getVisibleSubpageShells()
-    return shells.length === 1 ? shells[0] : false
+    diffShellNode = shells.length === 1 ? shells[0] : null
+    return Boolean(diffShellNode)
   }, 8000)
   _assert('SN-04-editor-switch-to-diff', diffOpened, {
     clickedDiffFromEditor,
     diffOpen: getGitDiffApi()?.isOpen?.() ?? false
   })
-  _assert('SN-04A-shared-shell-reused-on-diff', Boolean(diffShell && diffShell === initialShell), {
+  _assert('SN-04A-shared-shell-reused-on-diff', Boolean(diffShell && diffShellNode === initialShellNode), {
     visibleShells: getVisibleSubpageShells().length,
-    reusedShellNode: Boolean(diffShell && diffShell === initialShell)
+    reusedShellNode: Boolean(diffShell && diffShellNode === initialShellNode)
   })
   if (!diffOpened || cancelled()) return results
 
@@ -351,17 +355,19 @@ export async function testSubpageNavigation(ctx: AutotestContext): Promise<TestR
 
   const clickedHistoryFromDiff = clickSubpageButton('history')
   const historyOpened = clickedHistoryFromDiff && await waitForGitHistoryOpen('from-diff')
+  let historyShellNode: HTMLElement | null = null
   const historyShell = await waitFor('subpage-navigation-shell-history-visible', () => {
     const shells = getVisibleSubpageShells()
-    return shells.length === 1 ? shells[0] : false
+    historyShellNode = shells.length === 1 ? shells[0] : null
+    return Boolean(historyShellNode)
   }, 8000)
   _assert('SN-08-diff-switch-to-history', historyOpened, {
     clickedHistoryFromDiff,
     historyOpen: getGitHistoryApi()?.isOpen?.() ?? false
   })
-  _assert('SN-08A-shared-shell-reused-on-history', Boolean(historyShell && historyShell === initialShell), {
+  _assert('SN-08A-shared-shell-reused-on-history', Boolean(historyShell && historyShellNode === initialShellNode), {
     visibleShells: getVisibleSubpageShells().length,
-    reusedShellNode: Boolean(historyShell && historyShell === initialShell)
+    reusedShellNode: Boolean(historyShell && historyShellNode === initialShellNode)
   })
   if (!historyOpened || cancelled()) return results
 

@@ -1409,6 +1409,9 @@ export function ProjectEditor({
   }, [])
 
   const setMarkdownPreviewOpenState = useCallback((visible: boolean) => {
+    if (!visible) {
+      capturePreviewScrollMemoryRef.current()
+    }
     setIsMarkdownPreviewOpen(visible)
     isMarkdownPreviewOpenRef.current = visible
 	    if (visible) {
@@ -2082,14 +2085,33 @@ export function ProjectEditor({
     markdownRenderedHtmlRef.current = entry.renderedHtml
     setMarkdownRenderedHtml(entry.renderedHtml)
     setMarkdownRenderPending(false)
-    if (entry.previewScrollMemory) {
-      const pKey = getFileScrollKey(lastEditorScopeRef.current, filePath)
-      if (pKey) {
-        previewScrollMemoryRef.current.set(pKey, entry.previewScrollMemory)
-      }
+    const pKey = getFileScrollKey(lastEditorScopeRef.current, filePath)
+    const currentFileMemory = fileMemoryRef.current.get(filePath)
+    const currentPreviewMemory = pKey ? previewScrollMemoryRef.current.get(pKey) : undefined
+    const currentPreviewAnchor = currentFileMemory?.previewScrollAnchor
+    if (pKey && currentPreviewAnchor) {
+      previewScrollMemoryRef.current.set(pKey, {
+        scrollRatio: currentPreviewAnchor.ratio,
+        nearestHeadingSlug: currentPreviewAnchor.slug,
+        headingOffsetY: currentPreviewAnchor.headingOffsetY ?? 0,
+        scrollTop: currentPreviewAnchor.scrollTop ?? 0
+      })
+    } else if (pKey && entry.previewScrollMemory && !currentPreviewMemory) {
+      previewScrollMemoryRef.current.set(pKey, entry.previewScrollMemory)
     }
-    if (typeof entry.outlineScrollTop === 'number') {
-      const oKey = getFileScrollKey(lastEditorScopeRef.current, filePath)
+    const oKey = getFileScrollKey(lastEditorScopeRef.current, filePath)
+    const currentOutlineScrollTop =
+      typeof currentFileMemory?.outlineScrollTop === 'number'
+        ? currentFileMemory.outlineScrollTop
+        : oKey
+          ? outlineScrollTopRef.current.get(oKey)
+          : undefined
+    if (typeof currentOutlineScrollTop === 'number') {
+      if (oKey) {
+        outlineScrollTopRef.current.set(oKey, currentOutlineScrollTop)
+      }
+      outlineScrollByFileRef.current.set(filePath, currentOutlineScrollTop)
+    } else if (typeof entry.outlineScrollTop === 'number') {
       if (oKey) {
         outlineScrollTopRef.current.set(oKey, entry.outlineScrollTop)
       }
@@ -2098,9 +2120,11 @@ export function ProjectEditor({
     if (entry.fileMemory) {
       upsertFileMemory(filePath, {
         ...entry.fileMemory,
-        isPreviewOpen: entry.isPreviewOpen,
-        isEditorVisible: entry.isEditorVisible,
-        outlineTarget: entry.outlineTarget
+        ...currentFileMemory,
+        previewScrollAnchor: currentFileMemory?.previewScrollAnchor ?? entry.fileMemory.previewScrollAnchor,
+        isPreviewOpen: isMarkdownPreviewOpenRef.current,
+        isEditorVisible: isMarkdownEditorVisibleRef.current,
+        outlineTarget: outlineTargetRef.current
       })
     }
     beginPreviewRestore()
@@ -3945,7 +3969,6 @@ export function ProjectEditor({
     gitDiffOpenRef.current = false
     setRootPath(effectiveCwd)
     rootRef.current = effectiveCwd
-    fileIndexRef.current = []
     setSearchResults([])
     void loadRoot(effectiveCwd)
   }, [cwd, isOpen, loadRoot, resetActiveFileState, t])

@@ -5,20 +5,13 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-APP_DIR="$ROOT_DIR/release/mac-arm64"
-APP_NAME="$(ls "$APP_DIR" 2>/dev/null | grep '\.app$' | head -1)"
-
-if [[ -z "$APP_NAME" ]]; then
-  echo "ERROR: no packaged .app was found. Run: rm -rf out release && pnpm dist:dev" >&2
-  exit 1
-fi
-
-APP_STEM="${APP_NAME%.app}"
-APP_BIN="${1:-$APP_DIR/$APP_NAME/Contents/MacOS/$APP_STEM}"
+source "$ROOT_DIR/test/resolve-dev-app-bin.sh"
+APP_BIN="${1:-$(resolve_dev_app_bin "$ROOT_DIR" || true)}"
 LOG_FILE="${2:-/tmp/onward-terminal-autofollow-autotest.log}"
 
-if [[ ! -x "$APP_BIN" ]]; then
-  echo "ERROR: app binary not found or not executable: $APP_BIN" >&2
+if [[ -z "$APP_BIN" || ! -x "$APP_BIN" ]]; then
+  echo "ERROR: app binary not found or not executable: ${APP_BIN:-<empty>}" >&2
+  echo "Run a development build first: rm -rf out release && pnpm dist:dev" >&2
   exit 1
 fi
 

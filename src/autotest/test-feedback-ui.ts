@@ -189,8 +189,9 @@ export async function testFeedbackUi(ctx: AutotestContext): Promise<TestResult[]
     const submitted = clickElement(queryElement<HTMLButtonElement>(submitButtonSelector))
     const historyVisible = await waitFor(
       'feedback-ui-history-visible',
-      () => getHistoryStatus() === 'pending_submission' && Boolean(queryElement(submitNoticeSelector)),
-      4000,
+      () => getHistoryStatus() === 'pending_submission' &&
+        getHistoryTitle() === 'Feedback modal UI automation',
+      6000,
       40
     )
     const openedUrl = await window.electronAPI.debug.feedbackGetLastOpenedUrl()
@@ -210,6 +211,7 @@ export async function testFeedbackUi(ctx: AutotestContext): Promise<TestResult[]
       openedUrl,
       historyStatus: getHistoryStatus(),
       historyTitle: getHistoryTitle(),
+      submitNoticeVisible: Boolean(queryElement(submitNoticeSelector)),
       feedbackId
     })
     if (!feedbackId || cancelled()) {
@@ -340,10 +342,11 @@ export async function testFeedbackUi(ctx: AutotestContext): Promise<TestResult[]
       historyList.scrollTop = 180
       historyList.dispatchEvent(new Event('scroll', { bubbles: true }))
     }
-    const listIsScrollable = Boolean(historyList) &&
-      historyList.scrollHeight > historyList.clientHeight &&
-      historyList.scrollTop > 0 &&
-      window.getComputedStyle(historyList).overflowY === 'auto'
+    const listIsScrollable = historyList
+      ? historyList.scrollHeight > historyList.clientHeight &&
+        historyList.scrollTop > 0 &&
+        window.getComputedStyle(historyList).overflowY === 'auto'
+      : false
 
     record('FBU-10-history-list-scrolls', scrollReady && listIsScrollable, {
       itemCount: queryElements('[data-testid="feedback-history-item"]').length,

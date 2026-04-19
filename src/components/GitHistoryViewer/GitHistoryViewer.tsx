@@ -344,6 +344,12 @@ export function GitHistoryViewer({
   const patchCacheRef = useRef(new Map<string, string>())
   const fileContentCacheRef = useRef(new Map<string, GitHistoryFileContentResult>())
   const commitsRef = useRef<GitCommitInfo[]>([])
+  const filesRef = useRef<GitHistoryFile[]>([])
+  const selectedFileRef = useRef<GitHistoryFile | null>(null)
+  const selectedShasRef = useRef<string[]>([])
+  const selectionAnchorRef = useRef<string | null>(null)
+  const visibleRepoItemsRef = useRef<RepoTreeItem[]>([])
+  const loadingStateRef = useRef({ loading: false, filesLoading: false, diffLoading: false })
   const loadingRef = useRef(false)
   const fileContentTokenRef = useRef(0)
   const didRestoreRef = useRef(false)
@@ -368,6 +374,7 @@ export function GitHistoryViewer({
   const [cachedParentCwd, setCachedParentCwd] = useState<string | null>(null)
   const [expandedRepoRoots, setExpandedRepoRoots] = useState<Set<string>>(() => new Set())
   const cachedParentCwdRef = useRef<string | null>(cachedParentCwd)
+  const lastOpenScopeRef = useRef<{ terminalId: string; cwd: string | null } | null>(null)
   const activeCwd = selectedRepoRoot || historyResult?.cwd || cachedParentCwd || cwd
   const activeCwdRef = useRef(activeCwd)
   const cwdRef = useRef(cwd)
@@ -458,10 +465,25 @@ export function GitHistoryViewer({
   }, [commits])
 
   useEffect(() => {
-    loadingRef.current = loading
-  }, [loading])
+    filesRef.current = files
+  }, [files])
 
   useEffect(() => {
+    selectedFileRef.current = selectedFile
+  }, [selectedFile])
+
+  useEffect(() => {
+    visibleRepoItemsRef.current = visibleRepoItems
+  }, [visibleRepoItems])
+
+  useEffect(() => {
+    loadingRef.current = loading
+    loadingStateRef.current = { loading, filesLoading, diffLoading }
+  }, [diffLoading, filesLoading, loading])
+
+  useEffect(() => {
+    selectedShasRef.current = selectedShas
+    selectionAnchorRef.current = selectionAnchor
     selectionRef.current = {
       selectedShas,
       selectionAnchor,
@@ -606,11 +628,16 @@ export function GitHistoryViewer({
   const resetState = useCallback(() => {
     setHistoryResult(null)
     setCommits([])
+    commitsRef.current = []
     setHasMore(true)
     setSelectedShas([])
+    selectedShasRef.current = []
     setSelectionAnchor(null)
+    selectionAnchorRef.current = null
     setFiles([])
+    filesRef.current = []
     setSelectedFile(null)
+    selectedFileRef.current = null
     setDiffPatch('')
     setSelectedFileContent(null)
     setDiffError(null)
@@ -626,6 +653,11 @@ export function GitHistoryViewer({
     pendingScrollRef.current = null
     selectedRepoRootRef.current = null
     cachedParentCwdRef.current = null
+    selectionRef.current = {
+      selectedShas: [],
+      selectionAnchor: null,
+      selectedFile: null
+    }
     setSelectedRepoRoot(null)
     setCachedRepos(undefined)
     setCachedParentCwd(null)
@@ -673,9 +705,13 @@ export function GitHistoryViewer({
       setHasMore(hasMoreNext)
       if (isSwitching) {
         setSelectedShas([])
+        selectedShasRef.current = []
         setSelectionAnchor(null)
+        selectionAnchorRef.current = null
         setFiles([])
+        filesRef.current = []
         setSelectedFile(null)
+        selectedFileRef.current = null
         setDiffPatch('')
         setDiffError(null)
       }
@@ -694,6 +730,7 @@ export function GitHistoryViewer({
     const cacheKey = buildRangeKey(base, head, hideWhitespace)
     if (fileCacheRef.current.has(cacheKey)) {
       const cached = fileCacheRef.current.get(cacheKey) || []
+      filesRef.current = cached
       setFiles(cached)
       return
     }
@@ -710,10 +747,12 @@ export function GitHistoryViewer({
       if (token !== filesTokenRef.current) return
       if (!result.success) {
         setDiffError(result.error || t('gitHistory.error.loadDiff'))
+        filesRef.current = []
         setFiles([])
         return
       }
       fileCacheRef.current.set(cacheKey, result.files)
+      filesRef.current = result.files
       setFiles(result.files)
     } finally {
       if (token === filesTokenRef.current) {
@@ -902,10 +941,17 @@ export function GitHistoryViewer({
   useEffect(() => {
     if (!isOpen) {
       persistStateRef.current()
-      resetState()
       return
     }
-    resetState()
+    const nextScope = { terminalId, cwd: cwd ?? null }
+    const previousScope = lastOpenScopeRef.current
+    const shouldReset = !previousScope ||
+      previousScope.terminalId !== nextScope.terminalId ||
+      previousScope.cwd !== nextScope.cwd
+    lastOpenScopeRef.current = nextScope
+    if (shouldReset) {
+      resetState()
+    }
     void loadHistory(true)
   }, [cwd, isOpen, loadHistory, resetState, terminalId])
 
@@ -933,11 +979,15 @@ export function GitHistoryViewer({
 
   useEffect(() => {
     if (!isOpen) return
-    if (commits.length > 0 && selectedShas.length === 0) {
-      setSelectedShas([commits[0].sha])
+    const hasValidSelection = selectedShas.some(sha => commitIndexMap.has(sha))
+    if (commits.length > 0 && (selectedShas.length === 0 || !hasValidSelection)) {
+      const nextSelected = [commits[0].sha]
+      selectedShasRef.current = nextSelected
+      selectionAnchorRef.current = commits[0].sha
+      setSelectedShas(nextSelected)
       setSelectionAnchor(commits[0].sha)
     }
-  }, [isOpen, commits, selectedShas.length])
+  }, [commitIndexMap, commits, isOpen, selectedShas])
 
   useEffect(() => {
     if (!isOpen) return
@@ -963,8 +1013,11 @@ export function GitHistoryViewer({
       const available = new Set(commits.map(commit => commit.sha))
       const nextSelected = (stored.selectedShas ?? []).filter(sha => available.has(sha))
       if (nextSelected.length > 0) {
+        selectedShasRef.current = nextSelected
         setSelectedShas(nextSelected)
-        setSelectionAnchor(stored.selectionAnchor && available.has(stored.selectionAnchor) ? stored.selectionAnchor : nextSelected[0])
+        const nextAnchor = stored.selectionAnchor && available.has(stored.selectionAnchor) ? stored.selectionAnchor : nextSelected[0]
+        selectionAnchorRef.current = nextAnchor
+        setSelectionAnchor(nextAnchor)
       }
       pendingScrollRef.current = {
         commit: stored.commitScrollTop ?? 0,
@@ -987,7 +1040,9 @@ export function GitHistoryViewer({
     if (!selectionInfo.head || !selectionInfo.base) {
       ++patchTokenRef.current
       ++fileContentTokenRef.current
+      filesRef.current = []
       setFiles([])
+      selectedFileRef.current = null
       setSelectedFile(null)
       setDiffPatch('')
       setSelectedFileContent(null)
@@ -996,7 +1051,9 @@ export function GitHistoryViewer({
     if (!selectionInfo.isContiguous) {
       ++patchTokenRef.current
       ++fileContentTokenRef.current
+      filesRef.current = []
       setFiles([])
+      selectedFileRef.current = null
       setSelectedFile(null)
       setDiffPatch('')
       setSelectedFileContent(null)
@@ -1009,19 +1066,25 @@ export function GitHistoryViewer({
     if (!isOpen) return
     if (!selectionInfo.isContiguous || !selectionInfo.head || !selectionInfo.base) return
     if (files.length === 0) {
+      selectedFileRef.current = null
       setSelectedFile(null)
       setDiffPatch('')
       return
     }
     setSelectedFile((prev) => {
       if (prev && files.some(file => file.filename === prev.filename)) {
+        selectedFileRef.current = prev
         return prev
       }
       const storedFile = selectionRef.current.selectedFile
       if (storedFile) {
         const match = files.find(file => file.filename === storedFile)
-        if (match) return match
+        if (match) {
+          selectedFileRef.current = match
+          return match
+        }
       }
+      selectedFileRef.current = files[0]
       return files[0]
     })
   }, [files, selectionInfo.isContiguous, selectionInfo.head, selectionInfo.base, isOpen])
@@ -1083,6 +1146,11 @@ export function GitHistoryViewer({
     }
   }, [diffOptionsOpen])
 
+  const isOpenRef = useRef(isOpen)
+  useEffect(() => {
+    isOpenRef.current = isOpen
+  }, [isOpen])
+
   // Debug API (only exposed in automated testing mode)
   useEffect(() => {
     if (!window.electronAPI?.debug?.autotest) return
@@ -1112,24 +1180,27 @@ export function GitHistoryViewer({
       }))
     }
     const api = {
-      isOpen: () => isOpen,
-      getCommitCount: () => commits.length,
-      getCommits: () => commits.map((commit) => ({ sha: commit.sha, summary: commit.summary })),
-      getSelectedShas: () => selectedShas,
-      getFiles: () => files.map(f => ({
+      isOpen: () => isOpenRef.current,
+      getCommitCount: () => commitsRef.current.length,
+      getCommits: () => commitsRef.current.map((commit) => ({ sha: commit.sha, summary: commit.summary })),
+      getSelectedShas: () => selectedShasRef.current,
+      getFiles: () => filesRef.current.map(f => ({
         filename: f.filename,
         status: f.status,
         isImage: f.isImage,
         isPdf: f.isPdf,
         isEpub: f.isEpub
       })),
-      getSelectedFile: () => selectedFile ? {
-        filename: selectedFile.filename,
-        status: selectedFile.status,
-        isImage: selectedFile.isImage,
-        isPdf: selectedFile.isPdf,
-        isEpub: selectedFile.isEpub
-      } : null,
+      getSelectedFile: () => {
+        const file = selectedFileRef.current
+        return file ? {
+          filename: file.filename,
+          status: file.status,
+          isImage: file.isImage,
+          isPdf: file.isPdf,
+          isEpub: file.isEpub
+        } : null
+      },
       getImagePreviewState: () => {
         if (!selectedFile?.isImage) return null
         return {
@@ -1152,7 +1223,10 @@ export function GitHistoryViewer({
       setSvgViewMode: (mode: SvgViewMode) => {
         setSvgViewMode(mode)
       },
-      isLoading: () => loading || filesLoading || diffLoading,
+      isLoading: () => {
+        const state = loadingStateRef.current
+        return state.loading || state.filesLoading || state.diffLoading
+      },
       getActiveCwd: () => activeCwdRef.current ?? null,
       getRepoState: () => ({
         selectedRepoRoot,
@@ -1160,7 +1234,7 @@ export function GitHistoryViewer({
         repoSearch,
         cachedRepoCount: cachedRepos?.length ?? 0
       }),
-      getVisibleRepoItems: () => visibleRepoItems.map((repo) => ({
+      getVisibleRepoItems: () => visibleRepoItemsRef.current.map((repo) => ({
         root: repo.root,
         label: repo.displayLabel,
         isSubmodule: repo.isSubmodule,
@@ -1200,15 +1274,31 @@ export function GitHistoryViewer({
         return true
       },
       selectCommitByIndex: (index: number) => {
-        if (index < 0 || index >= commits.length) return false
-        const commit = commits[index]
-        setSelectedShas([commit.sha])
+        const currentCommits = commitsRef.current
+        if (index < 0 || index >= currentCommits.length) return false
+        const commit = currentCommits[index]
+        const nextSelected = [commit.sha]
+        selectedShasRef.current = nextSelected
+        selectionAnchorRef.current = commit.sha
+        selectionRef.current = {
+          ...selectionRef.current,
+          selectedShas: nextSelected,
+          selectionAnchor: commit.sha
+        }
+        setSelectedShas(nextSelected)
         setSelectionAnchor(commit.sha)
         return true
       },
       selectFileByIndex: (index: number) => {
-        if (index < 0 || index >= files.length) return false
-        setSelectedFile(files[index])
+        const currentFiles = filesRef.current
+        if (index < 0 || index >= currentFiles.length) return false
+        const file = currentFiles[index]
+        selectedFileRef.current = file
+        selectionRef.current = {
+          ...selectionRef.current,
+          selectedFile: file.filename
+        }
+        setSelectedFile(file)
         return true
       },
       getDiffStyle: () => diffStyle,
@@ -1932,10 +2022,11 @@ export function GitHistoryViewer({
     actions: externalPanelActions,
     taskTitle
   }), [externalPanelActions, handleSelectSubpage, historyWorkingDirectory, t, taskTitle])
+  const superprojectRoot = historyResult?.superprojectRoot ?? null
   const displayedHistoryRoot = normalizeRepoRoot(historyResult?.cwd)
   const selectedHistoryRoot = normalizeRepoRoot(selectedRepoRoot || cachedParentCwd || historyResult?.cwd || cwd)
   const showSuperprojectHint = Boolean(
-    historyResult?.superprojectRoot &&
+    superprojectRoot &&
     !selectedRepoRoot &&
     displayedHistoryRoot &&
     displayedHistoryRoot === selectedHistoryRoot
@@ -1945,7 +2036,9 @@ export function GitHistoryViewer({
       {showSuperprojectHint && (
         <div
           className="git-history-superproject-hint"
-          onClick={() => switchRepo(historyResult.superprojectRoot!)}
+          onClick={() => {
+            if (superprojectRoot) switchRepo(superprojectRoot)
+          }}
         >
           <span>{t('gitHistory.repo.inSubmodule')}</span>
           <span style={{ color: 'var(--accent)', cursor: 'pointer' }}>{t('gitHistory.repo.viewParent')}</span>

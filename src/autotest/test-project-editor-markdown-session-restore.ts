@@ -10,7 +10,7 @@ const TARGET_HEADING_TOPIC = `${String.fromCharCode(21452)} Agent ${String.fromC
 const TARGET_HEADING = `4.2 Anthropic: ${TARGET_HEADING_TOPIC}`
 const TARGET_HEADING_SLUG = `42-anthropic-${String.fromCharCode(21452)}-agent-${String.fromCharCode(36328, 20250, 35805, 26550, 26500)}`
 const TARGET_MIN_LINE = 260
-const FALLBACK_TARGET_LINE = 80
+const FALLBACK_TARGET_LINE = 70
 
 function buildFallbackMarkdownContent(): string {
   const lines: string[] = [

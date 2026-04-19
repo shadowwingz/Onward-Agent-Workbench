@@ -10,6 +10,7 @@ import { platform, tmpdir } from 'os'
 import { readFile, stat, writeFile, mkdir, access, mkdtemp, rm } from 'fs/promises'
 import { constants } from 'fs'
 import { resolve, relative, sep, isAbsolute, dirname, delimiter, basename, join } from 'path'
+import { fileURLToPath } from 'url'
 import { ptyManager } from './pty-manager'
 import { gitRuntimeManager, type GitTaskKind, type GitTaskPriority } from './git-runtime-manager'
 import { MAX_IMAGE_FILE_SIZE, bufferToImageDataUrl, isSupportedImageFile } from './image-utils'
@@ -48,6 +49,12 @@ function normalizeRepoKey(cwd: string | null | undefined): string | undefined {
   return resolve(trimmed)
 }
 
+function normalizeExecCwd(cwd: string | URL | undefined): string | undefined {
+  if (typeof cwd === 'string') return cwd
+  if (cwd instanceof URL) return fileURLToPath(cwd)
+  return undefined
+}
+
 function normalizeGitPath(pathValue: string | null | undefined): string | null {
   if (!pathValue) return null
   return pathValue.replace(/\\/g, '/')
@@ -57,7 +64,7 @@ async function execAsync(command: string, options?: Parameters<typeof rawExecAsy
   return gitRuntimeManager.enqueueTask(
     {
       key: meta.dedupeKey,
-      repoKey: normalizeRepoKey(meta.repoKey ?? options?.cwd),
+      repoKey: normalizeRepoKey(meta.repoKey ?? normalizeExecCwd(options?.cwd)),
       priority: meta.priority || 'normal',
       kind: meta.kind || 'git',
       label: meta.label || command
@@ -76,7 +83,7 @@ async function execFileAsync(
   return gitRuntimeManager.enqueueTask(
     {
       key: meta.dedupeKey,
-      repoKey: normalizeRepoKey(meta.repoKey ?? options?.cwd),
+      repoKey: normalizeRepoKey(meta.repoKey ?? normalizeExecCwd(options?.cwd)),
       priority: meta.priority || 'normal',
       kind: meta.kind || 'git',
       label: meta.label || label
@@ -1652,8 +1659,7 @@ async function getSingleRepoDiff(
   try {
     const result = await task
     return {
-      files: cloneGitFileStatuses(result.files),
-      error: result.error
+      files: cloneGitFileStatuses(result.files)
     }
   } finally {
     singleRepoDiffInFlight.delete(inFlightKey)

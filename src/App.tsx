@@ -1345,6 +1345,10 @@ function AppContent({
     if (editorSubpageRestoredRef.current) return
     if (!isLoaded || !activeTab) return
     if (activeTab.activeSubpage !== 'editor') return
+    if (window.electronAPI?.debug?.autotest || window.electronAPI?.debug?.profile) {
+      editorSubpageRestoredRef.current = true
+      return
+    }
     // When the debug auto-open path has already taken over, skip restoration
     // so it cannot clobber the injected cwd (e.g. ONWARD_AUTOTEST_CWD) with a
     // stale or null terminal.lastCwd value.

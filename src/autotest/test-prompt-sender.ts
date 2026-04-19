@@ -271,13 +271,15 @@ export async function testPromptSender(ctx: AutotestContext): Promise<TestResult
     }
   }
 
-  // Scope new layout assertions to the visible notebook so they are not
-  // skewed by hidden tabs that remain mounted in multi-tab scenarios.
-  const visibleNotebookSelector = '.prompt-notebook:not(.prompt-notebook-hidden)'
+  const getLayoutNotebook = () => {
+    const notebooks = Array.from(document.querySelectorAll<HTMLElement>('.prompt-notebook'))
+    return notebooks.find(notebook => !notebook.classList.contains('prompt-notebook-hidden')) ?? notebooks[0] ?? null
+  }
 
   // PS-31: Terminals grid no longer has the legacy 140px hard cap
   if (!cancelled()) {
-    const grid = document.querySelector(`${visibleNotebookSelector} .prompt-sender-terminals`) as HTMLElement | null
+    const notebook = getLayoutNotebook()
+    const grid = notebook?.querySelector('.prompt-sender-terminals') as HTMLElement | null
     if (grid) {
       const style = window.getComputedStyle(grid)
       const maxHeight = style.maxHeight
@@ -288,14 +290,14 @@ export async function testPromptSender(ctx: AutotestContext): Promise<TestResult
         overflowY
       })
     } else {
-      results.push({ name: 'PS-31-terminals-no-hard-cap', ok: false, detail: { reason: 'grid element not found' } })
+      _assert('PS-31-terminals-no-hard-cap', false, { reason: 'grid element not found' })
     }
   }
 
   // PS-32: Sender container enforces the 50% ceiling of the notebook
   if (!cancelled()) {
-    const sender = document.querySelector(`${visibleNotebookSelector} .prompt-sender`) as HTMLElement | null
-    const notebook = document.querySelector(visibleNotebookSelector) as HTMLElement | null
+    const notebook = getLayoutNotebook()
+    const sender = notebook?.querySelector('.prompt-sender') as HTMLElement | null
     if (sender && notebook) {
       const senderHeight = sender.getBoundingClientRect().height
       const notebookHeight = notebook.getBoundingClientRect().height
@@ -320,13 +322,14 @@ export async function testPromptSender(ctx: AutotestContext): Promise<TestResult
         maxHeightPx
       })
     } else {
-      results.push({ name: 'PS-32-sender-respects-50-percent-cap', ok: false, detail: { reason: 'sender or notebook not found' } })
+      _assert('PS-32-sender-respects-50-percent-cap', false, { reason: 'sender or notebook not found' })
     }
   }
 
   // PS-33: Editor is compressible (flex-shrink: 1) with a 180px floor
   if (!cancelled()) {
-    const editor = document.querySelector(`${visibleNotebookSelector} .prompt-editor`) as HTMLElement | null
+    const notebook = getLayoutNotebook()
+    const editor = notebook?.querySelector('.prompt-editor') as HTMLElement | null
     if (editor) {
       const style = window.getComputedStyle(editor)
       const minHeight = style.minHeight
@@ -339,7 +342,7 @@ export async function testPromptSender(ctx: AutotestContext): Promise<TestResult
         flexShrink
       })
     } else {
-      results.push({ name: 'PS-33-editor-compressible-with-floor', ok: false, detail: { reason: 'editor element not found' } })
+      _assert('PS-33-editor-compressible-with-floor', false, { reason: 'editor element not found' })
     }
   }
 

@@ -303,6 +303,13 @@ export function OutlinePanel({
 
   useEffect(() => {
     if (initialScrollAppliedRef.current) return
+    if (
+      typeof initialScrollTargetRef.current !== 'number' &&
+      typeof initialScrollTop === 'number'
+    ) {
+      initialScrollTargetRef.current = initialScrollTop
+      suppressActiveRevealUntilRef.current = Number.POSITIVE_INFINITY
+    }
     const snapshot = initialScrollTargetRef.current
     if (typeof snapshot !== 'number') return
     if (!treeRef.current || symbols.length === 0) return
@@ -346,11 +353,7 @@ export function OutlinePanel({
         cancelAnimationFrame(frameId)
       }
     }
-    // Depend on filePath instead of the churn-prone initialScrollTop prop; the
-    // snapshot inside initialScrollTargetRef is refreshed on filePath change
-    // by the reset effect above.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filePath, onScrollCapture, symbols.length])
+  }, [filePath, initialScrollTop, onScrollCapture, symbols.length])
 
   const scrollPreviewToHeading = useCallback((item: OutlineItem) => {
     const container = previewRef?.current

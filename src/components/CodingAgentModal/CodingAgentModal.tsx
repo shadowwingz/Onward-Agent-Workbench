@@ -6,6 +6,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { CodingAgentConfigInput, CodingAgentHistoryEntry, EnvVarEntry } from '../../types/electron'
 import { useI18n } from '../../i18n/useI18n'
+import type { TranslationKey, TranslationParams } from '../../i18n/core'
 import './CodingAgentModal.css'
 
 interface CodingAgentModalProps {
@@ -26,7 +27,7 @@ const MASKED_PLACEHOLDER = '••••••'
 
 function formatRelativeTime(
   timestamp: number,
-  t: (key: string, params?: Record<string, string | number>) => string
+  t: (key: TranslationKey, params?: TranslationParams) => string
 ): string {
   const diff = Date.now() - timestamp
   const minutes = Math.floor(diff / 60000)

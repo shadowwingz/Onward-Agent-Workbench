@@ -607,7 +607,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     const appInfo = getAppInfo()
     const result = storage.createSubmission(payload, {
       locale: payload?.locale === 'zh-CN' ? 'zh-CN' : 'en',
-      platform: process.platform,
+      platform: appInfo.platform,
       productName: appInfo.productName,
       version: appInfo.version,
       buildChannel: appInfo.buildChannel,
@@ -1189,15 +1189,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
 
   // Save file content to workspace
   ipcMain.handle('git:save-file-content', async (_, cwd: string, filename: string, content: string) => {
-    const result = await saveGitFileContent(cwd, filename, content)
-    if (result.success && fileWatchManager) {
-      const repoRoot = await resolveRepoRoot(cwd)
-      const fullPath = resolveInRoot(resolve(repoRoot), filename)
-      if (fullPath) {
-        fileWatchManager.suppressNext(fullPath)
-      }
-    }
-    return result
+    return await saveGitFileContent(cwd, filename, content)
   })
 
   ipcMain.handle('git:stage-file', async (_, cwd: string, filename: string, repoRoot?: string) => {

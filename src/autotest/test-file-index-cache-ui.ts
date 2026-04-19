@@ -29,6 +29,10 @@ export async function testFileIndexCacheUi(ctx: AutotestContext): Promise<TestRe
   }
 
   const getApi = () => window.__onwardProjectEditorDebug
+  const getFileIndexStats = () => {
+    const stats = getApi()?.getFileIndexStats?.()
+    return stats ?? { entries: [], totalBuilds: Number.NaN }
+  }
 
   // Recover the editor root if an earlier phase (cd + terminal-activity poll)
   // momentarily dropped the cwd prop to null. Without this the rest of the
@@ -104,7 +108,7 @@ export async function testFileIndexCacheUi(ctx: AutotestContext): Promise<TestRe
     )
     record('FIC-02-first-index-ready', readyFirst)
 
-    const buildsAfterFirstOpen = getApi()!.getFileIndexStats().totalBuilds
+    const buildsAfterFirstOpen = getFileIndexStats().totalBuilds
     record(
       'FIC-03-initial-build-counted',
       buildsAfterFirstOpen === buildsBeforeFirstOpen + 1,
@@ -140,7 +144,7 @@ export async function testFileIndexCacheUi(ctx: AutotestContext): Promise<TestRe
       getApi()!.closeGlobalFilenameSearch!()
       await sleep(80)
     }
-    const buildsAfterRepeatedOpens = getApi()!.getFileIndexStats().totalBuilds
+    const buildsAfterRepeatedOpens = getFileIndexStats().totalBuilds
     record(
       'FIC-06-repeated-opens-reuse-cache',
       buildsAfterRepeatedOpens === buildsAfterFirstOpen,
@@ -170,7 +174,7 @@ export async function testFileIndexCacheUi(ctx: AutotestContext): Promise<TestRe
       getApi()!.closeGlobalFilenameSearch!()
     }
 
-    const buildsAfterCreate = getApi()!.getFileIndexStats().totalBuilds
+    const buildsAfterCreate = getFileIndexStats().totalBuilds
     record(
       'FIC-09-create-did-not-rebuild',
       buildsAfterCreate === buildsAfterFirstOpen,
@@ -225,7 +229,7 @@ export async function testFileIndexCacheUi(ctx: AutotestContext): Promise<TestRe
       getApi()!.closeGlobalFilenameSearch!()
     }
 
-    const buildsAfterAllMutations = getApi()!.getFileIndexStats().totalBuilds
+    const buildsAfterAllMutations = getFileIndexStats().totalBuilds
     record(
       'FIC-15-mutations-did-not-rebuild',
       buildsAfterAllMutations === buildsAfterFirstOpen,
@@ -271,7 +275,7 @@ export async function testFileIndexCacheUi(ctx: AutotestContext): Promise<TestRe
       getApi()!.closeGlobalFilenameSearch!()
     }
 
-    const buildsAfterNested = getApi()!.getFileIndexStats().totalBuilds
+    const buildsAfterNested = getFileIndexStats().totalBuilds
     record(
       'FIC-18-nested-did-not-rebuild',
       buildsAfterNested === buildsAfterFirstOpen,
@@ -307,10 +311,10 @@ export async function testFileIndexCacheUi(ctx: AutotestContext): Promise<TestRe
     }
 
     // === 7. forceRefreshFileIndex — validates the manual "Refresh" recovery path ===
-    const buildsBeforeRefresh = getApi()!.getFileIndexStats().totalBuilds
+    const buildsBeforeRefresh = getFileIndexStats().totalBuilds
     const refreshed = (await getApi()?.forceRefreshFileIndex?.()) ?? false
     record('FIC-19-force-refresh-success', refreshed)
-    const buildsAfterRefresh = getApi()!.getFileIndexStats().totalBuilds
+    const buildsAfterRefresh = getFileIndexStats().totalBuilds
     record(
       'FIC-20-force-refresh-triggered-rebuild',
       buildsAfterRefresh === buildsBeforeRefresh + 1,

@@ -300,15 +300,19 @@ export async function testGitNestedSubmodules(ctx: AutotestContext): Promise<Tes
       if (items.length === 0) return false
       return items.every((item) => {
         const badge = item.querySelector('.git-diff-repo-badge') as HTMLElement | null
-        return normalizePath(badge?.title) === level5Root
+        const section = item.closest('.git-diff-repo-section')
+        const header = section?.querySelector('.git-diff-repo-header') as HTMLElement | null
+        return normalizePath(badge?.title ?? header?.title) === level5Root
       })
     }, QUICK_TIMEOUT_MS)
     const visibleFiles = Array.from(document.querySelectorAll('.git-diff-file-item')).map((item) => {
       const badge = item.querySelector('.git-diff-repo-badge') as HTMLElement | null
+      const section = item.closest('.git-diff-repo-section')
+      const header = section?.querySelector('.git-diff-repo-header') as HTMLElement | null
       const fileName = item.querySelector('.git-diff-file-name') as HTMLElement | null
       return {
         filename: fileName?.textContent?.trim() ?? '',
-        repoRoot: normalizePath(badge?.title)
+        repoRoot: normalizePath(badge?.title ?? header?.title)
       }
     })
     const allLevel5 = visibleFiles.length > 0 && visibleFiles.every((file) => file.repoRoot === level5Root)

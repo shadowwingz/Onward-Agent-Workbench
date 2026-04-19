@@ -32,7 +32,7 @@ export async function testChangeLog(ctx: AutotestContext): Promise<TestResult[]>
   const waitUntilLoaded = async () => {
     return await waitFor('change-log-loaded', () => {
       const api = getApi()
-      return Boolean(api) && api.isOpen() && !api.isLoading()
+      return Boolean(api?.isOpen() && !api.isLoading())
     }, 4000, 50)
   }
 

@@ -150,8 +150,8 @@ marked.use({
           displayMode: false
         }
       },
-      renderer(token: KatexToken) {
-        return renderKatex(token, false)
+      renderer(token) {
+        return renderKatex(token as KatexToken, false)
       }
     },
     {
@@ -171,8 +171,8 @@ marked.use({
           displayMode: true
         }
       },
-      renderer(token: KatexToken) {
-        return renderKatex(token, true)
+      renderer(token) {
+        return renderKatex(token as KatexToken, true)
       }
     },
     {
@@ -192,8 +192,8 @@ marked.use({
           displayMode: true
         }
       },
-      renderer(token: KatexToken) {
-        return renderKatex(token, true)
+      renderer(token) {
+        return renderKatex(token as KatexToken, true)
       }
     }
   ]

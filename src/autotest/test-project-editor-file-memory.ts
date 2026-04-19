@@ -98,7 +98,8 @@ export async function testProjectEditorFileMemory(ctx: AutotestContext): Promise
 
   const runId = Date.now()
   const anchorFile = `onward-autotest-file-memory-anchor-${runId}.md`
-  const fillerFiles = Array.from({ length: 5 }, (_, index) => `onward-autotest-file-memory-filler-${runId}-${index + 1}.txt`)
+  const recentEvictionFillerCount = 12
+  const fillerFiles = Array.from({ length: recentEvictionFillerCount }, (_, index) => `onward-autotest-file-memory-filler-${runId}-${index + 1}.txt`)
   const browserFiles = Array.from({ length: 32 }, (_, index) => `onward-autotest-file-memory-browser-${runId}-${index + 1}.txt`)
   const anchorContent = buildMarkdownContent('anchor', 30, 12)
   const fillerContent = buildTextContent('filler', 80)

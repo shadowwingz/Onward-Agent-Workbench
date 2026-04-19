@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { BrowserWindow, dialog, shell } from 'electron'
+import { BrowserWindow, dialog, shell, type MessageBoxOptions } from 'electron'
 import { tMain } from './localization'
 
 const ALLOWED_EXTERNAL_PROTOCOLS = new Set(['http:', 'https:'])
@@ -53,7 +53,7 @@ export async function openExternalUrlWithConfirm(
   }
 
   try {
-    const { response } = await dialog.showMessageBox(parentWindow ?? undefined, {
+    const options: MessageBoxOptions = {
       type: 'question',
       buttons: [tMain('dialog.externalLink.open'), tMain('dialog.externalLink.cancel')],
       defaultId: 1,
@@ -62,7 +62,10 @@ export async function openExternalUrlWithConfirm(
       title: tMain('dialog.externalLink.title'),
       message: tMain('dialog.externalLink.message'),
       detail: rawUrl
-    })
+    }
+    const { response } = parentWindow
+      ? await dialog.showMessageBox(parentWindow, options)
+      : await dialog.showMessageBox(options)
 
     if (response !== 0) {
       return {

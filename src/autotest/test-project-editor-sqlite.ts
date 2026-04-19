@@ -512,18 +512,20 @@ export async function testProjectEditorSqlite(ctx: AutotestContext): Promise<Tes
     )
     if (!folderMenuReady || cancelled()) return results
 
-    const testDirItem = findTreeItemByLabel('test')
-    if (testDirItem) {
-      dispatchClick(testDirItem)
-    }
-    await waitFor(
-      'sqlite-tree-fixtures-dir-visible',
-      () => Boolean(findTreeItemByLabel('sqlite-fixtures')),
-      5000
-    )
-    const fixturesDirItem = findTreeItemByLabel('sqlite-fixtures')
-    if (fixturesDirItem) {
-      dispatchClick(fixturesDirItem)
+    if (!findTreeItemByLabel('stress-large.db')) {
+      const testDirItem = findTreeItemByLabel('test')
+      if (testDirItem && !findTreeItemByLabel('sqlite-fixtures')) {
+        dispatchClick(testDirItem)
+      }
+      await waitFor(
+        'sqlite-tree-fixtures-dir-visible',
+        () => Boolean(findTreeItemByLabel('sqlite-fixtures')),
+        5000
+      )
+      const fixturesDirItem = findTreeItemByLabel('sqlite-fixtures')
+      if (fixturesDirItem && !findTreeItemByLabel('stress-large.db')) {
+        dispatchClick(fixturesDirItem)
+      }
     }
     const stressFileInTreeReady = await waitFor(
       'sqlite-tree-stress-file-visible',
