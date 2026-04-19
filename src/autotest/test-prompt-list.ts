@@ -180,6 +180,33 @@ export async function testPromptList(ctx: AutotestContext): Promise<TestResult[]
   ), filterResetState)
 
   if (!cancelled()) {
+    const promptElement = document.querySelector(`[data-prompt-id="${createdPrompt.id}"]`) as HTMLElement | null
+    promptElement?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true, view: window }))
+    const saveAsNewLabelReady = await waitFor('pl-save-as-new-label', () => {
+      const labels = Array.from(document.querySelectorAll(
+        '.prompt-notebook:not(.prompt-notebook-hidden) .prompt-editor[data-prompt-editing="true"] .prompt-editor-btn'
+      )).map((button) => button.textContent?.trim() ?? '')
+      return (
+        (labels.includes('Add') || labels.includes('\u6dfb\u52a0')) &&
+        !labels.includes('Save as new item') &&
+        !labels.includes('\u4fdd\u5b58\u4e3a\u65b0\u6761\u76ee')
+      )
+    }, 3000, 80)
+    const editButtonLabels = Array.from(document.querySelectorAll(
+      '.prompt-notebook:not(.prompt-notebook-hidden) .prompt-editor[data-prompt-editing="true"] .prompt-editor-btn'
+    )).map((button) => button.textContent?.trim() ?? '')
+    record('PL-11-save-as-new-button-label', Boolean(promptElement && saveAsNewLabelReady), {
+      buttonLabels: editButtonLabels
+    })
+    const cancelButton = Array.from(document.querySelectorAll(
+      '.prompt-notebook:not(.prompt-notebook-hidden) .prompt-editor[data-prompt-editing="true"] .prompt-editor-btn'
+    )).find((button) => {
+      const label = button.textContent?.trim()
+      return label === 'Cancel' || label === '\u53d6\u6d88'
+    }) as HTMLButtonElement | undefined
+    cancelButton?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }))
+    await sleep(120)
+
     const selectPrompt = notebookApi()!.selectPrompt
     if (cards.length > 1 && selectPrompt) {
       senderApi()!.deselectAllTerminals()
@@ -197,7 +224,7 @@ export async function testPromptList(ctx: AutotestContext): Promise<TestResult[]
         return Boolean(prompt && prompt.taskNumbers.length >= 2)
       }, 5000, 80)
       const updatedPrompt = notebookApi()!.getPrompts().find(prompt => prompt.id === createdPrompt.id) ?? null
-      record('PL-11-multi-task-history', Boolean(clickedSecondSend && secondIdle && multiTaskReady), {
+      record('PL-12-multi-task-history', Boolean(clickedSecondSend && secondIdle && multiTaskReady), {
         clickedSecondSend,
         secondIdle,
         multiTaskReady,
@@ -205,7 +232,7 @@ export async function testPromptList(ctx: AutotestContext): Promise<TestResult[]
         secondTaskTitle: cards[1].title
       })
     } else {
-      record('PL-11-multi-task-history', true, {
+      record('PL-12-multi-task-history', true, {
         reason: 'single terminal layout or prompt selection debug API unavailable'
       })
     }
