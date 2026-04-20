@@ -49,7 +49,43 @@ git log origin/{BRANCH}..HEAD --oneline
 # If no commits, inform the user — they may only want to create a tag on HEAD.
 ```
 
-### Phase 2: Determine Tag
+### Phase 2: Full Regression Test Gate (Daily channel only)
+
+**Applies to the `daily` channel only.** Skip this phase entirely when `CHANNEL=dev`.
+
+Before touching tags, commits, or CI, ask the user whether to run the full regression pass. The user must reply **explicitly** with one of the two literal answers — **"进行"** (proceed) or **"不进行"** (skip). Do not accept ambiguous, paraphrased, or implicit answers such as "yes", "ok", "好的", "算了", a thumbs-up, or silence. If the reply is anything else, ask again until one of the two literal answers is given.
+
+Prompt to show the user verbatim:
+
+> This is a **daily** build, which will be auto-delivered to all daily-channel users.
+> Do you want to run the full regression test first?
+>
+> - Reply **"进行"** to run the full regression suite in `test/full-regression-checklist.md`. The daily deploy will only continue after every script passes.
+> - Reply **"不进行"** to skip the regression gate and continue directly to Phase 3.
+
+**If the user replies "进行":**
+
+1. Execute the full macOS regression pass exactly as documented in `test/full-regression-checklist.md` — follow the **Build And Static Checks**, **Startup Smoke Test**, and **Full macOS Regression Command** sections in order. Do not trim, substitute, or reorder scripts.
+2. Use the aggregate log path defined by the checklist (`FULL_LOG=/tmp/onward-full-regression-<timestamp>.log`) and follow the per-script PASS/FAIL reporting pattern from the checklist.
+3. The gate is considered **passed only when** every script reports PASS and the summary block matches the expected result from the checklist:
+   ```text
+   Passed: 39
+   Failed: 0
+   Skipped: 1
+   ```
+   (The single skipped script is the Windows-only auto-update E2E, which must be run separately on Windows.)
+4. If any script fails, **stop immediately**. Report the failed script names, the aggregate log path, and the individual per-script logs to the user. Do **not** advance to Phase 3 until either:
+   - The user fixes the failures, you rerun the gate, and every script passes; or
+   - The user explicitly instructs you to skip the remaining gate and continue.
+5. Once the gate passes, report the summary to the user and continue to Phase 3.
+
+**If the user replies "不进行":**
+
+Acknowledge the decision, note in the session that the regression gate was skipped for this release, and continue to Phase 3 without running any regression scripts.
+
+**Do not assume a default.** If the user has not yet answered with one of the two literal replies, wait — do not advance to Phase 3.
+
+### Phase 3: Determine Tag
 
 ```bash
 # Find the latest daily tag to detect the current version prefix
@@ -70,7 +106,7 @@ Present the resolved tag to the user for confirmation before proceeding:
 > Commits to push: 12
 > Proceed?
 
-### Phase 3: Generate Change Log Draft
+### Phase 4: Generate Change Log Draft
 
 Before any push, tag, or release action, generate the Change Log draft for the resolved tag:
 
@@ -103,7 +139,7 @@ Rules for this pause:
 - Do not push commits, create the tag, or publish anything before the user confirms.
 - If the user requests edits, apply them first and re-show the final draft state.
 
-### Phase 4: Commit Approved Change Log and Push
+### Phase 5: Commit Approved Change Log and Push
 
 After the user confirms the draft, ensure the Change Log files are included in git history before tagging:
 
@@ -125,7 +161,7 @@ Then push local commits:
 git push origin master
 ```
 
-### Phase 5: Create and Push Tag
+### Phase 6: Create and Push Tag
 
 ```bash
 # Create and push the tag
@@ -133,7 +169,7 @@ git tag {TAG}
 git push origin {TAG}
 ```
 
-### Phase 6: Monitor CI Build
+### Phase 7: Monitor CI Build
 
 ```bash
 # Verify the workflow was triggered
@@ -150,7 +186,7 @@ If the build fails, show the failing job logs:
 gh run view {RUN_ID} --log-failed
 ```
 
-### Phase 7: Verify Release Pipeline
+### Phase 8: Verify Release Pipeline
 
 After the build succeeds, verify all outputs:
 
@@ -178,7 +214,7 @@ Verify the following conditions:
 | windows manifest version | Matches the tag version |
 | Artifact download URL | HTTP 302 (redirect to CDN) |
 
-### Phase 8: Report
+### Phase 9: Report
 
 Present a summary table:
 
@@ -209,8 +245,10 @@ The `package.json` version field (`2.0.1`) is only used for development builds a
 
 - **Not on master**: Stop immediately. Do not push or tag from other branches.
 - **Dirty working tree**: Warn the user. They may want to commit first.
+- **Regression gate unanswered (Daily)**: Stop. Do not advance to Phase 3 until the user replies with the literal "进行" or "不进行".
+- **Regression gate failure (Daily)**: Stop before Phase 3. Surface the failing script names, the aggregate log path, and the relevant per-script logs under `/tmp`. Only proceed after a clean rerun or an explicit user override.
 - **Change Log draft missing**: Stop. Generate `resources/changelog/**` first.
-- **Change Log not yet confirmed**: Stop. Wait for explicit user approval before Phase 4.
+- **Change Log not yet confirmed**: Stop. Wait for explicit user approval before Phase 5.
 - **Push fails**: Check network and authentication. Show the error.
 - **Tag already exists**: Increment the sequence number or ask the user.
 - **CI build fails**: Show failed job logs. Do not proceed to verification.
