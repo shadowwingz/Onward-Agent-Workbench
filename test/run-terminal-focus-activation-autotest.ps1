@@ -91,8 +91,8 @@ if ($content -match "\[AutoTest\] FAIL") {
   exit 1
 }
 
-if ($content -notmatch "TFA-08-window-focus-restores-terminal-when-pointer-is-stale") {
-  Write-Host "Missing TFA-08 result; the test may not have executed correctly" -ForegroundColor Yellow
+if ($content -notmatch "TFA-09-document-visible-recovers-visible-terminal-renderer") {
+  Write-Host "Missing TFA-09 result; the test may not have executed correctly" -ForegroundColor Yellow
   Get-Content $LogFile -Tail 40
   exit 1
 }

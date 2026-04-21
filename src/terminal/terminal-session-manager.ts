@@ -7,12 +7,21 @@ import { Terminal as XTerm } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { SearchAddon } from '@xterm/addon-search'
-import { WebglAddon } from '@xterm/addon-webgl'
 import { getTheme, ThemeName } from '../themes/terminal-themes'
 import type { TerminalStyleConfig } from '../types/settings.d.ts'
 import type { TerminalBufferOptions, TerminalBufferResult } from '../types/electron.d.ts'
 import { requestOpenExternalHttpLink } from '../utils/externalLink'
 import { perfMonitor } from '../utils/perf-monitor'
+import {
+  TerminalRendererLifecycle,
+  createTerminalRendererPolicy,
+  type TerminalRendererLifecycleReason,
+  type TerminalRendererMode,
+  type TerminalRendererPolicy,
+  type TerminalRendererSurfaceEvent
+} from './terminal-renderer-lifecycle'
+
+export type { TerminalRendererSurfaceEvent } from './terminal-renderer-lifecycle'
 
 export type TerminalSessionStatus = 'idle' | 'initializing' | 'ready' | 'error' | 'disposed'
 
@@ -72,6 +81,13 @@ export interface TerminalSessionDebugState {
   status: TerminalSessionStatus
   open: boolean
   visible: boolean
+  webglActive: boolean
+  rendererMode: TerminalRendererMode
+  rendererWebglAvailable: boolean
+  rendererWebglFailureCount: number
+  rendererWebglDisabledUntil: number | null
+  rendererLastLifecycleReason: TerminalRendererLifecycleReason | null
+  rendererLastSurfaceEvent: TerminalRendererSurfaceEvent | null
   pendingDataChunks: number
   pendingDataBytes: number
 }
@@ -89,7 +105,7 @@ interface TerminalSession {
   lastRows: number
   lastFitWidth: number
   lastFitHeight: number
-  webglAddon?: WebglAddon
+  renderer: TerminalRendererLifecycle
   lastOptions: TerminalSessionOptions | null
   pendingViewportRestore: TerminalViewportRestoreState | null
   pendingRestoreAnimationFrame: number | null
@@ -154,6 +170,7 @@ function buildTheme(options: TerminalSessionOptions) {
 
 export class TerminalSessionManager {
   private sessions: Map<string, TerminalSession> = new Map()
+  private readonly rendererPolicy: TerminalRendererPolicy = createTerminalRendererPolicy(window.electronAPI.platform)
   private bufferRequestUnsubscribe: (() => void) | null = null
   // Centralized IPC listeners: single global listener dispatches by terminal ID via Map lookup
   private globalDataUnsubscribe: (() => void) | null = null
@@ -165,6 +182,9 @@ export class TerminalSessionManager {
   private visibleFlushTimeoutId: number | null = null
   private visibleFlushAnimationFrameId: number | null = null
   private activeInteractiveTerminalId: string | null = null
+  private surfaceRestoreTimeoutId: number | null = null
+  private surfaceRestoreAnimationFrameId: number | null = null
+  private rendererRecoveryCount = 0
 
   constructor() {
     this.registerBufferRequestListener()
@@ -602,14 +622,34 @@ export class TerminalSessionManager {
   getSessionDebugState(id: string): TerminalSessionDebugState | null {
     const session = this.sessions.get(id)
     if (!session) return null
+    const renderer = session.renderer.getSnapshot()
     return {
       terminalId: id,
       status: session.status,
       open: session.open,
       visible: session.visible,
+      webglActive: renderer.webglActive,
+      rendererMode: renderer.mode,
+      rendererWebglAvailable: renderer.webglAvailable,
+      rendererWebglFailureCount: renderer.webglFailureCount,
+      rendererWebglDisabledUntil: renderer.webglDisabledUntil,
+      rendererLastLifecycleReason: renderer.lastLifecycleReason,
+      rendererLastSurfaceEvent: renderer.lastSurfaceEvent,
       pendingDataChunks: session.pendingData.length,
       pendingDataBytes: session.pendingDataBytes
     }
+  }
+
+  getRendererRecoveryCount(): number {
+    return this.rendererRecoveryCount
+  }
+
+  simulateRendererSurfaceLossForAutotest(id: string): boolean {
+    const session = this.sessions.get(id)
+    if (!session?.open || session.status !== 'ready') return false
+
+    session.renderer.deactivate('manual-debug')
+    return true
   }
 
   scrollToTop(id: string): boolean {
@@ -730,6 +770,12 @@ export class TerminalSessionManager {
       lastRows: DEFAULT_ROWS,
       lastFitWidth: 0,
       lastFitHeight: 0,
+      renderer: new TerminalRendererLifecycle({
+        terminalId: id,
+        terminal,
+        platform: window.electronAPI.platform,
+        onContextLoss: () => this.scheduleVisibleRendererSurfaceRestore('webgl-context-loss')
+      }),
       lastOptions: options,
       pendingViewportRestore: null,
       pendingRestoreAnimationFrame: null,
@@ -807,11 +853,11 @@ export class TerminalSessionManager {
    * Toggle visibility for a terminal session.
    *
    * When a terminal becomes hidden (e.g., user switches to another tab),
-   * incoming PTY data is buffered instead of written to xterm.js, and the
-   * WebGL context is released to free GPU resources.
+   * incoming PTY data is buffered instead of written to xterm.js, and GPU
+   * renderer ownership is released through the renderer lifecycle.
    *
    * When it becomes visible again, buffered data is flushed to xterm.js
-   * and the WebGL context is re-created.
+   * and renderer ownership is restored according to the platform policy.
    */
   setVisibility(id: string, visible: boolean): void {
     const session = this.sessions.get(id)
@@ -827,17 +873,13 @@ export class TerminalSessionManager {
     if (visible) {
       // Flush buffered data that accumulated while hidden
       this.flushPendingData(session)
-      // Only touch WebGL/fit for fully initialized terminals
-      if (session.open && session.status === 'ready') {
-        this.ensureWebglAddon(session)
+      if (session.open) {
+        this.applyRendererLifecycle(session, 'visible')
         this.fit(id)
       }
     } else {
-      // Release WebGL context to free GPU resources for visible terminals.
-      // Only release if the terminal is fully open — avoid interfering with
-      // terminals that are still initializing.
       if (session.open) {
-        this.releaseWebglAddon(session)
+        this.applyRendererLifecycle(session, 'hidden')
       }
     }
   }
@@ -899,35 +941,18 @@ export class TerminalSessionManager {
     return chunks.length === 1 ? chunks[0] : chunks.join('')
   }
 
-  private ensureWebglAddon(session: TerminalSession): void {
-    if (session.webglAddon || !session.open) return
-    try {
-      const webglAddon = new WebglAddon()
-      webglAddon.onContextLoss(() => {
-        console.warn(`[TerminalSession ${session.id}] WebGL context lost, attempting recovery`)
-        webglAddon.dispose()
-        session.webglAddon = undefined
-        perfMonitor.decrementWebglContextCount()
-        // Delay re-creation so xterm.js finishes its internal renderer fallback
-        setTimeout(() => {
-          if (session.status !== 'disposed' && session.visible && session.open) {
-            this.ensureWebglAddon(session)
-          }
-        }, 100)
-      })
-      session.terminal.loadAddon(webglAddon)
-      session.webglAddon = webglAddon
-      perfMonitor.incrementWebglContextCount()
-    } catch {
-      // Canvas fallback is fine
-    }
-  }
+  private applyRendererLifecycle(
+    session: TerminalSession,
+    reason: TerminalRendererLifecycleReason
+  ): void {
+    if (!session.open || session.status === 'disposed') return
 
-  private releaseWebglAddon(session: TerminalSession): void {
-    if (!session.webglAddon) return
-    session.webglAddon.dispose()
-    session.webglAddon = undefined
-    perfMonitor.decrementWebglContextCount()
+    if (session.visible) {
+      session.renderer.activate(reason)
+      return
+    }
+
+    session.renderer.deactivate(reason)
   }
 
   attach(id: string, container: HTMLDivElement, options: TerminalSessionOptions): void {
@@ -937,33 +962,14 @@ export class TerminalSessionManager {
     if (!session.open) {
       session.terminal.open(container)
       session.open = true
-
-      try {
-        const webglAddon = new WebglAddon()
-        webglAddon.onContextLoss(() => {
-          console.warn(`[TerminalSession ${session.id}] WebGL context lost during attach, attempting recovery`)
-          webglAddon.dispose()
-          session.webglAddon = undefined
-          perfMonitor.decrementWebglContextCount()
-          // Delay re-creation so xterm.js finishes its internal renderer fallback
-          setTimeout(() => {
-            if (session.status !== 'disposed' && session.visible && session.open) {
-              this.ensureWebglAddon(session)
-            }
-          }, 100)
-        })
-        session.terminal.loadAddon(webglAddon)
-        session.webglAddon = webglAddon
-        perfMonitor.incrementWebglContextCount()
-      } catch (e) {
-        console.warn('WebGL addon failed to load, using canvas renderer')
-      }
+      this.applyRendererLifecycle(session, 'attach')
     } else if (session.terminal.element && session.terminal.element.parentElement !== container) {
       this.captureViewportIntent(session, 'attach')
       while (container.firstChild) {
         container.removeChild(container.firstChild)
       }
       container.appendChild(session.terminal.element)
+      this.applyRendererLifecycle(session, 'attach')
     }
 
     this.fit(id)
@@ -1041,6 +1047,85 @@ export class TerminalSessionManager {
     this.detach(id)
     this.attach(id, container, options)
     return true
+  }
+
+  notifyHostSurfaceEvent(reason: TerminalRendererSurfaceEvent): void {
+    this.scheduleVisibleRendererSurfaceRestore(reason)
+  }
+
+  scheduleVisibleRendererSurfaceRestore(reason: TerminalRendererSurfaceEvent): void {
+    if (this.surfaceRestoreTimeoutId !== null) {
+      window.clearTimeout(this.surfaceRestoreTimeoutId)
+    }
+    this.surfaceRestoreTimeoutId = window.setTimeout(() => {
+      this.surfaceRestoreTimeoutId = null
+      this.restoreVisibleRendererSurfaces(reason)
+    }, this.rendererPolicy.surfaceResumeDebounceMs)
+  }
+
+  restoreVisibleRendererSurfaces(reason: TerminalRendererSurfaceEvent): number {
+    const restoredSessionIds: string[] = []
+
+    for (const session of this.sessions.values()) {
+      if (!this.canRestoreRendererSurface(session)) continue
+      this.restoreRendererSurface(session, reason, true)
+      restoredSessionIds.push(session.id)
+    }
+
+    this.schedulePostFrameSurfaceRestore(restoredSessionIds, reason)
+
+    this.rendererRecoveryCount += restoredSessionIds.length
+    return restoredSessionIds.length
+  }
+
+  private canRestoreRendererSurface(session: TerminalSession): boolean {
+    if (!session.visible || !session.open || session.status === 'disposed') return false
+    const container = session.container
+    if (!container || !container.isConnected) return false
+    const style = window.getComputedStyle(container)
+    if (style.display === 'none' || style.visibility === 'hidden') return false
+    return container.clientWidth > 0 && container.clientHeight > 0
+  }
+
+  private schedulePostFrameSurfaceRestore(
+    sessionIds: string[],
+    reason: TerminalRendererSurfaceEvent
+  ): void {
+    if (sessionIds.length === 0 || this.rendererPolicy.postResumeFrameCount <= 0) return
+
+    if (this.surfaceRestoreAnimationFrameId !== null) {
+      cancelAnimationFrame(this.surfaceRestoreAnimationFrameId)
+    }
+
+    let remainingFrames = this.rendererPolicy.postResumeFrameCount
+    const run = () => {
+      this.surfaceRestoreAnimationFrameId = null
+      for (const sessionId of sessionIds) {
+        const session = this.sessions.get(sessionId)
+        if (!session || !this.canRestoreRendererSurface(session)) continue
+        this.restoreRendererSurface(session, reason, false)
+      }
+
+      remainingFrames -= 1
+      if (remainingFrames > 0) {
+        this.surfaceRestoreAnimationFrameId = requestAnimationFrame(run)
+      }
+    }
+
+    this.surfaceRestoreAnimationFrameId = requestAnimationFrame(run)
+  }
+
+  private restoreRendererSurface(
+    session: TerminalSession,
+    reason: TerminalRendererSurfaceEvent,
+    forceGeometry: boolean
+  ): void {
+    session.renderer.restoreSurface(reason)
+    if (forceGeometry) {
+      this.forceFit(session.id)
+      return
+    }
+    this.fit(session.id)
   }
 
   private getTextareaElementForSession(session: TerminalSession): HTMLTextAreaElement | null {
@@ -1208,14 +1293,20 @@ export class TerminalSessionManager {
     this.dirtyVisibleSessions.delete(id)
     this.clearPendingRestoreAnimationFrame(session)
     this.clearPendingGeometryRefreshAnimationFrame(session)
+    if (this.sessions.size === 1) {
+      if (this.surfaceRestoreTimeoutId !== null) {
+        window.clearTimeout(this.surfaceRestoreTimeoutId)
+        this.surfaceRestoreTimeoutId = null
+      }
+      if (this.surfaceRestoreAnimationFrameId !== null) {
+        cancelAnimationFrame(this.surfaceRestoreAnimationFrameId)
+        this.surfaceRestoreAnimationFrameId = null
+      }
+    }
 
     // Data/exit IPC listeners are global; no per-session cleanup needed
     window.electronAPI.terminal.dispose(id)
-    if (session.webglAddon) {
-      session.webglAddon.dispose()
-      session.webglAddon = undefined
-      perfMonitor.decrementWebglContextCount()
-    }
+    session.renderer.dispose()
     session.terminal.dispose()
 
     if (this.activeInteractiveTerminalId === id) {

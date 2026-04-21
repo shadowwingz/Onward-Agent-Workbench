@@ -47,8 +47,8 @@ if grep -q "\[AutoTest\] FAIL" "$LOG_FILE"; then
   exit 1
 fi
 
-if ! grep -q "TFA-08-window-focus-restores-terminal-when-pointer-is-stale" "$LOG_FILE"; then
-  echo "Missing TFA-08 result; the test may not have executed correctly" >&2
+if ! grep -q "TFA-09-document-visible-recovers-visible-terminal-renderer" "$LOG_FILE"; then
+  echo "Missing TFA-09 result; the test may not have executed correctly" >&2
   tail -n 40 "$LOG_FILE" >&2
   exit 1
 fi

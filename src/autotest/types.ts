@@ -455,9 +455,17 @@ export interface TerminalDebugApi {
     status: 'idle' | 'initializing' | 'ready' | 'error' | 'disposed'
     open: boolean
     visible: boolean
+    webglActive: boolean
+    rendererMode: 'webgl' | 'fallback'
+    rendererWebglAvailable: boolean
+    rendererWebglFailureCount: number
+    rendererWebglDisabledUntil: number | null
+    rendererLastLifecycleReason: string | null
+    rendererLastSurfaceEvent: string | null
     pendingDataChunks: number
     pendingDataBytes: number
   } | null
+  getRendererRecoveryCount: () => number
   getViewportState: (terminalId?: string) => {
     terminalId: string
     bufferType: 'normal' | 'alternate'
@@ -481,6 +489,8 @@ export interface TerminalDebugApi {
   scrollLinesAsUser: (terminalId?: string, lines?: number) => boolean
   forceFit: (terminalId?: string) => boolean
   remountTerminal: (terminalId?: string) => boolean
+  simulateRendererSurfaceLoss: (terminalId?: string) => boolean
+  recoverVisibleRenderers: () => number
 }
 
 export interface SettingsDebugApi {
