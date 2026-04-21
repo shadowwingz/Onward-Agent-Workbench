@@ -101,17 +101,29 @@
   flex: 1 1 auto;
 }
 
+.subpage-panel-shell-location.is-copyable {
+  cursor: default;
+}
+
 .subpage-panel-shell-location-label {
   flex-shrink: 0;
+  user-select: none;
 }
 
 .subpage-panel-shell-location-path {
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--text-2);
   font-family: 'IBM Plex Mono', 'SF Mono', monospace;
+  cursor: text;
+  user-select: text;
+}
+
+.subpage-panel-shell-location-feedback {
+  flex: 0 0 auto;
 }
 
 .subpage-panel-shell-meta-extra {

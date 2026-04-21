@@ -533,6 +533,11 @@ export function GitHistoryViewer({
 
   // --- Path copy (shared hook) ---
   const { copyMessage, copyToClipboard, flashCopyFeedback } = usePathCopy(t, 'gitHistory.copyFailed')
+  const {
+    copyMessage: cwdCopyMessage,
+    copyToClipboard: copyCwdToClipboard,
+    flashCopyFeedback: flashCwdCopyFeedback
+  } = usePathCopy(t, 'gitHistory.copyFailed')
 
   const handleFilenameDblClick = useCallback(async (e: React.MouseEvent) => {
     if (!selectedFile) return
@@ -2009,6 +2014,12 @@ export function GitHistoryViewer({
   const historyWorkingDirectory = historyResult?.cwd && historyResult.isGitRepo
     ? historyResult.cwd
     : null
+  const handleCwdDblClick = useCallback(async (e: React.MouseEvent) => {
+    if (!historyWorkingDirectory) return
+    const target = e.currentTarget as HTMLElement
+    const ok = await copyCwdToClipboard(historyWorkingDirectory, t('common.workingDirectory'))
+    if (ok) flashCwdCopyFeedback(target)
+  }, [copyCwdToClipboard, flashCwdCopyFeedback, historyWorkingDirectory, t])
   const externalPanelActions = useMemo(() => (
     <SubpagePanelButton className="git-history-close" onClick={onClose} title={t('gitHistory.returnToTerminal')}>
       {t('gitHistory.returnToTerminal')}
@@ -2019,9 +2030,16 @@ export function GitHistoryViewer({
     onSelect: handleSelectSubpage,
     workingDirectoryLabel: t('gitHistory.cwd'),
     workingDirectoryPath: historyWorkingDirectory,
+    workingDirectoryTitle: historyWorkingDirectory ? `${historyWorkingDirectory}\n${t('common.cwdCopyHint')}` : undefined,
+    onWorkingDirectoryDoubleClick: handleCwdDblClick,
+    workingDirectoryFeedback: cwdCopyMessage ? (
+      <span className={`path-copy-toast ${cwdCopyMessage.type}`}>
+        {cwdCopyMessage.text}
+      </span>
+    ) : null,
     actions: externalPanelActions,
     taskTitle
-  }), [externalPanelActions, handleSelectSubpage, historyWorkingDirectory, t, taskTitle])
+  }), [cwdCopyMessage, externalPanelActions, handleCwdDblClick, handleSelectSubpage, historyWorkingDirectory, t, taskTitle])
   const superprojectRoot = historyResult?.superprojectRoot ?? null
   const displayedHistoryRoot = normalizeRepoRoot(historyResult?.cwd)
   const selectedHistoryRoot = normalizeRepoRoot(selectedRepoRoot || cachedParentCwd || historyResult?.cwd || cwd)
@@ -2234,6 +2252,13 @@ export function GitHistoryViewer({
             onSelect={handleSelectSubpage}
             workingDirectoryLabel={t('gitHistory.cwd')}
             workingDirectoryPath={historyWorkingDirectory}
+            workingDirectoryTitle={historyWorkingDirectory ? `${historyWorkingDirectory}\n${t('common.cwdCopyHint')}` : undefined}
+            onWorkingDirectoryDoubleClick={handleCwdDblClick}
+            workingDirectoryFeedback={cwdCopyMessage ? (
+              <span className={`path-copy-toast ${cwdCopyMessage.type}`}>
+                {cwdCopyMessage.text}
+              </span>
+            ) : null}
             taskTitle={taskTitle}
             actions={(
               <>
@@ -2268,9 +2293,18 @@ export function GitHistoryViewer({
               </div>
             </div>
             {historyWorkingDirectory && (
-              <div className="git-history-cwd-bar">
+              <div
+                className="git-history-cwd-bar"
+                onDoubleClick={handleCwdDblClick}
+                title={`${historyWorkingDirectory}\n${t('common.cwdCopyHint')}`}
+              >
                 <span className="git-history-cwd-label">{t('gitHistory.cwd')}</span>
                 <span className="git-history-cwd-path">{historyWorkingDirectory}</span>
+                {cwdCopyMessage && (
+                  <span className={`path-copy-toast ${cwdCopyMessage.type}`}>
+                    {cwdCopyMessage.text}
+                  </span>
+                )}
               </div>
             )}
             {historyBody}

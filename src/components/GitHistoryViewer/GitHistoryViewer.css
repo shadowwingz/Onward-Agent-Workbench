@@ -166,12 +166,21 @@
   color: var(--text-3);
 }
 
+.git-history-cwd-label {
+  flex-shrink: 0;
+  user-select: none;
+}
+
 .git-history-cwd-path {
+  flex: 1 1 auto;
+  min-width: 0;
   color: var(--text-2);
   font-family: 'IBM Plex Mono', 'SF Mono', monospace;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  cursor: text;
+  user-select: text;
 }
 
 .git-history-body {

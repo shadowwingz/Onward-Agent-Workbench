@@ -880,6 +880,11 @@ export function GitDiffViewer({
 
   // --- Path copy (shared hook) ---
   const { copyMessage, copyToClipboard, flashCopyFeedback } = usePathCopy(t, 'gitDiff.copyFailed')
+  const {
+    copyMessage: cwdCopyMessage,
+    copyToClipboard: copyCwdToClipboard,
+    flashCopyFeedback: flashCwdCopyFeedback
+  } = usePathCopy(t, 'gitDiff.copyFailed')
 
   const handleFilenameDblClick = useCallback(async (e: React.MouseEvent) => {
     if (!selectedFile) return
@@ -3961,8 +3966,15 @@ export function GitDiffViewer({
   const modalClassName = `git-diff-modal ${isPanel ? 'panel' : ''}`
   const modalStyle = isPanel ? { width: '100%', height: '100%' } : { width: modalSize.width, height: modalSize.height }
   const displayedCwd = diffResult?.cwd || (!cwdPending ? cwd : null)
+  const displayedWorkingDirectory = displayedCwd && (!diffResult || diffResult.isGitRepo) ? displayedCwd : null
   const useSharedPanelHeader = isPanel && panelShellMode === 'internal'
   const keepMountedInPanel = isPanel
+  const handleCwdDblClick = useCallback(async (e: React.MouseEvent) => {
+    if (!displayedWorkingDirectory) return
+    const target = e.currentTarget as HTMLElement
+    const ok = await copyCwdToClipboard(displayedWorkingDirectory, t('common.workingDirectory'))
+    if (ok) flashCwdCopyFeedback(target)
+  }, [copyCwdToClipboard, displayedWorkingDirectory, flashCwdCopyFeedback, t])
   const externalPanelActions = useMemo(() => (
         <SubpagePanelButton className="git-diff-close" onClick={requestClose} title={t('gitDiff.returnToTerminal')}>
           {t('gitDiff.returnToTerminal')}
@@ -3972,10 +3984,17 @@ export function GitDiffViewer({
     current: 'diff',
     onSelect: handleSelectSubpage,
     workingDirectoryLabel: t('gitDiff.workingDirectory'),
-    workingDirectoryPath: displayedCwd && (!diffResult || diffResult.isGitRepo) ? displayedCwd : null,
+    workingDirectoryPath: displayedWorkingDirectory,
+    workingDirectoryTitle: displayedWorkingDirectory ? `${displayedWorkingDirectory}\n${t('common.cwdCopyHint')}` : undefined,
+    onWorkingDirectoryDoubleClick: handleCwdDblClick,
+    workingDirectoryFeedback: cwdCopyMessage ? (
+      <span className={`path-copy-toast ${cwdCopyMessage.type}`}>
+        {cwdCopyMessage.text}
+      </span>
+    ) : null,
     actions: externalPanelActions,
     taskTitle
-  }), [diffResult, displayedCwd, externalPanelActions, handleSelectSubpage, t, taskTitle])
+  }), [cwdCopyMessage, displayedWorkingDirectory, externalPanelActions, handleCwdDblClick, handleSelectSubpage, t, taskTitle])
 
   useLayoutEffect(() => {
     if (!isPanel || panelShellMode !== 'external' || !onPanelShellStateChange) return
@@ -4027,7 +4046,14 @@ export function GitDiffViewer({
             current="diff"
             onSelect={handleSelectSubpage}
             workingDirectoryLabel={t('gitDiff.workingDirectory')}
-            workingDirectoryPath={displayedCwd && (!diffResult || diffResult.isGitRepo) ? displayedCwd : null}
+            workingDirectoryPath={displayedWorkingDirectory}
+            workingDirectoryTitle={displayedWorkingDirectory ? `${displayedWorkingDirectory}\n${t('common.cwdCopyHint')}` : undefined}
+            onWorkingDirectoryDoubleClick={handleCwdDblClick}
+            workingDirectoryFeedback={cwdCopyMessage ? (
+              <span className={`path-copy-toast ${cwdCopyMessage.type}`}>
+                {cwdCopyMessage.text}
+              </span>
+            ) : null}
             taskTitle={taskTitle}
             actions={(
               <SubpagePanelButton className="git-diff-close" onClick={requestClose} title={t('gitDiff.returnToTerminal')}>
@@ -4066,10 +4092,19 @@ export function GitDiffViewer({
             </div>
 
             {/* working directory */}
-            {displayedCwd && (!diffResult || diffResult.isGitRepo) && (
-              <div className="git-diff-cwd-bar">
+            {displayedWorkingDirectory && (
+              <div
+                className="git-diff-cwd-bar"
+                onDoubleClick={handleCwdDblClick}
+                title={`${displayedWorkingDirectory}\n${t('common.cwdCopyHint')}`}
+              >
                 <span className="git-diff-cwd-label">{t('gitDiff.workingDirectory')}</span>
-                <span className="git-diff-cwd-path">{displayedCwd}</span>
+                <span className="git-diff-cwd-path">{displayedWorkingDirectory}</span>
+                {cwdCopyMessage && (
+                  <span className={`path-copy-toast ${cwdCopyMessage.type}`}>
+                    {cwdCopyMessage.text}
+                  </span>
+                )}
               </div>
             )}
 
