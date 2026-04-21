@@ -5,6 +5,7 @@
 
 import { spawn, type ChildProcess } from 'child_process'
 import { BrowserWindow, app } from 'electron'
+import { IPC } from '../shared/ipc-channels'
 
 export interface RipgrepSearchOptions {
   rootPath: string
@@ -141,7 +142,7 @@ export class RipgrepSearchManager {
         windowsHide: true
       })
     } catch {
-      mainWindow.webContents.send('project:search-done', {
+      mainWindow.webContents.send(IPC.PROJECT_SEARCH_DONE, {
         searchId,
         matchCount: 0,
         fileCount: 0,
@@ -166,7 +167,7 @@ export class RipgrepSearchManager {
         batchTimer = null
       }
       if (batch.length > 0 && this.activeSearchId === searchId) {
-        mainWindow.webContents.send('project:search-result', searchId, batch)
+        mainWindow.webContents.send(IPC.PROJECT_SEARCH_RESULT, searchId, batch)
         batch = []
       }
     }
@@ -221,7 +222,7 @@ export class RipgrepSearchManager {
       }
       flushBatch()
       if (this.activeSearchId !== searchId) return
-      mainWindow.webContents.send('project:search-done', {
+      mainWindow.webContents.send(IPC.PROJECT_SEARCH_DONE, {
         searchId,
         matchCount,
         fileCount: files.size,

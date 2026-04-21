@@ -29,6 +29,17 @@ import { getWindowStateStorage } from './window-state-storage'
 import { getTelemetryService } from './telemetry/telemetry-service'
 import { TELEMETRY_RESET_CONSENT } from './telemetry/telemetry-constants'
 import { startSessionHeartbeat, stopSessionHeartbeat, getSessionDurationMs } from './telemetry/telemetry-session-tracker'
+import { IPC } from '../shared/ipc-channels'
+
+// ONWARD_SMOKE_LAUNCH=1 makes the main process self-quit once the main window
+// renderer finishes loading, after writing a ready marker to the path in
+// ONWARD_SMOKE_READY_FILE (if set). CI uses this to assert a clean startup
+// without a human observer. See docs/debug-env-variables.md.
+const SMOKE_LAUNCH_MODE = process.env.ONWARD_SMOKE_LAUNCH === '1'
+const SMOKE_READY_FILE = process.env.ONWARD_SMOKE_READY_FILE || null
+if (SMOKE_LAUNCH_MODE) {
+  console.log('[SmokeLaunch] Mode active (ONWARD_SMOKE_LAUNCH=1)')
+}
 
 let mainWindow: BrowserWindow | null = null
 let isQuitting = false
@@ -44,11 +55,11 @@ async function flushRendererState(): Promise<void> {
   try {
     await new Promise<void>((resolve) => {
       const timeout = setTimeout(resolve, 2000)
-      ipcMain.once('app-state:flush-done', () => {
+      ipcMain.once(IPC.APP_STATE_FLUSH_DONE, () => {
         clearTimeout(timeout)
         resolve()
       })
-      mainWindow!.webContents.send('app-state:flush-pending')
+      mainWindow!.webContents.send(IPC.APP_STATE_FLUSH_PENDING)
     })
   } catch {
     // Renderer may already be gone; proceed with quit
@@ -367,6 +378,27 @@ function createWindow(displayName: string): void {
     mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
       log('[Window] did-fail-load', { errorCode, errorDescription, validatedURL })
     })
+    if (SMOKE_LAUNCH_MODE) {
+      mainWindow.webContents.once('did-finish-load', () => {
+        // Give React a moment to mount before declaring ready.
+        setTimeout(() => {
+          if (SMOKE_READY_FILE) {
+            try {
+              writeFileSync(SMOKE_READY_FILE, JSON.stringify({
+                ready: true,
+                ts: Date.now(),
+                pid: process.pid,
+                url: mainWindow?.webContents.getURL() ?? null
+              }))
+            } catch (error) {
+              console.error('[SmokeLaunch] failed to write ready file', error)
+            }
+          }
+          console.log('[SmokeLaunch] READY')
+          setTimeout(() => app.exit(0), 500)
+        }, 1500)
+      })
+    }
     mainWindow.webContents.on('render-process-gone', (_event, details) => {
       log('[Window] render-process-gone', details)
       getTelemetryService().track('error/rendererCrash', {

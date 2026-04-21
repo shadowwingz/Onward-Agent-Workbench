@@ -12,6 +12,7 @@ import { spawn, execFileSync } from 'child_process'
 import { getAppInfo, type ReleaseChannel, type ReleaseOs } from './app-info'
 import { compareVersions, parseVersion } from './update-version'
 import { getTelemetryService } from './telemetry/telemetry-service'
+import { IPC } from '../shared/ipc-channels'
 import {
   DownloadError,
   type DownloadErrorCode,
@@ -788,7 +789,7 @@ export class UpdateService {
 
   private emitStatus(): void {
     if (!this.mainWindow || this.mainWindow.isDestroyed()) return
-    this.mainWindow.webContents.send('updater:status-changed', this.getStatus())
+    this.mainWindow.webContents.send(IPC.UPDATER_STATUS_CHANGED, this.getStatus())
   }
 
   private setStatus(patch: Partial<UpdateStatus>): UpdateStatus {

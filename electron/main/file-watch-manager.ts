@@ -7,6 +7,7 @@ import { watch, readFile, stat } from 'fs'
 import type { FSWatcher } from 'fs'
 import type { BrowserWindow } from 'electron'
 import { normalize } from 'path'
+import { IPC } from '../shared/ipc-channels'
 
 interface WatchEntry {
   watcher: FSWatcher | null
@@ -201,7 +202,7 @@ export class FileWatchManager {
 
   private emitChange(fullPath: string, changeType: 'changed' | 'deleted', content?: string): void {
     if (this.mainWindow.isDestroyed()) return
-    this.mainWindow.webContents.send('project:file-changed', fullPath, changeType, content)
+    this.mainWindow.webContents.send(IPC.PROJECT_FILE_CHANGED, fullPath, changeType, content)
   }
 
   private cleanupEntry(entry: WatchEntry): void {

@@ -4,6 +4,7 @@
  */
 
 import { BrowserWindow, WebContentsView, session, type Event as ElectronEvent, type WebContents } from 'electron'
+import { IPC } from '../shared/ipc-channels'
 
 const BROWSER_PARTITION = 'persist:browser'
 
@@ -311,26 +312,26 @@ class BrowserViewManager {
     })
 
     wc.on('did-navigate', (_event, url) => {
-      send('browser:url-changed', url)
+      send(IPC.BROWSER_URL_CHANGED, url)
       this.sendNavState(id)
     })
 
     wc.on('did-navigate-in-page', (_event, url) => {
-      send('browser:url-changed', url)
+      send(IPC.BROWSER_URL_CHANGED, url)
       this.sendNavState(id)
     })
 
     wc.on('page-title-updated', (_event, title) => {
-      send('browser:title-changed', title)
+      send(IPC.BROWSER_TITLE_CHANGED, title)
     })
 
     wc.on('did-start-loading', () => {
-      send('browser:loading-changed', true)
+      send(IPC.BROWSER_LOADING_CHANGED, true)
       this.sendNavState(id)
     })
 
     wc.on('did-stop-loading', () => {
-      send('browser:loading-changed', false)
+      send(IPC.BROWSER_LOADING_CHANGED, false)
       this.sendNavState(id)
     })
 
@@ -346,7 +347,7 @@ class BrowserViewManager {
         width: contentBounds.width,
         height: contentBounds.height
       })
-      send('browser:fullscreen-changed', true)
+      send(IPC.BROWSER_FULLSCREEN_CHANGED, true)
     })
 
     wc.on('leave-html-full-screen', () => {
@@ -355,7 +356,7 @@ class BrowserViewManager {
         info.view.setBounds(info.savedBounds)
         info.savedBounds = null
       }
-      send('browser:fullscreen-changed', false)
+      send(IPC.BROWSER_FULLSCREEN_CHANGED, false)
     })
 
     wc.on('before-input-event', (event, input) => {
@@ -367,7 +368,7 @@ class BrowserViewManager {
         !input.alt
       ) {
         if (!info.isFullscreen) {
-          send('browser:escape-pressed')
+          send(IPC.BROWSER_ESCAPE_PRESSED)
           event.preventDefault()
         }
       }
@@ -379,7 +380,7 @@ class BrowserViewManager {
     if (!navState) return
 
     try {
-      this.mainWindow?.webContents.send('browser:nav-state-changed', id, {
+      this.mainWindow?.webContents.send(IPC.BROWSER_NAV_STATE_CHANGED, id, {
         canGoBack: navState.canGoBack,
         canGoForward: navState.canGoForward
       })

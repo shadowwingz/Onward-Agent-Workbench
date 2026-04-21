@@ -8,6 +8,7 @@ import type { FSWatcher } from 'fs'
 import { readdir } from 'fs/promises'
 import type { BrowserWindow } from 'electron'
 import { join, normalize } from 'path'
+import { IPC } from '../shared/ipc-channels'
 
 interface TreeEntry {
   watcher: FSWatcher | null
@@ -241,7 +242,7 @@ export class ProjectTreeWatchManager {
     entry.pendingRemoved.clear()
     entry.pendingResync = false
 
-    this.mainWindow.webContents.send('project:tree-watch:event', {
+    this.mainWindow.webContents.send(IPC.PROJECT_TREE_WATCH_EVENT, {
       cwd: entry.cwdForRenderer,
       added,
       removed,
