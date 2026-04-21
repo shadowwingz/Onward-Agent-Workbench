@@ -676,6 +676,7 @@ Source set: terminal focus activation regression suite
 - `TFA-06`: shortcut activation still restores terminal focus after suppression
 - `TFA-07`: non-terminal mouse activation also suppresses implicit terminal restore
 - `TFA-08`: stale pointer state allows normal window-focus restore again
+- `TFA-09`: visible terminal WebGL surface can be cleared and is redrawn after document-visible recovery
 
 Launch:
 

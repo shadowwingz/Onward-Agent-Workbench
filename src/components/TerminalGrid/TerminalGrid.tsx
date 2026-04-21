@@ -16,7 +16,12 @@ import type { CodingAgentConfigInput } from '../../types/electron'
 import { BrowserPanel } from '../BrowserPanel/BrowserPanel'
 import { useSettings } from '../../contexts/SettingsContext'
 import { DEFAULT_TERMINAL_FONT_SIZE, DEFAULT_TERMINAL_FONT_FAMILY } from '../../constants/terminal'
-import { terminalSessionManager, TerminalSessionOptions, TerminalSessionStatus } from '../../terminal/terminal-session-manager'
+import {
+  terminalSessionManager,
+  TerminalSessionOptions,
+  TerminalSessionStatus,
+  type TerminalRendererSurfaceEvent
+} from '../../terminal/terminal-session-manager'
 import { focusCoordinator } from '../../terminal/focus-coordinator'
 import type { TerminalDebugApi } from '../../autotest/types'
 import { perfMonitor } from '../../utils/perf-monitor'
@@ -606,6 +611,38 @@ export const TerminalGrid = memo(function TerminalGrid({
   }, [applyTerminalInfoUpdate, gitDiffOpen])
 
   useEffect(() => {
+    if (hidden) return
+
+    const notifySurfaceEvent = (reason: TerminalRendererSurfaceEvent) => {
+      terminalSessionManager.notifyHostSurfaceEvent(reason)
+    }
+
+    const handleWindowFocus = () => {
+      notifySurfaceEvent('window-focus')
+    }
+
+    const handleVisibilityChange = () => {
+      if (!document.hidden) {
+        notifySurfaceEvent('document-visible')
+      }
+    }
+
+    const handlePageShow = () => {
+      notifySurfaceEvent('page-show')
+    }
+
+    window.addEventListener('focus', handleWindowFocus)
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    window.addEventListener('pageshow', handlePageShow)
+
+    return () => {
+      window.removeEventListener('focus', handleWindowFocus)
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+      window.removeEventListener('pageshow', handlePageShow)
+    }
+  }, [hidden])
+
+  useEffect(() => {
     getTerminalOptionsRef.current = (terminalId: string) => ({
       theme,
       fontSize,
@@ -1005,6 +1042,7 @@ export const TerminalGrid = memo(function TerminalGrid({
         const resolved = resolveTerminalId(terminalId)
         return resolved ? terminalSessionManager.getSessionDebugState(resolved) : null
       },
+      getRendererRecoveryCount: () => terminalSessionManager.getRendererRecoveryCount(),
       getViewportState: (terminalId) => {
         const resolved = resolveTerminalId(terminalId)
         if (!resolved) return null
@@ -1039,7 +1077,12 @@ export const TerminalGrid = memo(function TerminalGrid({
       remountTerminal: (terminalId) => {
         const resolved = resolveTerminalId(terminalId)
         return resolved ? terminalSessionManager.remount(resolved) : false
-      }
+      },
+      simulateRendererSurfaceLoss: (terminalId) => {
+        const resolved = resolveTerminalId(terminalId)
+        return resolved ? terminalSessionManager.simulateRendererSurfaceLossForAutotest(resolved) : false
+      },
+      recoverVisibleRenderers: () => terminalSessionManager.restoreVisibleRendererSurfaces('manual-debug')
     }
 
     debugWindow.__onwardTerminalDebug = api
