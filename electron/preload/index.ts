@@ -4,6 +4,7 @@
  */
 
 import { contextBridge, ipcRenderer } from 'electron'
+import { IPC } from '../shared/ipc-channels'
 import type {
   FeedbackActionResult,
   FeedbackCreateSubmissionResult,
@@ -968,44 +969,44 @@ export interface ElectronAPI {
 
 const terminalAPI: TerminalAPI = {
   create: (id: string, options?: TerminalOptions) => {
-    return ipcRenderer.invoke('terminal:create', id, options)
+    return ipcRenderer.invoke(IPC.TERMINAL_CREATE, id, options)
   },
 
   write: (id: string, data: string) => {
-    return ipcRenderer.invoke('terminal:write', id, data)
+    return ipcRenderer.invoke(IPC.TERMINAL_WRITE, id, data)
   },
 
   resize: (id: string, cols: number, rows: number) => {
-    return ipcRenderer.invoke('terminal:resize', id, cols, rows)
+    return ipcRenderer.invoke(IPC.TERMINAL_RESIZE, id, cols, rows)
   },
 
   sendInputSequence: (id: string, payload: TerminalInputSequencePayload) => {
-    return ipcRenderer.invoke('terminal:send-input-sequence', id, payload)
+    return ipcRenderer.invoke(IPC.TERMINAL_SEND_INPUT_SEQUENCE, id, payload)
   },
 
   getInputCapabilities: (id: string) => {
-    return ipcRenderer.invoke('terminal:get-input-capabilities', id)
+    return ipcRenderer.invoke(IPC.TERMINAL_GET_INPUT_CAPABILITIES, id)
   },
 
   setBufferFastPath: (id: string, enabled: boolean) => {
-    ipcRenderer.send('terminal:set-buffer-fast-path', id, enabled)
+    ipcRenderer.send(IPC.TERMINAL_SET_BUFFER_FAST_PATH, id, enabled)
   },
 
   notifyInteractiveInput: (id: string) => {
-    ipcRenderer.send('terminal:notify-interactive-input', id)
+    ipcRenderer.send(IPC.TERMINAL_NOTIFY_INTERACTIVE_INPUT, id)
   },
 
   dispose: (id: string) => {
-    return ipcRenderer.invoke('terminal:dispose', id)
+    return ipcRenderer.invoke(IPC.TERMINAL_DISPOSE, id)
   },
 
   onData: (callback: (id: string, data: string) => void) => {
     const listener = (_: Electron.IpcRendererEvent, id: string, data: string) => {
       callback(id, data)
     }
-    ipcRenderer.on('terminal:data', listener)
+    ipcRenderer.on(IPC.TERMINAL_DATA, listener)
     return () => {
-      ipcRenderer.removeListener('terminal:data', listener)
+      ipcRenderer.removeListener(IPC.TERMINAL_DATA, listener)
     }
   },
 
@@ -1013,9 +1014,9 @@ const terminalAPI: TerminalAPI = {
     const listener = (_: Electron.IpcRendererEvent, id: string, exitCode: number, signal?: number) => {
       callback(id, exitCode, signal)
     }
-    ipcRenderer.on('terminal:exit', listener)
+    ipcRenderer.on(IPC.TERMINAL_EXIT, listener)
     return () => {
-      ipcRenderer.removeListener('terminal:exit', listener)
+      ipcRenderer.removeListener(IPC.TERMINAL_EXIT, listener)
     }
   },
 
@@ -1023,288 +1024,288 @@ const terminalAPI: TerminalAPI = {
     const listener = (_: Electron.IpcRendererEvent, requestId: string, terminalId: string, options?: TerminalBufferOptions) => {
       callback(requestId, terminalId, options)
     }
-    ipcRenderer.on('terminal:request-buffer', listener)
+    ipcRenderer.on(IPC.TERMINAL_REQUEST_BUFFER, listener)
     return () => {
-      ipcRenderer.removeListener('terminal:request-buffer', listener)
+      ipcRenderer.removeListener(IPC.TERMINAL_REQUEST_BUFFER, listener)
     }
   },
 
   sendBufferResponse: (requestId: string, result: TerminalBufferResult) => {
-    ipcRenderer.send('terminal:buffer-response', requestId, result)
+    ipcRenderer.send(IPC.TERMINAL_BUFFER_RESPONSE, requestId, result)
   },
 
   onPromptBridgeSend: (callback: (request: PromptBridgeSendRequest) => void) => {
     const listener = (_: Electron.IpcRendererEvent, request: PromptBridgeSendRequest) => {
       callback(request)
     }
-    ipcRenderer.on('prompt:bridge-send', listener)
+    ipcRenderer.on(IPC.PROMPT_BRIDGE_SEND, listener)
     return () => {
-      ipcRenderer.removeListener('prompt:bridge-send', listener)
+      ipcRenderer.removeListener(IPC.PROMPT_BRIDGE_SEND, listener)
     }
   },
 
   sendPromptBridgeResponse: (requestId: string, result: PromptBridgeSendResult) => {
-    ipcRenderer.send('prompt:bridge-response', requestId, result)
+    ipcRenderer.send(IPC.PROMPT_BRIDGE_RESPONSE, requestId, result)
   }
 }
 
 const promptAPI: PromptAPI = {
   load: () => {
-    return ipcRenderer.invoke('prompt:load')
+    return ipcRenderer.invoke(IPC.PROMPT_LOAD)
   },
 
   save: (prompt: Prompt) => {
-    return ipcRenderer.invoke('prompt:save', prompt)
+    return ipcRenderer.invoke(IPC.PROMPT_SAVE, prompt)
   },
 
   delete: (id: string) => {
-    return ipcRenderer.invoke('prompt:delete', id)
+    return ipcRenderer.invoke(IPC.PROMPT_DELETE, id)
   }
 }
 
 const terminalConfigAPI: TerminalConfigAPI = {
   load: () => {
-    return ipcRenderer.invoke('terminal-config:load')
+    return ipcRenderer.invoke(IPC.TERMINAL_CONFIG_LOAD)
   },
 
   save: (config: TerminalWindowConfig) => {
-    return ipcRenderer.invoke('terminal-config:save', config)
+    return ipcRenderer.invoke(IPC.TERMINAL_CONFIG_SAVE, config)
   },
 
   update: (partial: Partial<TerminalWindowConfig>) => {
-    return ipcRenderer.invoke('terminal-config:update', partial)
+    return ipcRenderer.invoke(IPC.TERMINAL_CONFIG_UPDATE, partial)
   }
 }
 
 const dialogAPI: DialogAPI = {
   openDirectory: () => {
-    return ipcRenderer.invoke('dialog:openDirectory')
+    return ipcRenderer.invoke(IPC.DIALOG_OPEN_DIRECTORY)
   },
   openTextFile: (payload?: { title?: string; filters?: Array<{ name: string; extensions: string[] }> }) => {
-    return ipcRenderer.invoke('dialog:openTextFile', payload)
+    return ipcRenderer.invoke(IPC.DIALOG_OPEN_TEXT_FILE, payload)
   },
   saveTextFile: (payload: { title?: string; defaultFileName?: string; content: string }) => {
-    return ipcRenderer.invoke('dialog:saveTextFile', payload)
+    return ipcRenderer.invoke(IPC.DIALOG_SAVE_TEXT_FILE, payload)
   }
 }
 
 const shellAPI: ShellAPI = {
   openPath: (path: string) => {
-    return ipcRenderer.invoke('shell:open-path', path)
+    return ipcRenderer.invoke(IPC.SHELL_OPEN_PATH, path)
   },
   openExternal: (url: string) => {
-    return ipcRenderer.invoke('shell:open-external', url)
+    return ipcRenderer.invoke(IPC.SHELL_OPEN_EXTERNAL, url)
   }
 }
 
 const clipboardAPI: ClipboardAPI = {
   writeText: (text: string) => {
-    return ipcRenderer.invoke('clipboard:write-text', text)
+    return ipcRenderer.invoke(IPC.CLIPBOARD_WRITE_TEXT, text)
   },
   readText: () => {
-    return ipcRenderer.invoke('clipboard:read-text')
+    return ipcRenderer.invoke(IPC.CLIPBOARD_READ_TEXT)
   }
 }
 
 const commandPresetAPI: CommandPresetAPI = {
   load: () => {
-    return ipcRenderer.invoke('command-preset:load')
+    return ipcRenderer.invoke(IPC.COMMAND_PRESET_LOAD)
   },
 
   save: (preset: CommandPreset) => {
-    return ipcRenderer.invoke('command-preset:save', preset)
+    return ipcRenderer.invoke(IPC.COMMAND_PRESET_SAVE, preset)
   },
 
   delete: (id: string) => {
-    return ipcRenderer.invoke('command-preset:delete', id)
+    return ipcRenderer.invoke(IPC.COMMAND_PRESET_DELETE, id)
   }
 }
 
 const appStateAPI: AppStateAPI = {
   load: () => {
-    return ipcRenderer.invoke('app-state:load')
+    return ipcRenderer.invoke(IPC.APP_STATE_LOAD)
   },
 
   save: (state: AppState) => {
-    return ipcRenderer.invoke('app-state:save', state)
+    return ipcRenderer.invoke(IPC.APP_STATE_SAVE, state)
   },
 
   onFlushPendingState: (callback: () => void | Promise<void>) => {
-    ipcRenderer.on('app-state:flush-pending', async () => {
+    ipcRenderer.on(IPC.APP_STATE_FLUSH_PENDING, async () => {
       try {
         await callback()
       } catch (error) {
         console.error('[AppState] flush callback failed:', error)
       }
-      ipcRenderer.send('app-state:flush-done')
+      ipcRenderer.send(IPC.APP_STATE_FLUSH_DONE)
     })
   }
 }
 
 const gitAPI: GitAPI = {
   resolveRepoRoot: (cwd: string) => {
-    return ipcRenderer.invoke('git:resolve-repo-root', cwd)
+    return ipcRenderer.invoke(IPC.GIT_RESOLVE_REPO_ROOT, cwd)
   },
 
   getDiff: (cwd: string, options?: GitDiffLoadOptions) => {
-    return ipcRenderer.invoke('git:get-diff', cwd, options)
+    return ipcRenderer.invoke(IPC.GIT_GET_DIFF, cwd, options)
   },
 
   getHistory: (cwd: string, options?: { limit?: number; skip?: number }) => {
-    return ipcRenderer.invoke('git:get-history', cwd, options)
+    return ipcRenderer.invoke(IPC.GIT_GET_HISTORY, cwd, options)
   },
 
   getHistoryDiff: (cwd: string, options: GitHistoryDiffOptions) => {
-    return ipcRenderer.invoke('git:get-history-diff', cwd, options)
+    return ipcRenderer.invoke(IPC.GIT_GET_HISTORY_DIFF, cwd, options)
   },
 
   getHistoryFileContent: (cwd: string, options: GitHistoryFileContentOptions) => {
-    return ipcRenderer.invoke('git:get-history-file-content', cwd, options)
+    return ipcRenderer.invoke(IPC.GIT_GET_HISTORY_FILE_CONTENT, cwd, options)
   },
 
   getFileContent: (cwd: string, file: Pick<GitFileStatus, 'filename' | 'status' | 'originalFilename' | 'changeType' | 'isSubmoduleEntry'>, repoRoot?: string) => {
-    return ipcRenderer.invoke('git:get-file-content', cwd, file, repoRoot)
+    return ipcRenderer.invoke(IPC.GIT_GET_FILE_CONTENT, cwd, file, repoRoot)
   },
 
   saveFileContent: (cwd: string, filename: string, content: string) => {
-    return ipcRenderer.invoke('git:save-file-content', cwd, filename, content)
+    return ipcRenderer.invoke(IPC.GIT_SAVE_FILE_CONTENT, cwd, filename, content)
   },
 
   stageFile: (cwd: string, filename: string, repoRoot?: string) => {
-    return ipcRenderer.invoke('git:stage-file', cwd, filename, repoRoot)
+    return ipcRenderer.invoke(IPC.GIT_STAGE_FILE, cwd, filename, repoRoot)
   },
 
   unstageFile: (cwd: string, filename: string, repoRoot?: string) => {
-    return ipcRenderer.invoke('git:unstage-file', cwd, filename, repoRoot)
+    return ipcRenderer.invoke(IPC.GIT_UNSTAGE_FILE, cwd, filename, repoRoot)
   },
 
   discardFile: (cwd: string, file: Pick<GitFileStatus, 'filename' | 'changeType' | 'status' | 'isSubmoduleEntry'>, repoRoot?: string) => {
-    return ipcRenderer.invoke('git:discard-file', cwd, file, repoRoot)
+    return ipcRenderer.invoke(IPC.GIT_DISCARD_FILE, cwd, file, repoRoot)
   },
 
   getSubmodules: (cwd: string) => {
-    return ipcRenderer.invoke('git:get-submodules', cwd)
+    return ipcRenderer.invoke(IPC.GIT_GET_SUBMODULES, cwd)
   },
 
   updateIndexContent: (cwd: string, filename: string, content: string) => {
-    return ipcRenderer.invoke('git:update-index-content', cwd, filename, content)
+    return ipcRenderer.invoke(IPC.GIT_UPDATE_INDEX_CONTENT, cwd, filename, content)
   },
 
   checkInstalled: () => {
-    return ipcRenderer.invoke('git:check-installed')
+    return ipcRenderer.invoke(IPC.GIT_CHECK_INSTALLED)
   },
 
   getTerminalCwd: (terminalId: string) => {
-    return ipcRenderer.invoke('git:get-terminal-cwd', terminalId)
+    return ipcRenderer.invoke(IPC.GIT_GET_TERMINAL_CWD, terminalId)
   },
 
   getTerminalInfo: (terminalId: string) => {
-    return ipcRenderer.invoke('git:get-terminal-info', terminalId)
+    return ipcRenderer.invoke(IPC.GIT_GET_TERMINAL_INFO, terminalId)
   },
 
   subscribeTerminalInfo: (terminalId: string) => {
-    return ipcRenderer.invoke('git:subscribe-terminal-info', terminalId)
+    return ipcRenderer.invoke(IPC.GIT_SUBSCRIBE_TERMINAL_INFO, terminalId)
   },
 
   unsubscribeTerminalInfo: (terminalId: string) => {
-    return ipcRenderer.invoke('git:unsubscribe-terminal-info', terminalId)
+    return ipcRenderer.invoke(IPC.GIT_UNSUBSCRIBE_TERMINAL_INFO, terminalId)
   },
 
   notifyTerminalActivity: (terminalId: string) => {
-    return ipcRenderer.invoke('git:notify-terminal-activity', terminalId)
+    return ipcRenderer.invoke(IPC.GIT_NOTIFY_TERMINAL_ACTIVITY, terminalId)
   },
 
   notifyTerminalFocus: (terminalId: string) => {
-    return ipcRenderer.invoke('git:notify-terminal-focus', terminalId)
+    return ipcRenderer.invoke(IPC.GIT_NOTIFY_TERMINAL_FOCUS, terminalId)
   },
 
   notifyTerminalGitUpdate: (terminalId: string) => {
-    return ipcRenderer.invoke('git:notify-terminal-git-update', terminalId)
+    return ipcRenderer.invoke(IPC.GIT_NOTIFY_TERMINAL_GIT_UPDATE, terminalId)
   },
 
   warmDiffCache: (cwd: string) => {
-    return ipcRenderer.invoke('git:warm-diff-cache', cwd)
+    return ipcRenderer.invoke(IPC.GIT_WARM_DIFF_CACHE, cwd)
   },
 
   onTerminalInfo: (callback: (terminalId: string, info: TerminalGitInfo) => void) => {
     const listener = (_: Electron.IpcRendererEvent, terminalId: string, info: TerminalGitInfo) => {
       callback(terminalId, info)
     }
-    ipcRenderer.on('git:terminal-info', listener)
+    ipcRenderer.on(IPC.GIT_TERMINAL_INFO, listener)
     return () => {
-      ipcRenderer.removeListener('git:terminal-info', listener)
+      ipcRenderer.removeListener(IPC.GIT_TERMINAL_INFO, listener)
     }
   }
 }
 
 const projectAPI: ProjectAPI = {
   listDirectory: (root: string, path: string) => {
-    return ipcRenderer.invoke('project:list-directory', root, path)
+    return ipcRenderer.invoke(IPC.PROJECT_LIST_DIRECTORY, root, path)
   },
 
   readFile: (root: string, path: string) => {
-    return ipcRenderer.invoke('project:read-file', root, path)
+    return ipcRenderer.invoke(IPC.PROJECT_READ_FILE, root, path)
   },
 
   saveFile: (root: string, path: string, content: string) => {
-    return ipcRenderer.invoke('project:save-file', root, path, content)
+    return ipcRenderer.invoke(IPC.PROJECT_SAVE_FILE, root, path, content)
   },
 
   createFile: (root: string, path: string, content?: string) => {
-    return ipcRenderer.invoke('project:create-file', root, path, content ?? '')
+    return ipcRenderer.invoke(IPC.PROJECT_CREATE_FILE, root, path, content ?? '')
   },
 
   createFolder: (root: string, path: string) => {
-    return ipcRenderer.invoke('project:create-folder', root, path)
+    return ipcRenderer.invoke(IPC.PROJECT_CREATE_FOLDER, root, path)
   },
 
   renamePath: (root: string, oldPath: string, newPath: string) => {
-    return ipcRenderer.invoke('project:rename-path', root, oldPath, newPath)
+    return ipcRenderer.invoke(IPC.PROJECT_RENAME_PATH, root, oldPath, newPath)
   },
 
   deletePath: (root: string, path: string) => {
-    return ipcRenderer.invoke('project:delete-path', root, path)
+    return ipcRenderer.invoke(IPC.PROJECT_DELETE_PATH, root, path)
   },
 
   sqliteGetSchema: (root: string, path: string) => {
-    return ipcRenderer.invoke('project:sqlite-get-schema', root, path)
+    return ipcRenderer.invoke(IPC.PROJECT_SQLITE_GET_SCHEMA, root, path)
   },
 
   sqliteReadTableRows: (root: string, path: string, table: string, limit?: number, offset?: number) => {
-    return ipcRenderer.invoke('project:sqlite-read-table-rows', root, path, table, limit, offset)
+    return ipcRenderer.invoke(IPC.PROJECT_SQLITE_READ_TABLE_ROWS, root, path, table, limit, offset)
   },
 
   sqliteInsertRow: (root: string, path: string, table: string, values: Record<string, unknown>) => {
-    return ipcRenderer.invoke('project:sqlite-insert-row', root, path, table, values)
+    return ipcRenderer.invoke(IPC.PROJECT_SQLITE_INSERT_ROW, root, path, table, values)
   },
 
   sqliteUpdateRow: (root: string, path: string, table: string, key: SqliteRowKey, values: Record<string, unknown>) => {
-    return ipcRenderer.invoke('project:sqlite-update-row', root, path, table, key, values)
+    return ipcRenderer.invoke(IPC.PROJECT_SQLITE_UPDATE_ROW, root, path, table, key, values)
   },
 
   sqliteDeleteRow: (root: string, path: string, table: string, key: SqliteRowKey) => {
-    return ipcRenderer.invoke('project:sqlite-delete-row', root, path, table, key)
+    return ipcRenderer.invoke(IPC.PROJECT_SQLITE_DELETE_ROW, root, path, table, key)
   },
 
   sqliteExecute: (root: string, path: string, sql: string) => {
-    return ipcRenderer.invoke('project:sqlite-execute', root, path, sql)
+    return ipcRenderer.invoke(IPC.PROJECT_SQLITE_EXECUTE, root, path, sql)
   },
 
   searchStart: (options: ProjectSearchOptions) => {
-    return ipcRenderer.invoke('project:search-start', options)
+    return ipcRenderer.invoke(IPC.PROJECT_SEARCH_START, options)
   },
 
   searchCancel: () => {
-    return ipcRenderer.invoke('project:search-cancel')
+    return ipcRenderer.invoke(IPC.PROJECT_SEARCH_CANCEL)
   },
 
   onSearchResult: (callback: (searchId: string, matches: ProjectSearchMatch[]) => void) => {
     const listener = (_: Electron.IpcRendererEvent, searchId: string, matches: ProjectSearchMatch[]) => {
       callback(searchId, matches)
     }
-    ipcRenderer.on('project:search-result', listener)
+    ipcRenderer.on(IPC.PROJECT_SEARCH_RESULT, listener)
     return () => {
-      ipcRenderer.removeListener('project:search-result', listener)
+      ipcRenderer.removeListener(IPC.PROJECT_SEARCH_RESULT, listener)
     }
   },
 
@@ -1312,18 +1313,18 @@ const projectAPI: ProjectAPI = {
     const listener = (_: Electron.IpcRendererEvent, stats: ProjectSearchStats) => {
       callback(stats)
     }
-    ipcRenderer.on('project:search-done', listener)
+    ipcRenderer.on(IPC.PROJECT_SEARCH_DONE, listener)
     return () => {
-      ipcRenderer.removeListener('project:search-done', listener)
+      ipcRenderer.removeListener(IPC.PROJECT_SEARCH_DONE, listener)
     }
   },
 
   watchFile: (root: string, path: string) => {
-    return ipcRenderer.invoke('project:watch-file', root, path)
+    return ipcRenderer.invoke(IPC.PROJECT_WATCH_FILE, root, path)
   },
 
   unwatchFile: (root: string, path: string) => {
-    return ipcRenderer.invoke('project:unwatch-file', root, path)
+    return ipcRenderer.invoke(IPC.PROJECT_UNWATCH_FILE, root, path)
   },
 
   onFileChanged: (callback: (fullPath: string, changeType: 'changed' | 'deleted', content?: string) => void) => {
@@ -1335,40 +1336,40 @@ const projectAPI: ProjectAPI = {
     ) => {
       callback(fullPath, changeType, content)
     }
-    ipcRenderer.on('project:file-changed', listener)
+    ipcRenderer.on(IPC.PROJECT_FILE_CHANGED, listener)
     return () => {
-      ipcRenderer.removeListener('project:file-changed', listener)
+      ipcRenderer.removeListener(IPC.PROJECT_FILE_CHANGED, listener)
     }
   },
 
   watchImageFiles: (root: string, paths: string[]) => {
-    return ipcRenderer.invoke('project:watch-image-files', root, paths)
+    return ipcRenderer.invoke(IPC.PROJECT_WATCH_IMAGE_FILES, root, paths)
   },
 
   unwatchImageFiles: (root: string, paths: string[]) => {
-    return ipcRenderer.invoke('project:unwatch-image-files', root, paths)
+    return ipcRenderer.invoke(IPC.PROJECT_UNWATCH_IMAGE_FILES, root, paths)
   },
 
   unwatchAllImageFiles: () => {
-    return ipcRenderer.invoke('project:unwatch-all-image-files')
+    return ipcRenderer.invoke(IPC.PROJECT_UNWATCH_ALL_IMAGE_FILES)
   },
 
   onImageFileChanged: (callback: (relativePath: string) => void) => {
     const listener = (_: Electron.IpcRendererEvent, relativePath: string) => {
       callback(relativePath)
     }
-    ipcRenderer.on('project:image-file-changed', listener)
+    ipcRenderer.on(IPC.PROJECT_IMAGE_FILE_CHANGED, listener)
     return () => {
-      ipcRenderer.removeListener('project:image-file-changed', listener)
+      ipcRenderer.removeListener(IPC.PROJECT_IMAGE_FILE_CHANGED, listener)
     }
   },
 
   treeWatchStart: (cwd: string) => {
-    return ipcRenderer.invoke('project:tree-watch:start', cwd)
+    return ipcRenderer.invoke(IPC.PROJECT_TREE_WATCH_START, cwd)
   },
 
   treeWatchStop: (cwd: string) => {
-    return ipcRenderer.invoke('project:tree-watch:stop', cwd)
+    return ipcRenderer.invoke(IPC.PROJECT_TREE_WATCH_STOP, cwd)
   },
 
   onTreeWatchEvent: (
@@ -1380,45 +1381,45 @@ const projectAPI: ProjectAPI = {
     ) => {
       callback(event)
     }
-    ipcRenderer.on('project:tree-watch:event', listener)
+    ipcRenderer.on(IPC.PROJECT_TREE_WATCH_EVENT, listener)
     return () => {
-      ipcRenderer.removeListener('project:tree-watch:event', listener)
+      ipcRenderer.removeListener(IPC.PROJECT_TREE_WATCH_EVENT, listener)
     }
   }
 }
 
 const settingsAPI: SettingsAPI = {
   load: () => {
-    return ipcRenderer.invoke('settings:load')
+    return ipcRenderer.invoke(IPC.SETTINGS_LOAD)
   },
 
   save: (settings: SettingsState) => {
-    return ipcRenderer.invoke('settings:save', settings)
+    return ipcRenderer.invoke(IPC.SETTINGS_SAVE, settings)
   },
 
   update: (partial: Partial<SettingsState>) => {
-    return ipcRenderer.invoke('settings:update', partial)
+    return ipcRenderer.invoke(IPC.SETTINGS_UPDATE, partial)
   },
 
   registerShortcuts: () => {
-    return ipcRenderer.invoke('settings:register-shortcuts')
+    return ipcRenderer.invoke(IPC.SETTINGS_REGISTER_SHORTCUTS)
   },
 
   checkShortcutAvailable: (accelerator: string) => {
-    return ipcRenderer.invoke('settings:check-shortcut-available', accelerator)
+    return ipcRenderer.invoke(IPC.SETTINGS_CHECK_SHORTCUT_AVAILABLE, accelerator)
   },
 
   checkShortcutConflict: (accelerator: string, excludeKey?: string) => {
-    return ipcRenderer.invoke('settings:check-shortcut-conflict', accelerator, excludeKey)
+    return ipcRenderer.invoke(IPC.SETTINGS_CHECK_SHORTCUT_CONFLICT, accelerator, excludeKey)
   },
 
   onShortcutTriggered: (callback: (action: ShortcutAction) => void) => {
     const listener = (_: Electron.IpcRendererEvent, action: ShortcutAction) => {
       callback(action)
     }
-    ipcRenderer.on('shortcut:triggered', listener)
+    ipcRenderer.on(IPC.SHORTCUT_TRIGGERED, listener)
     return () => {
-      ipcRenderer.removeListener('shortcut:triggered', listener)
+      ipcRenderer.removeListener(IPC.SHORTCUT_TRIGGERED, listener)
     }
   },
 
@@ -1426,9 +1427,9 @@ const settingsAPI: SettingsAPI = {
     const listener = (_: Electron.IpcRendererEvent, action: ShortcutAction) => {
       callback(action)
     }
-    ipcRenderer.on('shortcut:window-triggered', listener)
+    ipcRenderer.on(IPC.SHORTCUT_WINDOW_TRIGGERED, listener)
     return () => {
-      ipcRenderer.removeListener('shortcut:window-triggered', listener)
+      ipcRenderer.removeListener(IPC.SHORTCUT_WINDOW_TRIGGERED, listener)
     }
   },
 
@@ -1436,54 +1437,54 @@ const settingsAPI: SettingsAPI = {
     const listener = () => {
       callback()
     }
-    ipcRenderer.on('shortcut:activated', listener)
+    ipcRenderer.on(IPC.SHORTCUT_ACTIVATED, listener)
     return () => {
-      ipcRenderer.removeListener('shortcut:activated', listener)
+      ipcRenderer.removeListener(IPC.SHORTCUT_ACTIVATED, listener)
     }
   }
 }
 
 const appInfoAPI: AppInfoAPI = {
   get: () => {
-    return ipcRenderer.invoke('app:get-info')
+    return ipcRenderer.invoke(IPC.APP_GET_INFO)
   },
   readNotice: () => {
-    return ipcRenderer.invoke('app:read-notice')
+    return ipcRenderer.invoke(IPC.APP_READ_NOTICE)
   },
   getPdfViewerUrl: () => {
-    return ipcRenderer.invoke('app:get-pdf-viewer-url')
+    return ipcRenderer.invoke(IPC.APP_GET_PDF_VIEWER_URL)
   }
 }
 
 const changelogAPI: ChangelogAPI = {
   getCurrent: (locale?: string) => {
-    return ipcRenderer.invoke('changelog:get-current', locale)
+    return ipcRenderer.invoke(IPC.CHANGELOG_GET_CURRENT, locale)
   }
 }
 
 const updaterAPI: UpdaterAPI = {
   getStatus: () => {
-    return ipcRenderer.invoke('updater:get-status')
+    return ipcRenderer.invoke(IPC.UPDATER_GET_STATUS)
   },
   checkNow: () => {
-    return ipcRenderer.invoke('updater:check-now')
+    return ipcRenderer.invoke(IPC.UPDATER_CHECK_NOW)
   },
   downloadNow: () => {
-    return ipcRenderer.invoke('updater:download-now')
+    return ipcRenderer.invoke(IPC.UPDATER_DOWNLOAD_NOW)
   },
   restartToUpdate: () => {
-    return ipcRenderer.invoke('updater:restart-to-update')
+    return ipcRenderer.invoke(IPC.UPDATER_RESTART_TO_UPDATE)
   },
   dismissBanner: () => {
-    return ipcRenderer.invoke('updater:dismiss-banner')
+    return ipcRenderer.invoke(IPC.UPDATER_DISMISS_BANNER)
   },
   onStatusChanged: (callback: (status: UpdaterStatus) => void) => {
     const listener = (_: Electron.IpcRendererEvent, status: UpdaterStatus) => {
       callback(status)
     }
-    ipcRenderer.on('updater:status-changed', listener)
+    ipcRenderer.on(IPC.UPDATER_STATUS_CHANGED, listener)
     return () => {
-      ipcRenderer.removeListener('updater:status-changed', listener)
+      ipcRenderer.removeListener(IPC.UPDATER_STATUS_CHANGED, listener)
     }
   }
 }
@@ -1506,172 +1507,172 @@ const debugAPI: DebugAPI = {
   autotestExit: debugAutotestExit,
   log: (message: string, data?: unknown) => {
     if (!debugEnabled) return
-    ipcRenderer.send('debug:log', { message, data })
+    ipcRenderer.send(IPC.DEBUG_LOG, { message, data })
   },
   focusWindow: () => {
-    return ipcRenderer.invoke('debug:focus-window')
+    return ipcRenderer.invoke(IPC.DEBUG_FOCUS_WINDOW)
   },
   getAppMetrics: () => {
-    return ipcRenderer.invoke('debug:get-app-metrics')
+    return ipcRenderer.invoke(IPC.DEBUG_GET_APP_METRICS)
   },
   getGitRuntimeMetrics: () => {
-    return ipcRenderer.invoke('debug:get-git-runtime-metrics')
+    return ipcRenderer.invoke(IPC.DEBUG_GET_GIT_RUNTIME_METRICS)
   },
   feedbackReset: () => {
-    return ipcRenderer.invoke('debug:feedback-reset')
+    return ipcRenderer.invoke(IPC.DEBUG_FEEDBACK_RESET)
   },
   feedbackSetMockIssues: (issues: FeedbackDebugRemoteIssue[]) => {
-    return ipcRenderer.invoke('debug:feedback-set-mock-issues', issues)
+    return ipcRenderer.invoke(IPC.DEBUG_FEEDBACK_SET_MOCK_ISSUES, issues)
   },
   feedbackGetLastOpenedUrl: () => {
-    return ipcRenderer.invoke('debug:feedback-get-last-opened-url')
+    return ipcRenderer.invoke(IPC.DEBUG_FEEDBACK_GET_LAST_OPENED_URL)
   },
   readTelemetryLog: () => {
-    return ipcRenderer.invoke('debug:read-telemetry-log') as Promise<string>
+    return ipcRenderer.invoke(IPC.DEBUG_READ_TELEMETRY_LOG) as Promise<string>
   },
   quit: () => {
-    return ipcRenderer.invoke('debug:quit')
+    return ipcRenderer.invoke(IPC.DEBUG_QUIT)
   }
 }
 
 const browserAPI: BrowserAPI = {
   create: (id: string, url?: string) => {
-    return ipcRenderer.invoke('browser:create', id, url)
+    return ipcRenderer.invoke(IPC.BROWSER_CREATE, id, url)
   },
   destroy: (id: string) => {
-    return ipcRenderer.invoke('browser:destroy', id)
+    return ipcRenderer.invoke(IPC.BROWSER_DESTROY, id)
   },
   navigate: (id: string, url: string) => {
-    return ipcRenderer.invoke('browser:navigate', id, url)
+    return ipcRenderer.invoke(IPC.BROWSER_NAVIGATE, id, url)
   },
   goBack: (id: string) => {
-    return ipcRenderer.invoke('browser:go-back', id)
+    return ipcRenderer.invoke(IPC.BROWSER_GO_BACK, id)
   },
   goForward: (id: string) => {
-    return ipcRenderer.invoke('browser:go-forward', id)
+    return ipcRenderer.invoke(IPC.BROWSER_GO_FORWARD, id)
   },
   reload: (id: string) => {
-    return ipcRenderer.invoke('browser:reload', id)
+    return ipcRenderer.invoke(IPC.BROWSER_RELOAD, id)
   },
   stop: (id: string) => {
-    return ipcRenderer.invoke('browser:stop', id)
+    return ipcRenderer.invoke(IPC.BROWSER_STOP, id)
   },
   setBounds: (id: string, rect: { x: number; y: number; width: number; height: number }) => {
-    return ipcRenderer.invoke('browser:set-bounds', id, rect)
+    return ipcRenderer.invoke(IPC.BROWSER_SET_BOUNDS, id, rect)
   },
   show: (id: string) => {
-    return ipcRenderer.invoke('browser:show', id)
+    return ipcRenderer.invoke(IPC.BROWSER_SHOW, id)
   },
   hide: (id: string) => {
-    return ipcRenderer.invoke('browser:hide', id)
+    return ipcRenderer.invoke(IPC.BROWSER_HIDE, id)
   },
   getNavState: (id: string) => {
-    return ipcRenderer.invoke('browser:get-nav-state', id)
+    return ipcRenderer.invoke(IPC.BROWSER_GET_NAV_STATE, id)
   },
   clearCookies: (maxAge?: number) => {
-    return ipcRenderer.invoke('browser:clear-cookies', maxAge)
+    return ipcRenderer.invoke(IPC.BROWSER_CLEAR_COOKIES, maxAge)
   },
   setRememberCookies: (rememberCookies: boolean) => {
-    return ipcRenderer.invoke('browser:set-remember-cookies', rememberCookies) as Promise<{ rememberCookies: boolean }>
+    return ipcRenderer.invoke(IPC.BROWSER_SET_REMEMBER_COOKIES, rememberCookies) as Promise<{ rememberCookies: boolean }>
   },
   showCookieMenu: (options: { rememberCookies: boolean; labels: { remember: string; clearDay: string; clearWeek: string; clearAll: string } }) => {
-    return ipcRenderer.invoke('browser:show-cookie-menu', options) as Promise<{ action: string; rememberCookies?: boolean } | null>
+    return ipcRenderer.invoke(IPC.BROWSER_SHOW_COOKIE_MENU, options) as Promise<{ action: string; rememberCookies?: boolean } | null>
   },
   onUrlChanged: (callback: (id: string, url: string) => void) => {
     const listener = (_: Electron.IpcRendererEvent, id: string, url: string) => {
       callback(id, url)
     }
-    ipcRenderer.on('browser:url-changed', listener)
+    ipcRenderer.on(IPC.BROWSER_URL_CHANGED, listener)
     return () => {
-      ipcRenderer.removeListener('browser:url-changed', listener)
+      ipcRenderer.removeListener(IPC.BROWSER_URL_CHANGED, listener)
     }
   },
   onTitleChanged: (callback: (id: string, title: string) => void) => {
     const listener = (_: Electron.IpcRendererEvent, id: string, title: string) => {
       callback(id, title)
     }
-    ipcRenderer.on('browser:title-changed', listener)
+    ipcRenderer.on(IPC.BROWSER_TITLE_CHANGED, listener)
     return () => {
-      ipcRenderer.removeListener('browser:title-changed', listener)
+      ipcRenderer.removeListener(IPC.BROWSER_TITLE_CHANGED, listener)
     }
   },
   onLoadingChanged: (callback: (id: string, isLoading: boolean) => void) => {
     const listener = (_: Electron.IpcRendererEvent, id: string, isLoading: boolean) => {
       callback(id, isLoading)
     }
-    ipcRenderer.on('browser:loading-changed', listener)
+    ipcRenderer.on(IPC.BROWSER_LOADING_CHANGED, listener)
     return () => {
-      ipcRenderer.removeListener('browser:loading-changed', listener)
+      ipcRenderer.removeListener(IPC.BROWSER_LOADING_CHANGED, listener)
     }
   },
   onNavStateChanged: (callback: (id: string, state: { canGoBack: boolean; canGoForward: boolean }) => void) => {
     const listener = (_: Electron.IpcRendererEvent, id: string, state: { canGoBack: boolean; canGoForward: boolean }) => {
       callback(id, state)
     }
-    ipcRenderer.on('browser:nav-state-changed', listener)
+    ipcRenderer.on(IPC.BROWSER_NAV_STATE_CHANGED, listener)
     return () => {
-      ipcRenderer.removeListener('browser:nav-state-changed', listener)
+      ipcRenderer.removeListener(IPC.BROWSER_NAV_STATE_CHANGED, listener)
     }
   },
   onFullscreenChanged: (callback: (id: string, isFullscreen: boolean) => void) => {
     const listener = (_: Electron.IpcRendererEvent, id: string, isFullscreen: boolean) => {
       callback(id, isFullscreen)
     }
-    ipcRenderer.on('browser:fullscreen-changed', listener)
+    ipcRenderer.on(IPC.BROWSER_FULLSCREEN_CHANGED, listener)
     return () => {
-      ipcRenderer.removeListener('browser:fullscreen-changed', listener)
+      ipcRenderer.removeListener(IPC.BROWSER_FULLSCREEN_CHANGED, listener)
     }
   },
   onEscapePressed: (callback: (id: string) => void) => {
     const listener = (_: Electron.IpcRendererEvent, id: string) => {
       callback(id)
     }
-    ipcRenderer.on('browser:escape-pressed', listener)
+    ipcRenderer.on(IPC.BROWSER_ESCAPE_PRESSED, listener)
     return () => {
-      ipcRenderer.removeListener('browser:escape-pressed', listener)
+      ipcRenderer.removeListener(IPC.BROWSER_ESCAPE_PRESSED, listener)
     }
   }
 }
 
 const feedbackAPI: FeedbackAPI = {
   load: () => {
-    return ipcRenderer.invoke('feedback:load')
+    return ipcRenderer.invoke(IPC.FEEDBACK_LOAD)
   },
   createSubmission: (payload: FeedbackSubmissionInput) => {
-    return ipcRenderer.invoke('feedback:create-submission', payload)
+    return ipcRenderer.invoke(IPC.FEEDBACK_CREATE_SUBMISSION, payload)
   },
   sync: (recordId?: string, force?: boolean) => {
-    return ipcRenderer.invoke('feedback:sync', recordId, force)
+    return ipcRenderer.invoke(IPC.FEEDBACK_SYNC, recordId, force)
   },
   reopenInBrowser: (recordId: string) => {
-    return ipcRenderer.invoke('feedback:reopen-in-browser', recordId)
+    return ipcRenderer.invoke(IPC.FEEDBACK_REOPEN_IN_BROWSER, recordId)
   },
   updatePreferences: (payload: Partial<FeedbackState['preferences']>) => {
-    return ipcRenderer.invoke('feedback:update-preferences', payload)
+    return ipcRenderer.invoke(IPC.FEEDBACK_UPDATE_PREFERENCES, payload)
   },
   removeRecord: (recordId: string) => {
-    return ipcRenderer.invoke('feedback:remove-record', recordId)
+    return ipcRenderer.invoke(IPC.FEEDBACK_REMOVE_RECORD, recordId)
   }
 }
 
 const codingAgentConfigAPI: CodingAgentConfigAPI = {
-  load: (command?: string) => ipcRenderer.invoke('coding-agent-config:load', command),
-  save: (config: CodingAgentConfigInput) => ipcRenderer.invoke('coding-agent-config:save', config),
-  update: (id: string, config: CodingAgentConfigInput) => ipcRenderer.invoke('coding-agent-config:update', id, config),
-  delete: (id: string) => ipcRenderer.invoke('coding-agent-config:delete', id)
+  load: (command?: string) => ipcRenderer.invoke(IPC.CODING_AGENT_CONFIG_LOAD, command),
+  save: (config: CodingAgentConfigInput) => ipcRenderer.invoke(IPC.CODING_AGENT_CONFIG_SAVE, config),
+  update: (id: string, config: CodingAgentConfigInput) => ipcRenderer.invoke(IPC.CODING_AGENT_CONFIG_UPDATE, id, config),
+  delete: (id: string) => ipcRenderer.invoke(IPC.CODING_AGENT_CONFIG_DELETE, id)
 }
 
 const codingAgentAPI: CodingAgentAPI = {
-  prepare: (command: string, executablePath?: string) => ipcRenderer.invoke('coding-agent:prepare', command, executablePath),
-  launch: (payload: CodingAgentLaunchInput) => ipcRenderer.invoke('coding-agent:launch', payload)
+  prepare: (command: string, executablePath?: string) => ipcRenderer.invoke(IPC.CODING_AGENT_PREPARE, command, executablePath),
+  launch: (payload: CodingAgentLaunchInput) => ipcRenderer.invoke(IPC.CODING_AGENT_LAUNCH, payload)
 }
 
 const telemetryAPI = {
   track: (name: string, properties?: Record<string, string | number | boolean | null>) => {
-    ipcRenderer.invoke('telemetry:track', name, properties)
+    ipcRenderer.invoke(IPC.TELEMETRY_TRACK, name, properties)
   },
-  getConsent: () => ipcRenderer.invoke('telemetry:get-consent') as Promise<boolean | null>,
-  setConsent: (consent: boolean) => ipcRenderer.invoke('telemetry:set-consent', consent) as Promise<{ instanceId: string | null }>
+  getConsent: () => ipcRenderer.invoke(IPC.TELEMETRY_GET_CONSENT) as Promise<boolean | null>,
+  setConsent: (consent: boolean) => ipcRenderer.invoke(IPC.TELEMETRY_SET_CONSENT, consent) as Promise<{ instanceId: string | null }>
 }
 
 contextBridge.exposeInMainWorld('electronAPI', {

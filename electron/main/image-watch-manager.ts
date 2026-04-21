@@ -7,6 +7,7 @@ import { watch, stat } from 'fs'
 import type { FSWatcher, Stats } from 'fs'
 import { resolve, normalize } from 'path'
 import type { BrowserWindow } from 'electron'
+import { IPC } from '../shared/ipc-channels'
 
 interface ImageWatchEntry {
   watcher: FSWatcher | null
@@ -172,7 +173,7 @@ export class ImageWatchManager {
 
   private emitChange(relativePath: string): void {
     if (this.mainWindow.isDestroyed()) return
-    this.mainWindow.webContents.send('project:image-file-changed', relativePath)
+    this.mainWindow.webContents.send(IPC.PROJECT_IMAGE_FILE_CHANGED, relativePath)
   }
 
   private cleanupEntry(entry: ImageWatchEntry): void {

@@ -66,6 +66,7 @@ import { FileWatchManager } from './file-watch-manager'
 import { ImageWatchManager } from './image-watch-manager'
 import { ProjectTreeWatchManager } from './project-tree-watch-manager'
 import { getUpdateService } from './update-service'
+import { IPC } from '../shared/ipc-channels'
 
 let gitWatchManager: GitWatchManager | null = null
 let ripgrepSearchManager: RipgrepSearchManager | null = null
@@ -293,7 +294,7 @@ export function getTerminalBuffer(
 
     bufferRequestCallbacks.set(requestId, { resolve, timer })
 
-    mainWindow.webContents.send('terminal:request-buffer', requestId, terminalId, options)
+    mainWindow.webContents.send(IPC.TERMINAL_REQUEST_BUFFER, requestId, terminalId, options)
   })
 }
 
@@ -340,7 +341,7 @@ export function sendPromptViaBridge(
 
     promptBridgeCallbacks.set(requestId, { resolve, timer })
 
-    mainWindow.webContents.send('prompt:bridge-send', {
+    mainWindow.webContents.send(IPC.PROMPT_BRIDGE_SEND, {
       requestId,
       terminalId,
       content,
@@ -374,18 +375,18 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
 
   gitWatchManager = new GitWatchManager((terminalId, info) => {
     if (mainWindow.isDestroyed()) return
-    mainWindow.webContents.send('git:terminal-info', terminalId, info)
+    mainWindow.webContents.send(IPC.GIT_TERMINAL_INFO, terminalId, info)
   })
   fileWatchManager = new FileWatchManager(mainWindow)
   imageWatchManager = new ImageWatchManager(mainWindow)
   projectTreeWatchManager = new ProjectTreeWatchManager(mainWindow)
 
-  ipcMain.on('debug:log', (_event, payload: { message?: string; data?: unknown }) => {
+  ipcMain.on(IPC.DEBUG_LOG, (_event, payload: { message?: string; data?: unknown }) => {
     log('[RendererDebug]', payload?.message ?? '', payload?.data ?? '')
   })
 
   // Listen to buffer responses returned by the renderer process
-  ipcMain.on('terminal:buffer-response', (_event, requestId: string, result: TerminalBufferResult) => {
+  ipcMain.on(IPC.TERMINAL_BUFFER_RESPONSE, (_event, requestId: string, result: TerminalBufferResult) => {
     const pending = bufferRequestCallbacks.get(requestId)
     if (pending) {
       clearTimeout(pending.timer)
@@ -395,7 +396,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   })
 
   // Listen to Prompt Bridge responses returned by the renderer process
-  ipcMain.on('prompt:bridge-response', (_event, requestId: string, result: PromptBridgeSendResult) => {
+  ipcMain.on(IPC.PROMPT_BRIDGE_RESPONSE, (_event, requestId: string, result: PromptBridgeSendResult) => {
     const pending = promptBridgeCallbacks.get(requestId)
     if (pending) {
       clearTimeout(pending.timer)
@@ -404,22 +405,22 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     }
   })
   // --- Telemetry ---
-  ipcMain.handle('telemetry:track', (_, name: string, properties?: Record<string, string | number | boolean | null>) => {
+  ipcMain.handle(IPC.TELEMETRY_TRACK, (_, name: string, properties?: Record<string, string | number | boolean | null>) => {
     getTelemetryService().track(name, properties ?? undefined)
   })
-  ipcMain.handle('telemetry:get-consent', () => {
+  ipcMain.handle(IPC.TELEMETRY_GET_CONSENT, () => {
     return getTelemetryConsent()
   })
-  ipcMain.handle('telemetry:set-consent', (_, consent: boolean) => {
+  ipcMain.handle(IPC.TELEMETRY_SET_CONSENT, (_, consent: boolean) => {
     const instanceId = setTelemetryConsent(consent)
     getTelemetryService().onConsentChanged(consent, instanceId)
     return { instanceId }
   })
 
-  ipcMain.handle('debug:get-app-metrics', () => {
+  ipcMain.handle(IPC.DEBUG_GET_APP_METRICS, () => {
     return app.getAppMetrics()
   })
-  ipcMain.handle('debug:focus-window', () => {
+  ipcMain.handle(IPC.DEBUG_FOCUS_WINDOW, () => {
     if (mainWindow.isDestroyed()) return false
 
     if (mainWindow.isMinimized()) {
@@ -437,20 +438,20 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
 
     return mainWindow.isFocused()
   })
-  ipcMain.handle('debug:get-git-runtime-metrics', () => {
+  ipcMain.handle(IPC.DEBUG_GET_GIT_RUNTIME_METRICS, () => {
     return gitRuntimeManager.getMetrics()
   })
-  ipcMain.handle('debug:feedback-reset', () => {
+  ipcMain.handle(IPC.DEBUG_FEEDBACK_RESET, () => {
     feedbackDebugLastOpenedUrl = null
     getFeedbackStorage().debugReset()
   })
-  ipcMain.handle('debug:feedback-set-mock-issues', (_, issues) => {
+  ipcMain.handle(IPC.DEBUG_FEEDBACK_SET_MOCK_ISSUES, (_, issues) => {
     getFeedbackStorage().debugSetMockIssues(Array.isArray(issues) ? issues : [])
   })
-  ipcMain.handle('debug:feedback-get-last-opened-url', () => {
+  ipcMain.handle(IPC.DEBUG_FEEDBACK_GET_LAST_OPENED_URL, () => {
     return feedbackDebugLastOpenedUrl
   })
-  ipcMain.handle('debug:read-telemetry-log', () => {
+  ipcMain.handle(IPC.DEBUG_READ_TELEMETRY_LOG, () => {
     try {
       const logPath = getTelemetryService().logFilePath
       if (!logPath) return ''
@@ -461,7 +462,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
       return ''
     }
   })
-  ipcMain.handle('debug:quit', () => {
+  ipcMain.handle(IPC.DEBUG_QUIT, () => {
     // Flush telemetry then exit — fire-and-forget with a short timeout
     getTelemetryService().shutdown()
       .catch(() => {})
@@ -534,7 +535,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
       // IPC data buffer: merge high-frequency PTY output into batched sends
       const dataBuffer = new TerminalDataBuffer(id, (tid, mergedData) => {
         if (!mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('terminal:data', tid, mergedData)
+          mainWindow.webContents.send(IPC.TERMINAL_DATA, tid, mergedData)
         }
         // Diagnostic counter
         if (shouldLog) {
@@ -575,7 +576,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
 
       const exitDisposable = ptyProcess.onExit(({ exitCode, signal }) => {
         if (!mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('terminal:exit', id, exitCode, signal)
+          mainWindow.webContents.send(IPC.TERMINAL_EXIT, id, exitCode, signal)
         }
       })
 
@@ -588,21 +589,21 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     }
   }
   // App info
-  ipcMain.handle('app:get-info', () => {
+  ipcMain.handle(IPC.APP_GET_INFO, () => {
     return getAppInfo()
   })
 
-  ipcMain.handle('feedback:load', () => {
+  ipcMain.handle(IPC.FEEDBACK_LOAD, () => {
     return getFeedbackStorage().get()
   })
 
-  ipcMain.handle('feedback:update-preferences', (_, payload) => {
+  ipcMain.handle(IPC.FEEDBACK_UPDATE_PREFERENCES, (_, payload) => {
     return getFeedbackStorage().updatePreferences(
       payload && typeof payload === 'object' ? payload : {}
     )
   })
 
-  ipcMain.handle('feedback:create-submission', async (_, payload) => {
+  ipcMain.handle(IPC.FEEDBACK_CREATE_SUBMISSION, async (_, payload) => {
     const storage = getFeedbackStorage()
     const appInfo = getAppInfo()
     const result = storage.createSubmission(payload, {
@@ -645,11 +646,11 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     }
   })
 
-  ipcMain.handle('feedback:sync', async (_, recordId?: string, force?: boolean) => {
+  ipcMain.handle(IPC.FEEDBACK_SYNC, async (_, recordId?: string, force?: boolean) => {
     return await getFeedbackStorage().sync(recordId, force === true)
   })
 
-  ipcMain.handle('feedback:reopen-in-browser', async (_, recordId: string) => {
+  ipcMain.handle(IPC.FEEDBACK_REOPEN_IN_BROWSER, async (_, recordId: string) => {
     const storage = getFeedbackStorage()
     const record = storage.getRecord(recordId)
     if (!record) {
@@ -671,14 +672,14 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     }
   })
 
-  ipcMain.handle('feedback:remove-record', (_, recordId: string) => {
+  ipcMain.handle(IPC.FEEDBACK_REMOVE_RECORD, (_, recordId: string) => {
     const storage = getFeedbackStorage()
     storage.removeRecord(recordId)
     return storage.get()
   })
 
   // Read NOTICE / ThirdPartyNotices file for open-source license display
-  ipcMain.handle('app:read-notice', () => {
+  ipcMain.handle(IPC.APP_READ_NOTICE, () => {
     const basePath = app.isPackaged ? process.resourcesPath : app.getAppPath()
     // Prefer auto-generated ThirdPartyNotices.txt, fall back to NOTICE.txt
     for (const filename of ['ThirdPartyNotices.txt', 'NOTICE.txt']) {
@@ -691,14 +692,14 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     return null
   })
 
-  ipcMain.handle('changelog:get-current', (_event, locale?: string) => {
+  ipcMain.handle(IPC.CHANGELOG_GET_CURRENT, (_event, locale?: string) => {
     return readCurrentChangelog(locale)
   })
 
   // URL for the vendored PDF viewer (resources/pdfjs/app/viewer.html).
   // Returned as a properly-encoded file:// URL so the renderer can embed it
   // in an iframe without platform-specific path fiddling.
-  ipcMain.handle('app:get-pdf-viewer-url', () => {
+  ipcMain.handle(IPC.APP_GET_PDF_VIEWER_URL, () => {
     const basePath = app.isPackaged
       ? join(process.resourcesPath, 'resources')
       : join(app.getAppPath(), 'resources')
@@ -708,42 +709,42 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     return `file://${leading}${segments.join('/')}`
   })
 
-  ipcMain.handle('updater:get-status', () => {
+  ipcMain.handle(IPC.UPDATER_GET_STATUS, () => {
     return getUpdateService().getStatus()
   })
 
-  ipcMain.handle('updater:check-now', async () => {
+  ipcMain.handle(IPC.UPDATER_CHECK_NOW, async () => {
     return await getUpdateService().checkNow()
   })
 
-  ipcMain.handle('updater:download-now', async () => {
+  ipcMain.handle(IPC.UPDATER_DOWNLOAD_NOW, async () => {
     return await getUpdateService().downloadNow()
   })
 
-  ipcMain.handle('updater:restart-to-update', async () => {
+  ipcMain.handle(IPC.UPDATER_RESTART_TO_UPDATE, async () => {
     if (!options.onRestartToApplyUpdate) {
       return { success: false, error: 'Restart action is unavailable.' }
     }
     return await options.onRestartToApplyUpdate()
   })
 
-  ipcMain.handle('updater:dismiss-banner', () => {
+  ipcMain.handle(IPC.UPDATER_DISMISS_BANNER, () => {
     return getUpdateService().dismissBanner()
   })
 
   // Create a new terminal
-  ipcMain.handle('terminal:create', (_, id: string, options?: PtyOptions) => {
+  ipcMain.handle(IPC.TERMINAL_CREATE, (_, id: string, options?: PtyOptions) => {
     return createTerminalProcess(id, options)
   })
 
   // Write data to terminal
-  ipcMain.handle('terminal:write', async (_, id: string, data: string) => {
+  ipcMain.handle(IPC.TERMINAL_WRITE, async (_, id: string, data: string) => {
     // Git activity notification moved to ptyProcess.onData with 500ms throttle
     // (user keystrokes don't change git state; PTY output means command execution)
     return await ptyManager.write(id, data)
   })
 
-  ipcMain.handle('terminal:send-input-sequence', async (_, id: string, payload: TerminalInputSequencePayload) => {
+  ipcMain.handle(IPC.TERMINAL_SEND_INPUT_SEQUENCE, async (_, id: string, payload: TerminalInputSequencePayload) => {
     if (payload.kind === 'raw') {
       const ok = await ptyManager.write(id, payload.content)
       return ok ? { ok: true } : { ok: false, phase: 'content' as const, error: 'pty write failed' }
@@ -755,7 +756,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     return await ptyManager.sendInputSequence(id, prepared)
   })
 
-  ipcMain.handle('terminal:get-input-capabilities', (_, id: string) => {
+  ipcMain.handle(IPC.TERMINAL_GET_INPUT_CAPABILITIES, (_, id: string) => {
     return {
       bracketedPasteEnabled: terminalBracketedPasteState.get(id) ?? false,
       shellKind: ptyManager.getShellKind(id)
@@ -767,24 +768,24 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   // terminals don't generate high-rate unbatched IPC traffic.
   // The state is also persisted in terminalFastPathState so that it survives
   // the race where setVisibility fires before the buffer is created.
-  ipcMain.on('terminal:set-buffer-fast-path', (_, id: string, enabled: boolean) => {
+  ipcMain.on(IPC.TERMINAL_SET_BUFFER_FAST_PATH, (_, id: string, enabled: boolean) => {
     terminalFastPathState.set(id, enabled)
     const buf = terminalDataBuffers.get(id)
     if (buf) buf.setFastPathEnabled(enabled)
   })
 
-  ipcMain.on('terminal:notify-interactive-input', (_, id: string) => {
+  ipcMain.on(IPC.TERMINAL_NOTIFY_INTERACTIVE_INPUT, (_, id: string) => {
     const buf = terminalDataBuffers.get(id)
     if (buf) buf.notifyInteractiveInput()
   })
 
   // Resize terminal
-  ipcMain.handle('terminal:resize', (_, id: string, cols: number, rows: number) => {
+  ipcMain.handle(IPC.TERMINAL_RESIZE, (_, id: string, cols: number, rows: number) => {
     return ptyManager.resize(id, cols, rows)
   })
 
   // Dispose terminal
-  ipcMain.handle('terminal:dispose', (_, id: string) => {
+  ipcMain.handle(IPC.TERMINAL_DISPOSE, (_, id: string) => {
     // Flush and dispose the data buffer
     const buf = terminalDataBuffers.get(id)
     if (buf) {
@@ -802,17 +803,17 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   const promptStorage = getPromptStorage()
 
   // Load all prompts
-  ipcMain.handle('prompt:load', () => {
+  ipcMain.handle(IPC.PROMPT_LOAD, () => {
     return promptStorage.getAll()
   })
 
   // Save a prompt
-  ipcMain.handle('prompt:save', (_, prompt: Prompt) => {
+  ipcMain.handle(IPC.PROMPT_SAVE, (_, prompt: Prompt) => {
     return promptStorage.save(prompt)
   })
 
   // Delete a prompt
-  ipcMain.handle('prompt:delete', (_, id: string) => {
+  ipcMain.handle(IPC.PROMPT_DELETE, (_, id: string) => {
     return promptStorage.delete(id)
   })
 
@@ -820,22 +821,22 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   const terminalConfigStorage = getTerminalConfigStorage()
 
   // Load terminal config
-  ipcMain.handle('terminal-config:load', () => {
+  ipcMain.handle(IPC.TERMINAL_CONFIG_LOAD, () => {
     return terminalConfigStorage.get()
   })
 
   // Save terminal config
-  ipcMain.handle('terminal-config:save', (_, config: TerminalWindowConfig) => {
+  ipcMain.handle(IPC.TERMINAL_CONFIG_SAVE, (_, config: TerminalWindowConfig) => {
     return terminalConfigStorage.save(config)
   })
 
   // Update terminal config (partial)
-  ipcMain.handle('terminal-config:update', (_, partial: Partial<TerminalWindowConfig>) => {
+  ipcMain.handle(IPC.TERMINAL_CONFIG_UPDATE, (_, partial: Partial<TerminalWindowConfig>) => {
     return terminalConfigStorage.update(partial)
   })
 
   // Dialog handlers
-  ipcMain.handle('dialog:openDirectory', async () => {
+  ipcMain.handle(IPC.DIALOG_OPEN_DIRECTORY, async () => {
     try {
       const result = await dialog.showOpenDialog(mainWindow, {
         properties: ['openDirectory']
@@ -850,7 +851,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     }
   })
 
-  ipcMain.handle('dialog:openTextFile', async (_, payload?: {
+  ipcMain.handle(IPC.DIALOG_OPEN_TEXT_FILE, async (_, payload?: {
     title?: string
     filters?: Array<{ name: string; extensions: string[] }>
   }) => {
@@ -874,7 +875,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     }
   })
 
-  ipcMain.handle('dialog:saveTextFile', async (_, payload: { title?: string; defaultFileName?: string; content: string }) => {
+  ipcMain.handle(IPC.DIALOG_SAVE_TEXT_FILE, async (_, payload: { title?: string; defaultFileName?: string; content: string }) => {
     try {
       if (!payload || typeof payload.content !== 'string') {
         return { success: false, error: 'Invalid export content' }
@@ -899,7 +900,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   })
 
   // Shell handlers
-  ipcMain.handle('shell:open-path', async (_, targetPath: string) => {
+  ipcMain.handle(IPC.SHELL_OPEN_PATH, async (_, targetPath: string) => {
     try {
       const result = await shell.openPath(targetPath)
       if (result) {
@@ -912,7 +913,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     }
   })
 
-  ipcMain.handle('shell:open-external', async (_, url: string) => {
+  ipcMain.handle(IPC.SHELL_OPEN_EXTERNAL, async (_, url: string) => {
     const result = await openExternalUrlWithConfirm(mainWindow, url)
     if (!result.success && result.error && !result.canceled && !result.blocked) {
       console.error('Failed to open external url:', result.error)
@@ -920,71 +921,71 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     return result
   })
 
-  ipcMain.handle('clipboard:write-text', async (_, text: string) => {
+  ipcMain.handle(IPC.CLIPBOARD_WRITE_TEXT, async (_, text: string) => {
     clipboard.writeText(text)
     return true
   })
 
-  ipcMain.handle('clipboard:read-text', async () => {
+  ipcMain.handle(IPC.CLIPBOARD_READ_TEXT, async () => {
     return clipboard.readText()
   })
 
   browserViewManager.init(mainWindow)
 
-  ipcMain.handle('browser:create', (_, id: string, url?: string) => {
+  ipcMain.handle(IPC.BROWSER_CREATE, (_, id: string, url?: string) => {
     return browserViewManager.create(id, url)
   })
 
-  ipcMain.handle('browser:destroy', (_, id: string) => {
+  ipcMain.handle(IPC.BROWSER_DESTROY, (_, id: string) => {
     return browserViewManager.destroy(id)
   })
 
-  ipcMain.handle('browser:navigate', (_, id: string, url: string) => {
+  ipcMain.handle(IPC.BROWSER_NAVIGATE, (_, id: string, url: string) => {
     return browserViewManager.navigate(id, url)
   })
 
-  ipcMain.handle('browser:go-back', (_, id: string) => {
+  ipcMain.handle(IPC.BROWSER_GO_BACK, (_, id: string) => {
     return browserViewManager.goBack(id)
   })
 
-  ipcMain.handle('browser:go-forward', (_, id: string) => {
+  ipcMain.handle(IPC.BROWSER_GO_FORWARD, (_, id: string) => {
     return browserViewManager.goForward(id)
   })
 
-  ipcMain.handle('browser:reload', (_, id: string) => {
+  ipcMain.handle(IPC.BROWSER_RELOAD, (_, id: string) => {
     return browserViewManager.reload(id)
   })
 
-  ipcMain.handle('browser:stop', (_, id: string) => {
+  ipcMain.handle(IPC.BROWSER_STOP, (_, id: string) => {
     return browserViewManager.stop(id)
   })
 
-  ipcMain.handle('browser:set-bounds', (_, id: string, rect: { x: number; y: number; width: number; height: number }) => {
+  ipcMain.handle(IPC.BROWSER_SET_BOUNDS, (_, id: string, rect: { x: number; y: number; width: number; height: number }) => {
     return browserViewManager.setBounds(id, rect)
   })
 
-  ipcMain.handle('browser:show', (_, id: string) => {
+  ipcMain.handle(IPC.BROWSER_SHOW, (_, id: string) => {
     return browserViewManager.show(id)
   })
 
-  ipcMain.handle('browser:hide', (_, id: string) => {
+  ipcMain.handle(IPC.BROWSER_HIDE, (_, id: string) => {
     return browserViewManager.hide(id)
   })
 
-  ipcMain.handle('browser:get-nav-state', (_, id: string) => {
+  ipcMain.handle(IPC.BROWSER_GET_NAV_STATE, (_, id: string) => {
     return browserViewManager.getNavState(id)
   })
 
-  ipcMain.handle('browser:clear-cookies', (_, maxAge?: number) => {
+  ipcMain.handle(IPC.BROWSER_CLEAR_COOKIES, (_, maxAge?: number) => {
     return browserViewManager.clearCookies(maxAge)
   })
 
-  ipcMain.handle('browser:set-remember-cookies', (_, rememberCookies: boolean) => {
+  ipcMain.handle(IPC.BROWSER_SET_REMEMBER_COOKIES, (_, rememberCookies: boolean) => {
     return browserViewManager.setRememberCookies(rememberCookies)
   })
 
   ipcMain.handle(
-    'browser:show-cookie-menu',
+    IPC.BROWSER_SHOW_COOKIE_MENU,
     (_, options: { rememberCookies: boolean; labels: { remember: string; clearDay: string; clearWeek: string; clearAll: string } }) => {
       return new Promise<{ action: string; rememberCookies?: boolean } | null>((resolve) => {
         const { rememberCookies, labels } = options
@@ -1020,40 +1021,40 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   const commandPresetStorage = getCommandPresetStorage()
 
   // Load all command presets
-  ipcMain.handle('command-preset:load', () => {
+  ipcMain.handle(IPC.COMMAND_PRESET_LOAD, () => {
     return commandPresetStorage.getAll()
   })
 
   // Save a command preset
-  ipcMain.handle('command-preset:save', (_, preset: CommandPreset) => {
+  ipcMain.handle(IPC.COMMAND_PRESET_SAVE, (_, preset: CommandPreset) => {
     return commandPresetStorage.save(preset)
   })
 
   // Delete a command preset
-  ipcMain.handle('command-preset:delete', (_, id: string) => {
+  ipcMain.handle(IPC.COMMAND_PRESET_DELETE, (_, id: string) => {
     return commandPresetStorage.delete(id)
   })
 
   // Coding Agent configuration storage
   const codingAgentConfigStorage = getCodingAgentConfigStorage()
 
-  ipcMain.handle('coding-agent-config:load', (_, command?: string) => {
+  ipcMain.handle(IPC.CODING_AGENT_CONFIG_LOAD, (_, command?: string) => {
     return codingAgentConfigStorage.get(command)
   })
 
-  ipcMain.handle('coding-agent-config:save', (_, config: CodingAgentConfigInput) => {
+  ipcMain.handle(IPC.CODING_AGENT_CONFIG_SAVE, (_, config: CodingAgentConfigInput) => {
     return codingAgentConfigStorage.save(config)
   })
 
-  ipcMain.handle('coding-agent-config:update', (_, id: string, config: CodingAgentConfigInput) => {
+  ipcMain.handle(IPC.CODING_AGENT_CONFIG_UPDATE, (_, id: string, config: CodingAgentConfigInput) => {
     return codingAgentConfigStorage.update(id, config)
   })
 
-  ipcMain.handle('coding-agent-config:delete', (_, id: string) => {
+  ipcMain.handle(IPC.CODING_AGENT_CONFIG_DELETE, (_, id: string) => {
     return codingAgentConfigStorage.delete(id)
   })
 
-  ipcMain.handle('coding-agent:prepare', async (_, command: string, executablePath?: string) => {
+  ipcMain.handle(IPC.CODING_AGENT_PREPARE, async (_, command: string, executablePath?: string) => {
     const info = await getCodingAgentRuntimeInfo(command || '', executablePath || undefined)
     if (!info.success) {
       return { success: false, error: info.error }
@@ -1061,7 +1062,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     return { success: true }
   })
 
-  ipcMain.handle('coding-agent:launch', async (_, payload: { terminalId: string; config: CodingAgentConfigInput; cols?: number; rows?: number }) => {
+  ipcMain.handle(IPC.CODING_AGENT_LAUNCH, async (_, payload: { terminalId: string; config: CodingAgentConfigInput; cols?: number; rows?: number }) => {
     const terminalId = payload?.terminalId
     if (!terminalId) {
       return { success: false, error: 'Terminal ID missing' }
@@ -1142,110 +1143,110 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   const appStateStorage = getAppStateStorage()
 
   // Load app state
-  ipcMain.handle('app-state:load', () => {
+  ipcMain.handle(IPC.APP_STATE_LOAD, () => {
     log('[IPC] app-state:load')
     return appStateStorage.get()
   })
 
   // Save app state
-  ipcMain.handle('app-state:save', (_, state: AppState) => {
+  ipcMain.handle(IPC.APP_STATE_SAVE, (_, state: AppState) => {
     return appStateStorage.save(state)
   })
 
   // Git handlers
   // Check if Git is installed
-  ipcMain.handle('git:check-installed', async () => {
+  ipcMain.handle(IPC.GIT_CHECK_INSTALLED, async () => {
     return await checkGitInstalled()
   })
 
   // Resolve git repo root for a given path
-  ipcMain.handle('git:resolve-repo-root', async (_, cwd: string) => {
+  ipcMain.handle(IPC.GIT_RESOLVE_REPO_ROOT, async (_, cwd: string) => {
     return await resolveRepoRoot(cwd)
   })
 
   // Get Git diff for a directory
-  ipcMain.handle('git:get-diff', async (_, cwd: string, options?: { scope?: 'root-only' | 'full' }) => {
+  ipcMain.handle(IPC.GIT_GET_DIFF, async (_, cwd: string, options?: { scope?: 'root-only' | 'full' }) => {
     return await getGitDiff(cwd, options)
   })
 
   // Get Git history list
-  ipcMain.handle('git:get-history', async (_, cwd: string, options?: { limit?: number; skip?: number }) => {
+  ipcMain.handle(IPC.GIT_GET_HISTORY, async (_, cwd: string, options?: { limit?: number; skip?: number }) => {
     return await getGitHistory(cwd, options?.limit, options?.skip)
   })
 
   // Get Git history diff (range + file)
-  ipcMain.handle('git:get-history-diff', async (_, cwd: string, options: GitHistoryDiffOptions) => {
+  ipcMain.handle(IPC.GIT_GET_HISTORY_DIFF, async (_, cwd: string, options: GitHistoryDiffOptions) => {
     return await getGitHistoryDiff(cwd, options)
   })
 
-  ipcMain.handle('git:get-history-file-content', async (_, cwd: string, options: GitHistoryFileContentOptions) => {
+  ipcMain.handle(IPC.GIT_GET_HISTORY_FILE_CONTENT, async (_, cwd: string, options: GitHistoryFileContentOptions) => {
     return await getGitHistoryFileContent(cwd, options)
   })
 
   // Get Git file content for diff view
-  ipcMain.handle('git:get-file-content', async (_, cwd: string, file: Pick<GitFileStatus, 'filename' | 'status' | 'originalFilename' | 'changeType' | 'isSubmoduleEntry'>, repoRoot?: string) => {
+  ipcMain.handle(IPC.GIT_GET_FILE_CONTENT, async (_, cwd: string, file: Pick<GitFileStatus, 'filename' | 'status' | 'originalFilename' | 'changeType' | 'isSubmoduleEntry'>, repoRoot?: string) => {
     return await getGitFileContent(cwd, file, repoRoot)
   })
 
   // Save file content to workspace
-  ipcMain.handle('git:save-file-content', async (_, cwd: string, filename: string, content: string) => {
+  ipcMain.handle(IPC.GIT_SAVE_FILE_CONTENT, async (_, cwd: string, filename: string, content: string) => {
     return await saveGitFileContent(cwd, filename, content)
   })
 
-  ipcMain.handle('git:stage-file', async (_, cwd: string, filename: string, repoRoot?: string) => {
+  ipcMain.handle(IPC.GIT_STAGE_FILE, async (_, cwd: string, filename: string, repoRoot?: string) => {
     return await stageGitFile(cwd, filename, repoRoot)
   })
 
-  ipcMain.handle('git:unstage-file', async (_, cwd: string, filename: string, repoRoot?: string) => {
+  ipcMain.handle(IPC.GIT_UNSTAGE_FILE, async (_, cwd: string, filename: string, repoRoot?: string) => {
     return await unstageGitFile(cwd, filename, repoRoot)
   })
 
-  ipcMain.handle('git:discard-file', async (_, cwd: string, file: Pick<GitFileStatus, 'filename' | 'changeType' | 'status' | 'isSubmoduleEntry'>, repoRoot?: string) => {
+  ipcMain.handle(IPC.GIT_DISCARD_FILE, async (_, cwd: string, file: Pick<GitFileStatus, 'filename' | 'changeType' | 'status' | 'isSubmoduleEntry'>, repoRoot?: string) => {
     return await discardGitFile(cwd, file, repoRoot)
   })
 
-  ipcMain.handle('git:get-submodules', async (_, cwd: string) => {
+  ipcMain.handle(IPC.GIT_GET_SUBMODULES, async (_, cwd: string) => {
     const meta = await getGitRepoMeta(cwd)
     if (!meta.isRepo || !meta.repoRoot || !meta.gitExecutable) return []
     return await detectSubmodulesRecursive(meta.repoRoot, meta.gitExecutable)
   })
 
-  ipcMain.handle('git:update-index-content', async (_, cwd: string, filename: string, content: string) => {
+  ipcMain.handle(IPC.GIT_UPDATE_INDEX_CONTENT, async (_, cwd: string, filename: string, content: string) => {
     return await updateGitIndexContent(cwd, filename, content)
   })
 
   // Get terminal's current working directory
-  ipcMain.handle('git:get-terminal-cwd', async (_, terminalId: string) => {
+  ipcMain.handle(IPC.GIT_GET_TERMINAL_CWD, async (_, terminalId: string) => {
     return await getTerminalCwd(terminalId)
   })
 
   // Get terminal's cwd + git branch
-  ipcMain.handle('git:get-terminal-info', async (_, terminalId: string) => {
+  ipcMain.handle(IPC.GIT_GET_TERMINAL_INFO, async (_, terminalId: string) => {
     return await getTerminalGitInfo(terminalId)
   })
-  ipcMain.handle('git:subscribe-terminal-info', async (_event, terminalId: string) => {
+  ipcMain.handle(IPC.GIT_SUBSCRIBE_TERMINAL_INFO, async (_event, terminalId: string) => {
     await gitWatchManager?.subscribe(terminalId)
     return { success: true }
   })
-  ipcMain.handle('git:unsubscribe-terminal-info', async (_event, terminalId: string) => {
+  ipcMain.handle(IPC.GIT_UNSUBSCRIBE_TERMINAL_INFO, async (_event, terminalId: string) => {
     gitWatchManager?.unsubscribe(terminalId)
     return { success: true }
   })
-  ipcMain.handle('git:notify-terminal-activity', async (_event, terminalId: string) => {
+  ipcMain.handle(IPC.GIT_NOTIFY_TERMINAL_ACTIVITY, async (_event, terminalId: string) => {
     gitWatchManager?.notifyTerminalActivity(terminalId)
     return { success: true }
   })
-  ipcMain.handle('git:notify-terminal-focus', async (_event, terminalId: string) => {
+  ipcMain.handle(IPC.GIT_NOTIFY_TERMINAL_FOCUS, async (_event, terminalId: string) => {
     gitWatchManager?.notifyTerminalFocus(terminalId)
     return { success: true }
   })
-  ipcMain.handle('git:notify-terminal-git-update', async (_event, terminalId: string) => {
+  ipcMain.handle(IPC.GIT_NOTIFY_TERMINAL_GIT_UPDATE, async (_event, terminalId: string) => {
     gitWatchManager?.notifyTerminalGitUpdate(terminalId)
     return { success: true }
   })
 
   // Background diff cache warming — pre-compute diff so opening the panel is instant
-  ipcMain.handle('git:warm-diff-cache', async (_, cwd: string) => {
+  ipcMain.handle(IPC.GIT_WARM_DIFF_CACHE, async (_, cwd: string) => {
     try {
       await getGitDiff(cwd, { scope: 'full' })
       return { success: true }
@@ -1255,15 +1256,15 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   })
 
   // Project editor handlers
-  ipcMain.handle('project:list-directory', async (_, root: string, path: string) => {
+  ipcMain.handle(IPC.PROJECT_LIST_DIRECTORY, async (_, root: string, path: string) => {
     return await listDirectory(root, path)
   })
 
-  ipcMain.handle('project:read-file', async (_, root: string, path: string) => {
+  ipcMain.handle(IPC.PROJECT_READ_FILE, async (_, root: string, path: string) => {
     return await readProjectFile(root, path)
   })
 
-  ipcMain.handle('project:save-file', async (_, root: string, path: string, content: string) => {
+  ipcMain.handle(IPC.PROJECT_SAVE_FILE, async (_, root: string, path: string, content: string) => {
     const result = await saveProjectFile(root, path, content)
     if (result.success && fileWatchManager) {
       const fullPath = resolveInRoot(resolve(root), path)
@@ -1274,7 +1275,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     return result
   })
 
-  ipcMain.handle('project:watch-file', async (_, root: string, path: string) => {
+  ipcMain.handle(IPC.PROJECT_WATCH_FILE, async (_, root: string, path: string) => {
     const fullPath = resolveInRoot(resolve(root), path)
     if (!fullPath) {
       return { success: false, error: 'Invalid path.' }
@@ -1283,7 +1284,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     return { success: true }
   })
 
-  ipcMain.handle('project:unwatch-file', async (_, root: string, path: string) => {
+  ipcMain.handle(IPC.PROJECT_UNWATCH_FILE, async (_, root: string, path: string) => {
     const fullPath = resolveInRoot(resolve(root), path)
     if (!fullPath) {
       return { success: false }
@@ -1292,75 +1293,75 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     return { success: true }
   })
 
-  ipcMain.handle('project:watch-image-files', async (_, root: string, relativePaths: string[]) => {
+  ipcMain.handle(IPC.PROJECT_WATCH_IMAGE_FILES, async (_, root: string, relativePaths: string[]) => {
     if (!root || !Array.isArray(relativePaths)) return { success: false }
     imageWatchManager?.watchImages(root, relativePaths)
     return { success: true }
   })
 
-  ipcMain.handle('project:unwatch-image-files', async (_, root: string, relativePaths: string[]) => {
+  ipcMain.handle(IPC.PROJECT_UNWATCH_IMAGE_FILES, async (_, root: string, relativePaths: string[]) => {
     if (!root || !Array.isArray(relativePaths)) return { success: false }
     imageWatchManager?.unwatchImages(root, relativePaths)
     return { success: true }
   })
 
-  ipcMain.handle('project:unwatch-all-image-files', async () => {
+  ipcMain.handle(IPC.PROJECT_UNWATCH_ALL_IMAGE_FILES, async () => {
     imageWatchManager?.unwatchAll()
     return { success: true }
   })
 
-  ipcMain.handle('project:create-file', async (_, root: string, path: string, content: string) => {
+  ipcMain.handle(IPC.PROJECT_CREATE_FILE, async (_, root: string, path: string, content: string) => {
     return await createProjectFile(root, path, content)
   })
 
-  ipcMain.handle('project:create-folder', async (_, root: string, path: string) => {
+  ipcMain.handle(IPC.PROJECT_CREATE_FOLDER, async (_, root: string, path: string) => {
     return await createProjectFolder(root, path)
   })
 
-  ipcMain.handle('project:rename-path', async (_, root: string, oldPath: string, newPath: string) => {
+  ipcMain.handle(IPC.PROJECT_RENAME_PATH, async (_, root: string, oldPath: string, newPath: string) => {
     return await renameProjectPath(root, oldPath, newPath)
   })
 
-  ipcMain.handle('project:delete-path', async (_, root: string, path: string) => {
+  ipcMain.handle(IPC.PROJECT_DELETE_PATH, async (_, root: string, path: string) => {
     return await deleteProjectPath(root, path)
   })
 
-  ipcMain.handle('project:sqlite-get-schema', async (_, root: string, path: string) => {
+  ipcMain.handle(IPC.PROJECT_SQLITE_GET_SCHEMA, async (_, root: string, path: string) => {
     return await getProjectSqliteSchema(root, path)
   })
 
   ipcMain.handle(
-    'project:sqlite-read-table-rows',
+    IPC.PROJECT_SQLITE_READ_TABLE_ROWS,
     async (_, root: string, path: string, table: string, limit?: number, offset?: number) => {
       return await readProjectSqliteTableRows(root, path, table, limit, offset)
     }
   )
 
   ipcMain.handle(
-    'project:sqlite-insert-row',
+    IPC.PROJECT_SQLITE_INSERT_ROW,
     async (_, root: string, path: string, table: string, values: Record<string, unknown>) => {
       return await insertProjectSqliteRow(root, path, table, values)
     }
   )
 
   ipcMain.handle(
-    'project:sqlite-update-row',
+    IPC.PROJECT_SQLITE_UPDATE_ROW,
     async (_, root: string, path: string, table: string, key: unknown, values: Record<string, unknown>) => {
       return await updateProjectSqliteRow(root, path, table, key, values)
     }
   )
 
-  ipcMain.handle('project:sqlite-delete-row', async (_, root: string, path: string, table: string, key: unknown) => {
+  ipcMain.handle(IPC.PROJECT_SQLITE_DELETE_ROW, async (_, root: string, path: string, table: string, key: unknown) => {
     return await deleteProjectSqliteRow(root, path, table, key)
   })
 
-  ipcMain.handle('project:sqlite-execute', async (_, root: string, path: string, sql: string) => {
+  ipcMain.handle(IPC.PROJECT_SQLITE_EXECUTE, async (_, root: string, path: string, sql: string) => {
     return await executeProjectSqlite(root, path, sql)
   })
 
   ripgrepSearchManager = new RipgrepSearchManager()
 
-  ipcMain.handle('project:search-start', async (_, options: {
+  ipcMain.handle(IPC.PROJECT_SEARCH_START, async (_, options: {
     rootPath: string
     query: string
     isRegex: boolean
@@ -1374,18 +1375,18 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     return { searchId }
   })
 
-  ipcMain.handle('project:search-cancel', async () => {
+  ipcMain.handle(IPC.PROJECT_SEARCH_CANCEL, async () => {
     ripgrepSearchManager?.cancel()
     return { success: true }
   })
 
-  ipcMain.handle('project:tree-watch:start', (_event, cwd: string) => {
+  ipcMain.handle(IPC.PROJECT_TREE_WATCH_START, (_event, cwd: string) => {
     if (typeof cwd !== 'string' || cwd.length === 0) return { success: false }
     projectTreeWatchManager?.start(cwd)
     return { success: true }
   })
 
-  ipcMain.handle('project:tree-watch:stop', (_event, cwd: string) => {
+  ipcMain.handle(IPC.PROJECT_TREE_WATCH_STOP, (_event, cwd: string) => {
     if (typeof cwd !== 'string' || cwd.length === 0) return { success: false }
     projectTreeWatchManager?.stop(cwd)
     return { success: true }
@@ -1399,12 +1400,12 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   shortcutManager.setMainWindow(mainWindow)
 
   // Load settings
-  ipcMain.handle('settings:load', () => {
+  ipcMain.handle(IPC.SETTINGS_LOAD, () => {
     return settingsStorage.get()
   })
 
   // Save settings
-  ipcMain.handle('settings:save', (_, settings: SettingsState) => {
+  ipcMain.handle(IPC.SETTINGS_SAVE, (_, settings: SettingsState) => {
     const success = settingsStorage.save(settings)
     if (success) {
       // Re-register shortcuts when settings change
@@ -1415,7 +1416,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   })
 
   // Update settings (partial)
-  ipcMain.handle('settings:update', (_, partial: Partial<SettingsState>) => {
+  ipcMain.handle(IPC.SETTINGS_UPDATE, (_, partial: Partial<SettingsState>) => {
     const success = settingsStorage.update(partial)
     if (success) {
       // Re-register shortcuts when settings change
@@ -1426,17 +1427,17 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   })
 
   // Register shortcuts from current settings
-  ipcMain.handle('settings:register-shortcuts', () => {
+  ipcMain.handle(IPC.SETTINGS_REGISTER_SHORTCUTS, () => {
     return shortcutManager.registerFromSettings()
   })
 
   // Check if a shortcut is available
-  ipcMain.handle('settings:check-shortcut-available', (_, accelerator: string) => {
+  ipcMain.handle(IPC.SETTINGS_CHECK_SHORTCUT_AVAILABLE, (_, accelerator: string) => {
     return shortcutManager.isShortcutAvailable(accelerator)
   })
 
   // Check if a shortcut conflicts with existing settings
-  ipcMain.handle('settings:check-shortcut-conflict', (_, accelerator: string, excludeKey?: string) => {
+  ipcMain.handle(IPC.SETTINGS_CHECK_SHORTCUT_CONFLICT, (_, accelerator: string, excludeKey?: string) => {
     return shortcutManager.checkConflict(accelerator, excludeKey as keyof ShortcutConfig)
   })
 
@@ -1475,7 +1476,7 @@ export function setupWindowShortcuts(mainWindow: BrowserWindow): void {
       const shortcutKey = `focusTerminal${i}` as keyof typeof shortcuts
       if (shortcuts[shortcutKey] === accelerator) {
         event.preventDefault()
-        mainWindow.webContents.send('shortcut:window-triggered', { type: 'focusTerminal', index: i })
+        mainWindow.webContents.send(IPC.SHORTCUT_WINDOW_TRIGGERED, { type: 'focusTerminal', index: i })
         return
       }
     }
@@ -1485,7 +1486,7 @@ export function setupWindowShortcuts(mainWindow: BrowserWindow): void {
       const shortcutKey = `switchTab${i}` as keyof typeof shortcuts
       if (shortcuts[shortcutKey] === accelerator) {
         event.preventDefault()
-        mainWindow.webContents.send('shortcut:window-triggered', { type: 'switchTab', index: i })
+        mainWindow.webContents.send(IPC.SHORTCUT_WINDOW_TRIGGERED, { type: 'switchTab', index: i })
         return
       }
     }
@@ -1493,56 +1494,56 @@ export function setupWindowShortcuts(mainWindow: BrowserWindow): void {
     // focusPromptEditor
     if (shortcuts.focusPromptEditor === accelerator) {
       event.preventDefault()
-      mainWindow.webContents.send('shortcut:window-triggered', { type: 'focusPromptEditor' })
+      mainWindow.webContents.send(IPC.SHORTCUT_WINDOW_TRIGGERED, { type: 'focusPromptEditor' })
       return
     }
 
     // addToHistory
     if (shortcuts.addToHistory === accelerator) {
       event.preventDefault()
-      mainWindow.webContents.send('shortcut:window-triggered', { type: 'addToHistory' })
+      mainWindow.webContents.send(IPC.SHORTCUT_WINDOW_TRIGGERED, { type: 'addToHistory' })
       return
     }
 
     // terminalGitDiff
     if (shortcuts.terminalGitDiff === accelerator) {
       event.preventDefault()
-      mainWindow.webContents.send('shortcut:window-triggered', { type: 'terminalGitDiff' })
+      mainWindow.webContents.send(IPC.SHORTCUT_WINDOW_TRIGGERED, { type: 'terminalGitDiff' })
       return
     }
 
     // terminalGitHistory
     if (shortcuts.terminalGitHistory === accelerator) {
       event.preventDefault()
-      mainWindow.webContents.send('shortcut:window-triggered', { type: 'terminalGitHistory' })
+      mainWindow.webContents.send(IPC.SHORTCUT_WINDOW_TRIGGERED, { type: 'terminalGitHistory' })
       return
     }
 
     // terminalChangeWorkDir
     if (shortcuts.terminalChangeWorkDir === accelerator) {
       event.preventDefault()
-      mainWindow.webContents.send('shortcut:window-triggered', { type: 'terminalChangeWorkDir' })
+      mainWindow.webContents.send(IPC.SHORTCUT_WINDOW_TRIGGERED, { type: 'terminalChangeWorkDir' })
       return
     }
 
     // terminalOpenWorkDir
     if (shortcuts.terminalOpenWorkDir === accelerator) {
       event.preventDefault()
-      mainWindow.webContents.send('shortcut:window-triggered', { type: 'terminalOpenWorkDir' })
+      mainWindow.webContents.send(IPC.SHORTCUT_WINDOW_TRIGGERED, { type: 'terminalOpenWorkDir' })
       return
     }
 
     // terminalProjectEditor
     if (shortcuts.terminalProjectEditor === accelerator) {
       event.preventDefault()
-      mainWindow.webContents.send('shortcut:window-triggered', { type: 'terminalProjectEditor' })
+      mainWindow.webContents.send(IPC.SHORTCUT_WINDOW_TRIGGERED, { type: 'terminalProjectEditor' })
       return
     }
 
     // viewGitDiff
     if (shortcuts.viewGitDiff === accelerator) {
       event.preventDefault()
-      mainWindow.webContents.send('shortcut:window-triggered', { type: 'viewGitDiff' })
+      mainWindow.webContents.send(IPC.SHORTCUT_WINDOW_TRIGGERED, { type: 'viewGitDiff' })
     }
   })
 }
@@ -1565,121 +1566,121 @@ export function cleanupIpcHandlers(): void {
   imageWatchManager = null
   projectTreeWatchManager?.dispose()
   projectTreeWatchManager = null
-  ipcMain.removeHandler('app:get-info')
-  ipcMain.removeHandler('feedback:load')
-  ipcMain.removeHandler('feedback:update-preferences')
-  ipcMain.removeHandler('feedback:create-submission')
-  ipcMain.removeHandler('feedback:sync')
-  ipcMain.removeHandler('feedback:reopen-in-browser')
-  ipcMain.removeHandler('feedback:remove-record')
-  ipcMain.removeHandler('debug:feedback-reset')
-  ipcMain.removeHandler('debug:feedback-set-mock-issues')
-  ipcMain.removeHandler('debug:feedback-get-last-opened-url')
-  ipcMain.removeHandler('app:read-notice')
-  ipcMain.removeHandler('updater:get-status')
-  ipcMain.removeHandler('updater:check-now')
-  ipcMain.removeHandler('updater:download-now')
-  ipcMain.removeHandler('updater:restart-to-update')
-  ipcMain.removeHandler('updater:dismiss-banner')
-  ipcMain.removeHandler('terminal:create')
-  ipcMain.removeHandler('terminal:write')
-  ipcMain.removeHandler('terminal:send-input-sequence')
-  ipcMain.removeHandler('terminal:get-input-capabilities')
-  ipcMain.removeAllListeners('terminal:set-buffer-fast-path')
-  ipcMain.removeAllListeners('terminal:notify-interactive-input')
-  ipcMain.removeHandler('terminal:resize')
-  ipcMain.removeHandler('terminal:dispose')
-  ipcMain.removeHandler('prompt:load')
-  ipcMain.removeHandler('prompt:save')
-  ipcMain.removeHandler('prompt:delete')
-  ipcMain.removeHandler('terminal-config:load')
-  ipcMain.removeHandler('terminal-config:save')
-  ipcMain.removeHandler('terminal-config:update')
-  ipcMain.removeHandler('dialog:openDirectory')
-  ipcMain.removeHandler('dialog:openTextFile')
-  ipcMain.removeHandler('dialog:saveTextFile')
-  ipcMain.removeHandler('shell:open-path')
-  ipcMain.removeHandler('shell:open-external')
-  ipcMain.removeHandler('clipboard:write-text')
-  ipcMain.removeHandler('clipboard:read-text')
+  ipcMain.removeHandler(IPC.APP_GET_INFO)
+  ipcMain.removeHandler(IPC.FEEDBACK_LOAD)
+  ipcMain.removeHandler(IPC.FEEDBACK_UPDATE_PREFERENCES)
+  ipcMain.removeHandler(IPC.FEEDBACK_CREATE_SUBMISSION)
+  ipcMain.removeHandler(IPC.FEEDBACK_SYNC)
+  ipcMain.removeHandler(IPC.FEEDBACK_REOPEN_IN_BROWSER)
+  ipcMain.removeHandler(IPC.FEEDBACK_REMOVE_RECORD)
+  ipcMain.removeHandler(IPC.DEBUG_FEEDBACK_RESET)
+  ipcMain.removeHandler(IPC.DEBUG_FEEDBACK_SET_MOCK_ISSUES)
+  ipcMain.removeHandler(IPC.DEBUG_FEEDBACK_GET_LAST_OPENED_URL)
+  ipcMain.removeHandler(IPC.APP_READ_NOTICE)
+  ipcMain.removeHandler(IPC.UPDATER_GET_STATUS)
+  ipcMain.removeHandler(IPC.UPDATER_CHECK_NOW)
+  ipcMain.removeHandler(IPC.UPDATER_DOWNLOAD_NOW)
+  ipcMain.removeHandler(IPC.UPDATER_RESTART_TO_UPDATE)
+  ipcMain.removeHandler(IPC.UPDATER_DISMISS_BANNER)
+  ipcMain.removeHandler(IPC.TERMINAL_CREATE)
+  ipcMain.removeHandler(IPC.TERMINAL_WRITE)
+  ipcMain.removeHandler(IPC.TERMINAL_SEND_INPUT_SEQUENCE)
+  ipcMain.removeHandler(IPC.TERMINAL_GET_INPUT_CAPABILITIES)
+  ipcMain.removeAllListeners(IPC.TERMINAL_SET_BUFFER_FAST_PATH)
+  ipcMain.removeAllListeners(IPC.TERMINAL_NOTIFY_INTERACTIVE_INPUT)
+  ipcMain.removeHandler(IPC.TERMINAL_RESIZE)
+  ipcMain.removeHandler(IPC.TERMINAL_DISPOSE)
+  ipcMain.removeHandler(IPC.PROMPT_LOAD)
+  ipcMain.removeHandler(IPC.PROMPT_SAVE)
+  ipcMain.removeHandler(IPC.PROMPT_DELETE)
+  ipcMain.removeHandler(IPC.TERMINAL_CONFIG_LOAD)
+  ipcMain.removeHandler(IPC.TERMINAL_CONFIG_SAVE)
+  ipcMain.removeHandler(IPC.TERMINAL_CONFIG_UPDATE)
+  ipcMain.removeHandler(IPC.DIALOG_OPEN_DIRECTORY)
+  ipcMain.removeHandler(IPC.DIALOG_OPEN_TEXT_FILE)
+  ipcMain.removeHandler(IPC.DIALOG_SAVE_TEXT_FILE)
+  ipcMain.removeHandler(IPC.SHELL_OPEN_PATH)
+  ipcMain.removeHandler(IPC.SHELL_OPEN_EXTERNAL)
+  ipcMain.removeHandler(IPC.CLIPBOARD_WRITE_TEXT)
+  ipcMain.removeHandler(IPC.CLIPBOARD_READ_TEXT)
   browserViewManager.destroyAll()
-  ipcMain.removeHandler('browser:create')
-  ipcMain.removeHandler('browser:destroy')
-  ipcMain.removeHandler('browser:navigate')
-  ipcMain.removeHandler('browser:go-back')
-  ipcMain.removeHandler('browser:go-forward')
-  ipcMain.removeHandler('browser:reload')
-  ipcMain.removeHandler('browser:stop')
-  ipcMain.removeHandler('browser:set-bounds')
-  ipcMain.removeHandler('browser:show')
-  ipcMain.removeHandler('browser:hide')
-  ipcMain.removeHandler('browser:get-nav-state')
-  ipcMain.removeHandler('browser:clear-cookies')
-  ipcMain.removeHandler('browser:set-remember-cookies')
-  ipcMain.removeHandler('browser:show-cookie-menu')
-  ipcMain.removeHandler('command-preset:load')
-  ipcMain.removeHandler('command-preset:save')
-  ipcMain.removeHandler('command-preset:delete')
-  ipcMain.removeHandler('coding-agent-config:load')
-  ipcMain.removeHandler('coding-agent-config:save')
-  ipcMain.removeHandler('coding-agent-config:update')
-  ipcMain.removeHandler('coding-agent-config:delete')
-  ipcMain.removeHandler('coding-agent:prepare')
-  ipcMain.removeHandler('coding-agent:launch')
-  ipcMain.removeHandler('app-state:load')
-  ipcMain.removeHandler('app-state:save')
-  ipcMain.removeHandler('git:check-installed')
-  ipcMain.removeHandler('git:resolve-repo-root')
-  ipcMain.removeHandler('git:get-diff')
-  ipcMain.removeHandler('git:get-history')
-  ipcMain.removeHandler('git:get-history-diff')
-  ipcMain.removeHandler('git:get-history-file-content')
-  ipcMain.removeHandler('git:get-file-content')
-  ipcMain.removeHandler('git:save-file-content')
-  ipcMain.removeHandler('git:stage-file')
-  ipcMain.removeHandler('git:unstage-file')
-  ipcMain.removeHandler('git:discard-file')
-  ipcMain.removeHandler('git:update-index-content')
-  ipcMain.removeHandler('git:get-terminal-cwd')
-  ipcMain.removeHandler('git:get-terminal-info')
-  ipcMain.removeHandler('git:subscribe-terminal-info')
-  ipcMain.removeHandler('git:unsubscribe-terminal-info')
-  ipcMain.removeHandler('git:notify-terminal-activity')
-  ipcMain.removeHandler('git:notify-terminal-focus')
-  ipcMain.removeHandler('git:notify-terminal-git-update')
-  ipcMain.removeHandler('project:list-directory')
-  ipcMain.removeHandler('project:read-file')
-  ipcMain.removeHandler('project:save-file')
-  ipcMain.removeHandler('project:create-file')
-  ipcMain.removeHandler('project:create-folder')
-  ipcMain.removeHandler('project:rename-path')
-  ipcMain.removeHandler('project:delete-path')
-  ipcMain.removeHandler('project:search-start')
-  ipcMain.removeHandler('project:search-cancel')
-  ipcMain.removeHandler('project:tree-watch:start')
-  ipcMain.removeHandler('project:tree-watch:stop')
-  ipcMain.removeHandler('project:watch-file')
-  ipcMain.removeHandler('project:unwatch-file')
-  ipcMain.removeHandler('project:watch-image-files')
-  ipcMain.removeHandler('project:unwatch-image-files')
-  ipcMain.removeHandler('project:unwatch-all-image-files')
-  ipcMain.removeHandler('settings:load')
-  ipcMain.removeHandler('settings:save')
-  ipcMain.removeHandler('settings:update')
-  ipcMain.removeHandler('settings:register-shortcuts')
-  ipcMain.removeHandler('settings:check-shortcut-available')
-  ipcMain.removeHandler('settings:check-shortcut-conflict')
-  ipcMain.removeHandler('telemetry:track')
-  ipcMain.removeHandler('telemetry:get-consent')
-  ipcMain.removeHandler('telemetry:set-consent')
-  ipcMain.removeHandler('debug:get-app-metrics')
-  ipcMain.removeHandler('debug:focus-window')
-  ipcMain.removeHandler('debug:get-git-runtime-metrics')
-  ipcMain.removeHandler('debug:read-telemetry-log')
-  ipcMain.removeHandler('debug:quit')
-  ipcMain.removeAllListeners('debug:log')
-  ipcMain.removeAllListeners('terminal:buffer-response')
-  ipcMain.removeAllListeners('prompt:bridge-response')
+  ipcMain.removeHandler(IPC.BROWSER_CREATE)
+  ipcMain.removeHandler(IPC.BROWSER_DESTROY)
+  ipcMain.removeHandler(IPC.BROWSER_NAVIGATE)
+  ipcMain.removeHandler(IPC.BROWSER_GO_BACK)
+  ipcMain.removeHandler(IPC.BROWSER_GO_FORWARD)
+  ipcMain.removeHandler(IPC.BROWSER_RELOAD)
+  ipcMain.removeHandler(IPC.BROWSER_STOP)
+  ipcMain.removeHandler(IPC.BROWSER_SET_BOUNDS)
+  ipcMain.removeHandler(IPC.BROWSER_SHOW)
+  ipcMain.removeHandler(IPC.BROWSER_HIDE)
+  ipcMain.removeHandler(IPC.BROWSER_GET_NAV_STATE)
+  ipcMain.removeHandler(IPC.BROWSER_CLEAR_COOKIES)
+  ipcMain.removeHandler(IPC.BROWSER_SET_REMEMBER_COOKIES)
+  ipcMain.removeHandler(IPC.BROWSER_SHOW_COOKIE_MENU)
+  ipcMain.removeHandler(IPC.COMMAND_PRESET_LOAD)
+  ipcMain.removeHandler(IPC.COMMAND_PRESET_SAVE)
+  ipcMain.removeHandler(IPC.COMMAND_PRESET_DELETE)
+  ipcMain.removeHandler(IPC.CODING_AGENT_CONFIG_LOAD)
+  ipcMain.removeHandler(IPC.CODING_AGENT_CONFIG_SAVE)
+  ipcMain.removeHandler(IPC.CODING_AGENT_CONFIG_UPDATE)
+  ipcMain.removeHandler(IPC.CODING_AGENT_CONFIG_DELETE)
+  ipcMain.removeHandler(IPC.CODING_AGENT_PREPARE)
+  ipcMain.removeHandler(IPC.CODING_AGENT_LAUNCH)
+  ipcMain.removeHandler(IPC.APP_STATE_LOAD)
+  ipcMain.removeHandler(IPC.APP_STATE_SAVE)
+  ipcMain.removeHandler(IPC.GIT_CHECK_INSTALLED)
+  ipcMain.removeHandler(IPC.GIT_RESOLVE_REPO_ROOT)
+  ipcMain.removeHandler(IPC.GIT_GET_DIFF)
+  ipcMain.removeHandler(IPC.GIT_GET_HISTORY)
+  ipcMain.removeHandler(IPC.GIT_GET_HISTORY_DIFF)
+  ipcMain.removeHandler(IPC.GIT_GET_HISTORY_FILE_CONTENT)
+  ipcMain.removeHandler(IPC.GIT_GET_FILE_CONTENT)
+  ipcMain.removeHandler(IPC.GIT_SAVE_FILE_CONTENT)
+  ipcMain.removeHandler(IPC.GIT_STAGE_FILE)
+  ipcMain.removeHandler(IPC.GIT_UNSTAGE_FILE)
+  ipcMain.removeHandler(IPC.GIT_DISCARD_FILE)
+  ipcMain.removeHandler(IPC.GIT_UPDATE_INDEX_CONTENT)
+  ipcMain.removeHandler(IPC.GIT_GET_TERMINAL_CWD)
+  ipcMain.removeHandler(IPC.GIT_GET_TERMINAL_INFO)
+  ipcMain.removeHandler(IPC.GIT_SUBSCRIBE_TERMINAL_INFO)
+  ipcMain.removeHandler(IPC.GIT_UNSUBSCRIBE_TERMINAL_INFO)
+  ipcMain.removeHandler(IPC.GIT_NOTIFY_TERMINAL_ACTIVITY)
+  ipcMain.removeHandler(IPC.GIT_NOTIFY_TERMINAL_FOCUS)
+  ipcMain.removeHandler(IPC.GIT_NOTIFY_TERMINAL_GIT_UPDATE)
+  ipcMain.removeHandler(IPC.PROJECT_LIST_DIRECTORY)
+  ipcMain.removeHandler(IPC.PROJECT_READ_FILE)
+  ipcMain.removeHandler(IPC.PROJECT_SAVE_FILE)
+  ipcMain.removeHandler(IPC.PROJECT_CREATE_FILE)
+  ipcMain.removeHandler(IPC.PROJECT_CREATE_FOLDER)
+  ipcMain.removeHandler(IPC.PROJECT_RENAME_PATH)
+  ipcMain.removeHandler(IPC.PROJECT_DELETE_PATH)
+  ipcMain.removeHandler(IPC.PROJECT_SEARCH_START)
+  ipcMain.removeHandler(IPC.PROJECT_SEARCH_CANCEL)
+  ipcMain.removeHandler(IPC.PROJECT_TREE_WATCH_START)
+  ipcMain.removeHandler(IPC.PROJECT_TREE_WATCH_STOP)
+  ipcMain.removeHandler(IPC.PROJECT_WATCH_FILE)
+  ipcMain.removeHandler(IPC.PROJECT_UNWATCH_FILE)
+  ipcMain.removeHandler(IPC.PROJECT_WATCH_IMAGE_FILES)
+  ipcMain.removeHandler(IPC.PROJECT_UNWATCH_IMAGE_FILES)
+  ipcMain.removeHandler(IPC.PROJECT_UNWATCH_ALL_IMAGE_FILES)
+  ipcMain.removeHandler(IPC.SETTINGS_LOAD)
+  ipcMain.removeHandler(IPC.SETTINGS_SAVE)
+  ipcMain.removeHandler(IPC.SETTINGS_UPDATE)
+  ipcMain.removeHandler(IPC.SETTINGS_REGISTER_SHORTCUTS)
+  ipcMain.removeHandler(IPC.SETTINGS_CHECK_SHORTCUT_AVAILABLE)
+  ipcMain.removeHandler(IPC.SETTINGS_CHECK_SHORTCUT_CONFLICT)
+  ipcMain.removeHandler(IPC.TELEMETRY_TRACK)
+  ipcMain.removeHandler(IPC.TELEMETRY_GET_CONSENT)
+  ipcMain.removeHandler(IPC.TELEMETRY_SET_CONSENT)
+  ipcMain.removeHandler(IPC.DEBUG_GET_APP_METRICS)
+  ipcMain.removeHandler(IPC.DEBUG_FOCUS_WINDOW)
+  ipcMain.removeHandler(IPC.DEBUG_GET_GIT_RUNTIME_METRICS)
+  ipcMain.removeHandler(IPC.DEBUG_READ_TELEMETRY_LOG)
+  ipcMain.removeHandler(IPC.DEBUG_QUIT)
+  ipcMain.removeAllListeners(IPC.DEBUG_LOG)
+  ipcMain.removeAllListeners(IPC.TERMINAL_BUFFER_RESPONSE)
+  ipcMain.removeAllListeners(IPC.PROMPT_BRIDGE_RESPONSE)
   // Clear all pending buffer requests
   for (const [, pending] of bufferRequestCallbacks) {
     clearTimeout(pending.timer)

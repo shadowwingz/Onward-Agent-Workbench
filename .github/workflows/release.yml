@@ -124,6 +124,58 @@ jobs:
         shell: bash
         run: rm -rf out release && pnpm dist:release
 
+      - name: Smoke-launch packaged app
+        if: runner.os == 'macOS' || runner.os == 'Windows'
+        shell: bash
+        env:
+          ONWARD_SMOKE_LAUNCH: '1'
+        run: |
+          set -euo pipefail
+          READY_FILE="$RUNNER_TEMP/onward-smoke-ready.json"
+          LOG_FILE="$RUNNER_TEMP/onward-smoke.log"
+          rm -f "$READY_FILE" "$LOG_FILE"
+          export ONWARD_SMOKE_READY_FILE="$READY_FILE"
+          export ONWARD_DIST_DEV_OPEN=0
+
+          # Locate the unpacked app (produced alongside the dmg/zip/exe).
+          case "${{ runner.os }}" in
+            macOS)
+              APP=$(find release -maxdepth 4 -type d -name '*.app' 2>/dev/null | head -1)
+              if [ -z "$APP" ]; then echo "::warning::No .app found; skipping smoke launch." ; exit 0 ; fi
+              APP_NAME=$(basename "$APP" .app)
+              BIN="$APP/Contents/MacOS/$APP_NAME"
+              echo "Launching $BIN"
+              "$BIN" > "$LOG_FILE" 2>&1 &
+              APP_PID=$!
+              ;;
+            Windows)
+              EXE=$(find release -maxdepth 4 -type f -name '*.exe' -path '*unpacked*' 2>/dev/null | head -1)
+              if [ -z "$EXE" ]; then echo "::warning::No unpacked .exe found; skipping smoke launch." ; exit 0 ; fi
+              echo "Launching $EXE"
+              "$EXE" > "$LOG_FILE" 2>&1 &
+              APP_PID=$!
+              ;;
+          esac
+
+          # Poll up to 60 s for the ready marker.
+          for i in $(seq 1 60); do
+            if [ -f "$READY_FILE" ]; then
+              echo "App reported ready after ${i}s"
+              cat "$READY_FILE" || true
+              # App exits itself; wait briefly then force-kill if still alive.
+              wait "$APP_PID" 2>/dev/null || true
+              kill -9 "$APP_PID" 2>/dev/null || true
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo "::error::App did not report ready within 60s (ONWARD_SMOKE_LAUNCH=1)"
+          echo "--- app log ---"
+          cat "$LOG_FILE" 2>/dev/null || true
+          kill -9 "$APP_PID" 2>/dev/null || true
+          exit 1
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v7
         with:

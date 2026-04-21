@@ -14,6 +14,8 @@
   },
   "main": "./out/main/index.js",
   "scripts": {
+    "prepare": "husky",
+    "predev": "pnpm typecheck",
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "typecheck": "tsc -p tsconfig.typecheck.json --noEmit",
@@ -144,6 +146,7 @@
     "electron": "39.8.5",
     "electron-builder": "^26.8.0",
     "electron-vite": "^5.0.0",
+    "husky": "^9.1.7",
     "license-checker-rseidelsohn": "^4.4.2",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

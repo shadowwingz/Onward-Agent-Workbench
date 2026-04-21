@@ -1,0 +1,11 @@
+# Run strict typecheck before every git push.
+# This catches the "undeclared variable / stringly-typed IPC" class of bug
+# that electron-vite build silently lets through.
+#
+# To bypass in a genuine emergency (hotfix, CI outage), use:
+#   git push --no-verify
+# Only use --no-verify when you have already run `pnpm typecheck` locally and
+# know the code is clean; the CI typecheck in release.yml will block the
+# daily build if types are broken.
+
+pnpm typecheck

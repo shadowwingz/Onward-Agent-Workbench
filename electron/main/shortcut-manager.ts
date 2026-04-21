@@ -6,6 +6,7 @@
 import { globalShortcut, BrowserWindow, app } from 'electron'
 import { getSettingsStorage, ShortcutConfig } from './settings-storage'
 import { findReservedShortcutKey, normalizeAccelerator } from './reserved-shortcuts'
+import { IPC } from '../shared/ipc-channels'
 
 /**
  * Shortcut action type
@@ -59,7 +60,7 @@ class ShortcutManager {
 
     // Send events to the rendering process
     if (this.mainWindow && !this.mainWindow.isDestroyed()) {
-      this.mainWindow.webContents.send('shortcut:triggered', action)
+      this.mainWindow.webContents.send(IPC.SHORTCUT_TRIGGERED, action)
     }
 
     // callback
@@ -95,7 +96,7 @@ class ShortcutManager {
       // Invisible, show window
       this.activateWindow()
       // Send an event to let the rendering process focus on the last terminal
-      this.mainWindow.webContents.send('shortcut:activated')
+      this.mainWindow.webContents.send(IPC.SHORTCUT_ACTIVATED)
     }
   }
 
