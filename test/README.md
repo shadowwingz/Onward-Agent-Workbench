@@ -559,6 +559,19 @@ Source set: Diff / Editor / History navigation validation suite
 
 - `SN-01` to `SN-14`: unified top switcher visibility, active-state disabling, target-page state restore, selected-file handoff into Project Editor, and missing-file empty-state fallback
 
+### Phase 0.585: Working Directory Copy
+
+Source set: subpage-header working directory double-click copy regression suite
+
+- `WDC-00` to `WDC-03`: Project Editor / Git Diff / Git History panel headers each expose a double-click-copyable working-directory path. Double-clicking fires the shared `usePathCopy` toast with the cwd text (asserted against the DOM-visible path). Guards against regressions in `useCwdCopyHandler`, `SubpagePanelShell.is-copyable`, and the shared toast render path.
+
+Launch:
+
+```bash
+./test/run-working-directory-copy-autotest.sh   # macOS / Linux
+./test/run-working-directory-copy-autotest.ps1  # Windows
+```
+
 ### Phase 0.7: ProjectEditor Multi-Terminal Scope
 
 Source set: ProjectEditor multi-terminal isolation validation suite

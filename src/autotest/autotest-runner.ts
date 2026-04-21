@@ -23,6 +23,7 @@ import { testProjectEditorRestore } from './test-project-editor-restore'
 import { testProjectEditorRestoreUnit } from './test-project-editor-restore-unit'
 import { testProjectEditorOpenPosition } from './test-project-editor-open-position'
 import { testSubpageNavigation } from './test-subpage-navigation'
+import { testWorkingDirectoryCopy } from './test-working-directory-copy'
 import { testGitDiffSubdir } from './test-git-diff-subdir'
 import { testGitDiffSubmodules } from './test-git-diff-submodules'
 import { testGitDiffRecursiveSubmodules } from './test-git-diff-recursive-submodules'
@@ -243,6 +244,13 @@ export async function runAllTests(ctx: AutotestContext): Promise<void> {
       const results = await testSubpageNavigation(ctx)
       collectSuiteResults('SubpageNavigation', results)
       await sleep(500)
+    }
+
+    if (!ctx.cancelled() && shouldRun('working-directory-copy')) {
+      log('phase0.585:begin')
+      const results = await testWorkingDirectoryCopy(ctx)
+      collectSuiteResults('WorkingDirectoryCopy', results)
+      await sleep(300)
     }
 
     if (!ctx.cancelled() && shouldRun('subpage-viewstate-restore')) {

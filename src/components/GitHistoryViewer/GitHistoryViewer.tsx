@@ -35,6 +35,7 @@ import { GitPdfCompare, type GitPdfStatus } from '../GitPdfCompare/GitPdfCompare
 import { GitEpubCompare, type GitEpubStatus } from '../GitEpubCompare/GitEpubCompare'
 import { inspectPdfCompareDom, inspectEpubCompareDom } from '../GitDiffViewer/GitDiffViewer'
 import { usePathCopy } from '../../hooks/usePathCopy'
+import { useCwdCopyHandler } from '../../hooks/useCwdCopyHandler'
 import '../../styles/path-copy-toast.css'
 import './GitHistoryViewer.css'
 
@@ -533,11 +534,6 @@ export function GitHistoryViewer({
 
   // --- Path copy (shared hook) ---
   const { copyMessage, copyToClipboard, flashCopyFeedback } = usePathCopy(t, 'gitHistory.copyFailed')
-  const {
-    copyMessage: cwdCopyMessage,
-    copyToClipboard: copyCwdToClipboard,
-    flashCopyFeedback: flashCwdCopyFeedback
-  } = usePathCopy(t, 'gitHistory.copyFailed')
 
   const handleFilenameDblClick = useCallback(async (e: React.MouseEvent) => {
     if (!selectedFile) return
@@ -2014,12 +2010,11 @@ export function GitHistoryViewer({
   const historyWorkingDirectory = historyResult?.cwd && historyResult.isGitRepo
     ? historyResult.cwd
     : null
-  const handleCwdDblClick = useCallback(async (e: React.MouseEvent) => {
-    if (!historyWorkingDirectory) return
-    const target = e.currentTarget as HTMLElement
-    const ok = await copyCwdToClipboard(historyWorkingDirectory, t('common.workingDirectory'))
-    if (ok) flashCwdCopyFeedback(target)
-  }, [copyCwdToClipboard, flashCwdCopyFeedback, historyWorkingDirectory, t])
+  const {
+    title: cwdTitle,
+    onDoubleClick: handleCwdDblClick,
+    feedback: cwdFeedback
+  } = useCwdCopyHandler(historyWorkingDirectory, t, 'gitHistory.copyFailed')
   const externalPanelActions = useMemo(() => (
     <SubpagePanelButton className="git-history-close" onClick={onClose} title={t('gitHistory.returnToTerminal')}>
       {t('gitHistory.returnToTerminal')}
@@ -2030,16 +2025,12 @@ export function GitHistoryViewer({
     onSelect: handleSelectSubpage,
     workingDirectoryLabel: t('gitHistory.cwd'),
     workingDirectoryPath: historyWorkingDirectory,
-    workingDirectoryTitle: historyWorkingDirectory ? `${historyWorkingDirectory}\n${t('common.cwdCopyHint')}` : undefined,
+    workingDirectoryTitle: cwdTitle,
     onWorkingDirectoryDoubleClick: handleCwdDblClick,
-    workingDirectoryFeedback: cwdCopyMessage ? (
-      <span className={`path-copy-toast ${cwdCopyMessage.type}`}>
-        {cwdCopyMessage.text}
-      </span>
-    ) : null,
+    workingDirectoryFeedback: cwdFeedback,
     actions: externalPanelActions,
     taskTitle
-  }), [cwdCopyMessage, externalPanelActions, handleCwdDblClick, handleSelectSubpage, historyWorkingDirectory, t, taskTitle])
+  }), [cwdFeedback, cwdTitle, externalPanelActions, handleCwdDblClick, handleSelectSubpage, historyWorkingDirectory, t, taskTitle])
   const superprojectRoot = historyResult?.superprojectRoot ?? null
   const displayedHistoryRoot = normalizeRepoRoot(historyResult?.cwd)
   const selectedHistoryRoot = normalizeRepoRoot(selectedRepoRoot || cachedParentCwd || historyResult?.cwd || cwd)
@@ -2252,13 +2243,9 @@ export function GitHistoryViewer({
             onSelect={handleSelectSubpage}
             workingDirectoryLabel={t('gitHistory.cwd')}
             workingDirectoryPath={historyWorkingDirectory}
-            workingDirectoryTitle={historyWorkingDirectory ? `${historyWorkingDirectory}\n${t('common.cwdCopyHint')}` : undefined}
+            workingDirectoryTitle={cwdTitle}
             onWorkingDirectoryDoubleClick={handleCwdDblClick}
-            workingDirectoryFeedback={cwdCopyMessage ? (
-              <span className={`path-copy-toast ${cwdCopyMessage.type}`}>
-                {cwdCopyMessage.text}
-              </span>
-            ) : null}
+            workingDirectoryFeedback={cwdFeedback}
             taskTitle={taskTitle}
             actions={(
               <>
@@ -2296,15 +2283,11 @@ export function GitHistoryViewer({
               <div
                 className="git-history-cwd-bar"
                 onDoubleClick={handleCwdDblClick}
-                title={`${historyWorkingDirectory}\n${t('common.cwdCopyHint')}`}
+                title={cwdTitle}
               >
                 <span className="git-history-cwd-label">{t('gitHistory.cwd')}</span>
                 <span className="git-history-cwd-path">{historyWorkingDirectory}</span>
-                {cwdCopyMessage && (
-                  <span className={`path-copy-toast ${cwdCopyMessage.type}`}>
-                    {cwdCopyMessage.text}
-                  </span>
-                )}
+                {cwdFeedback}
               </div>
             )}
             {historyBody}

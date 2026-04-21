@@ -50,6 +50,7 @@ import { PdfReader, type PdfReaderHandle } from './PdfReader'
 import { EpubReader, type EpubReaderHandle } from './EpubReader'
 import type { ProjectEditorOpenRequest, SubpageId, SubpageNavigateEventDetail } from '../../types/subpage'
 import { usePathCopy } from '../../hooks/usePathCopy'
+import { useCwdCopyHandler } from '../../hooks/useCwdCopyHandler'
 import '../../styles/path-copy-toast.css'
 import { renderMermaidDiagrams } from '../../utils/mermaidRenderer'
 import {
@@ -2942,10 +2943,10 @@ export function ProjectEditor({
   // --- Path copy (shared hook) ---
   const { copyMessage: pathCopyMessage, copyToClipboard, showCopyError, flashCopyFeedback } = usePathCopy(t, 'projectEditor.copyFailed')
   const {
-    copyMessage: cwdCopyMessage,
-    copyToClipboard: copyCwdToClipboard,
-    flashCopyFeedback: flashCwdCopyFeedback
-  } = usePathCopy(t, 'projectEditor.copyFailed')
+    title: cwdTitle,
+    onDoubleClick: handleCwdDblClick,
+    feedback: cwdFeedback
+  } = useCwdCopyHandler(rootPath, t, 'projectEditor.copyFailed')
 
   const handleFilenameDblClick = useCallback(async (e: React.MouseEvent) => {
     if (!activeFilePath || !rootPath) return
@@ -2956,13 +2957,6 @@ export function ProjectEditor({
     const ok = await copyToClipboard(pathToCopy, label)
     if (ok) flashCopyFeedback(target)
   }, [activeFilePath, copyToClipboard, flashCopyFeedback, rootPath, t])
-
-  const handleCwdDblClick = useCallback(async (e: React.MouseEvent) => {
-    if (!rootPath) return
-    const target = e.currentTarget as HTMLElement
-    const ok = await copyCwdToClipboard(rootPath, t('common.workingDirectory'))
-    if (ok) flashCwdCopyFeedback(target)
-  }, [copyCwdToClipboard, flashCwdCopyFeedback, rootPath, t])
 
   const resolveAbsolutePath = useCallback((relativePath: string): string | null => {
     const root = rootRef.current ?? rootPath
@@ -6854,17 +6848,13 @@ export function ProjectEditor({
     onSelect: handleSelectSubpage,
     workingDirectoryLabel: t('projectEditor.workingDirectory'),
     workingDirectoryPath: rootPath || null,
-    workingDirectoryTitle: rootPath ? `${rootPath}\n${t('common.cwdCopyHint')}` : undefined,
+    workingDirectoryTitle: cwdTitle,
     onWorkingDirectoryDoubleClick: handleCwdDblClick,
-    workingDirectoryFeedback: cwdCopyMessage ? (
-      <span className={`path-copy-toast ${cwdCopyMessage.type}`}>
-        {cwdCopyMessage.text}
-      </span>
-    ) : null,
+    workingDirectoryFeedback: cwdFeedback,
     metaExtra: editorStatusMeta,
     actions: externalPanelActions,
     taskTitle
-  }), [cwdCopyMessage, editorStatusMeta, externalPanelActions, handleCwdDblClick, handleSelectSubpage, rootPath, t, taskTitle])
+  }), [cwdFeedback, cwdTitle, editorStatusMeta, externalPanelActions, handleCwdDblClick, handleSelectSubpage, rootPath, t, taskTitle])
 
   useLayoutEffect(() => {
     if (!isPanel || panelShellMode !== 'external' || !onPanelShellStateChange) return
@@ -6921,13 +6911,9 @@ export function ProjectEditor({
             onSelect={handleSelectSubpage}
             workingDirectoryLabel={t('projectEditor.workingDirectory')}
             workingDirectoryPath={rootPath || null}
-            workingDirectoryTitle={rootPath ? `${rootPath}\n${t('common.cwdCopyHint')}` : undefined}
+            workingDirectoryTitle={cwdTitle}
             onWorkingDirectoryDoubleClick={handleCwdDblClick}
-            workingDirectoryFeedback={cwdCopyMessage ? (
-              <span className={`path-copy-toast ${cwdCopyMessage.type}`}>
-                {cwdCopyMessage.text}
-              </span>
-            ) : null}
+            workingDirectoryFeedback={cwdFeedback}
             metaExtra={editorStatusMeta}
             taskTitle={taskTitle}
             actions={(
@@ -6985,22 +6971,18 @@ export function ProjectEditor({
               <span
                 className="project-editor-root-label"
                 onDoubleClick={handleCwdDblClick}
-                title={t('projectEditor.cwdCopyHint')}
+                title={t('common.cwdCopyHint')}
               >
                 {t('projectEditor.workingDirectory')}
               </span>
               <span
                 className="project-editor-root-path"
                 onDoubleClick={handleCwdDblClick}
-                title={rootPath ? `${rootPath}\n${t('projectEditor.cwdCopyHint')}` : ''}
+                title={cwdTitle ?? ''}
               >
                 {rootPath || '-'}
               </span>
-              {cwdCopyMessage && (
-                <span className={`path-copy-toast ${cwdCopyMessage.type}`}>
-                  {cwdCopyMessage.text}
-                </span>
-              )}
+              {cwdFeedback}
               {editorStatusMeta}
             </div>
           </>
