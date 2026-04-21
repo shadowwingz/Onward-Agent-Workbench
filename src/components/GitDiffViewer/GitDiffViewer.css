@@ -256,17 +256,23 @@ body.git-diff-modal-resizing {
 }
 
 .git-diff-cwd-label {
+  flex-shrink: 0;
   font-size: var(--font-sm);
   color: var(--text-3);
+  user-select: none;
 }
 
 .git-diff-cwd-path {
+  flex: 1 1 auto;
+  min-width: 0;
   font-size: var(--font-sm);
   color: var(--text-2);
   font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  cursor: text;
+  user-select: text;
 }
 
 /* main body */

@@ -1638,6 +1638,9 @@ export const TerminalGrid = memo(function TerminalGrid({
               actions={renderedPanelShellState.actions}
               workingDirectoryLabel={renderedPanelShellState.workingDirectoryLabel}
               workingDirectoryPath={renderedPanelShellState.workingDirectoryPath}
+              workingDirectoryTitle={renderedPanelShellState.workingDirectoryTitle}
+              onWorkingDirectoryDoubleClick={renderedPanelShellState.onWorkingDirectoryDoubleClick}
+              workingDirectoryFeedback={renderedPanelShellState.workingDirectoryFeedback}
               metaExtra={renderedPanelShellState.metaExtra}
               taskTitle={renderedPanelShellState.taskTitle}
             />

@@ -3,10 +3,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { ReactNode } from 'react'
+import type { MouseEventHandler, ReactNode } from 'react'
 import type { SubpageId } from '../../types/subpage'
 import { SubpageSwitcher } from './SubpageSwitcher'
 import './SubpagePanelShell.css'
+
+type WorkingDirectoryDoubleClickHandler = MouseEventHandler<HTMLDivElement>
 
 interface SubpagePanelShellProps {
   current: SubpageId
@@ -14,6 +16,9 @@ interface SubpagePanelShellProps {
   actions?: ReactNode
   workingDirectoryLabel: string
   workingDirectoryPath: string | null
+  workingDirectoryTitle?: string
+  onWorkingDirectoryDoubleClick?: WorkingDirectoryDoubleClickHandler
+  workingDirectoryFeedback?: ReactNode
   metaExtra?: ReactNode
   taskTitle?: string
   children?: ReactNode
@@ -25,6 +30,9 @@ export interface SubpagePanelShellState {
   actions?: ReactNode
   workingDirectoryLabel: string
   workingDirectoryPath: string | null
+  workingDirectoryTitle?: string
+  onWorkingDirectoryDoubleClick?: WorkingDirectoryDoubleClickHandler
+  workingDirectoryFeedback?: ReactNode
   metaExtra?: ReactNode
   taskTitle?: string
 }
@@ -35,10 +43,17 @@ export function SubpagePanelShell({
   actions,
   workingDirectoryLabel,
   workingDirectoryPath,
+  workingDirectoryTitle,
+  onWorkingDirectoryDoubleClick,
+  workingDirectoryFeedback,
   metaExtra,
   taskTitle,
   children
 }: SubpagePanelShellProps) {
+  const hasWorkingDirectory = Boolean(workingDirectoryPath)
+  const workingDirectoryInteractive = hasWorkingDirectory && Boolean(onWorkingDirectoryDoubleClick)
+  const locationTitle = workingDirectoryTitle ?? workingDirectoryPath ?? '-'
+
   return (
     <div className="subpage-panel-shell" data-subpage-panel-shell="true">
       <div className="subpage-panel-shell-header">
@@ -53,14 +68,20 @@ export function SubpagePanelShell({
         {actions && <div className="subpage-panel-shell-actions">{actions}</div>}
       </div>
       <div className="subpage-panel-shell-meta">
-        <div className="subpage-panel-shell-location">
+        <div
+          className={`subpage-panel-shell-location${workingDirectoryInteractive ? ' is-copyable' : ''}`}
+          onDoubleClick={workingDirectoryInteractive ? onWorkingDirectoryDoubleClick : undefined}
+          title={locationTitle}
+        >
           <span className="subpage-panel-shell-location-label">{workingDirectoryLabel}</span>
-          <span
-            className="subpage-panel-shell-location-path"
-            title={workingDirectoryPath || '-'}
-          >
+          <span className="subpage-panel-shell-location-path">
             {workingDirectoryPath || '-'}
           </span>
+          {workingDirectoryFeedback && (
+            <span className="subpage-panel-shell-location-feedback">
+              {workingDirectoryFeedback}
+            </span>
+          )}
         </div>
         {metaExtra && <div className="subpage-panel-shell-meta-extra">{metaExtra}</div>}
       </div>
