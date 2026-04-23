@@ -4,6 +4,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { rendererWorkScheduler } from '../../../utils/renderer-work-scheduler'
 
 export interface SearchMatch {
   file: string
@@ -51,9 +52,13 @@ export function useGlobalSearch({ rootPath, isActive }: UseGlobalSearchParams) {
   const activeSearchIdRef = useRef<string | null>(null)
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const fileGroupsRef = useRef<Map<string, SearchMatch[]>>(new Map())
+  const pendingMatchesRef = useRef<SearchMatch[]>([])
+  const resultApplyScheduledRef = useRef(false)
 
   const clearResults = useCallback(() => {
     fileGroupsRef.current = new Map()
+    pendingMatchesRef.current = []
+    resultApplyScheduledRef.current = false
     setFileGroups([])
     setTotalMatchCount(0)
     setTotalFileCount(0)
@@ -84,9 +89,12 @@ export function useGlobalSearch({ rootPath, isActive }: UseGlobalSearchParams) {
 
     clearResults()
     setIsSearching(true)
+    const searchId = `search-client-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    activeSearchIdRef.current = searchId
 
     try {
       const result = await window.electronAPI.project.searchStart({
+        searchId,
         rootPath,
         query: searchQuery.trim(),
         isRegex: searchOptions.isRegex,
@@ -97,6 +105,9 @@ export function useGlobalSearch({ rootPath, isActive }: UseGlobalSearchParams) {
       })
       activeSearchIdRef.current = result.searchId
     } catch {
+      if (activeSearchIdRef.current === searchId) {
+        activeSearchIdRef.current = null
+      }
       setIsSearching(false)
     }
   }, [clearResults, rootPath])
@@ -151,11 +162,14 @@ export function useGlobalSearch({ rootPath, isActive }: UseGlobalSearchParams) {
   useEffect(() => {
     if (!isActive) return
 
-    const unsubscribeResult = window.electronAPI.project.onSearchResult((searchId, matches) => {
-      if (searchId !== activeSearchIdRef.current) return
+    const applyPendingMatches = () => {
+      resultApplyScheduledRef.current = false
+      const pending = pendingMatchesRef.current
+      if (pending.length === 0) return
+      pendingMatchesRef.current = []
 
       const groups = fileGroupsRef.current
-      for (const match of matches) {
+      for (const match of pending) {
         const existing = groups.get(match.file)
         if (existing) {
           existing.push(match)
@@ -174,10 +188,21 @@ export function useGlobalSearch({ rootPath, isActive }: UseGlobalSearchParams) {
       setFileGroups(nextGroups)
       setTotalMatchCount(matchTotal)
       setTotalFileCount(groups.size)
+    }
+
+    const unsubscribeResult = window.electronAPI.project.onSearchResult((searchId, matches) => {
+      if (searchId !== activeSearchIdRef.current) return
+      pendingMatchesRef.current.push(...matches)
+      if (resultApplyScheduledRef.current) return
+      resultApplyScheduledRef.current = true
+      rendererWorkScheduler.enqueue('visible-ui', applyPendingMatches)
     })
 
     const unsubscribeDone = window.electronAPI.project.onSearchDone((stats) => {
       if (stats.searchId !== activeSearchIdRef.current) return
+      if (resultApplyScheduledRef.current || pendingMatchesRef.current.length > 0) {
+        applyPendingMatches()
+      }
       setIsSearching(false)
       setTotalMatchCount(stats.matchCount)
       setTotalFileCount(stats.fileCount)

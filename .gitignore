@@ -4,6 +4,9 @@ release/
 dist/
 .pnpm-store/
 *.log
+test/results/
+test/fixtures/*/user-data/
+test/fixtures/*/workdir/
 test/e2e-update-test/
 # Local scheduled-task lock and other .claude/*.lock files produced by skill runtimes.
 .claude/*.lock

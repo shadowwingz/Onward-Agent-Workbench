@@ -55,7 +55,7 @@ export async function testGlobalSearch(ctx: AutotestContext): Promise<TestResult
 
     const receivedMatches: Array<{ file: string; line: number; lineContent: string }> = []
     let searchDone = false
-    let searchId = ''
+    let searchId = `search-autotest-${timestamp}`
 
     const unsubscribeResult = window.electronAPI.project.onSearchResult((id, matches) => {
       if (id !== searchId) return
@@ -73,6 +73,7 @@ export async function testGlobalSearch(ctx: AutotestContext): Promise<TestResult
     })
 
     const startResult = await window.electronAPI.project.searchStart({
+      searchId,
       rootPath,
       query: uniqueMarker,
       isRegex: false,

@@ -3,9 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { watch, existsSync, statSync } from 'fs'
+import { watch, existsSync } from 'fs'
 import type { FSWatcher } from 'fs'
-import { readdir } from 'fs/promises'
+import { readdir, stat } from 'fs/promises'
 import type { BrowserWindow } from 'electron'
 import { join, normalize } from 'path'
 import { IPC } from '../shared/ipc-channels'
@@ -45,8 +45,11 @@ function toRelativeRendererPath(cwd: string, abs: string): string | null {
 
 export class ProjectTreeWatchManager {
   private entries = new Map<string, TreeEntry>()
+  private readonly mainWindow: BrowserWindow
 
-  constructor(private readonly mainWindow: BrowserWindow) {}
+  constructor(mainWindow: BrowserWindow) {
+    this.mainWindow = mainWindow
+  }
 
   start(cwd: string): void {
     const fullPath = normalize(cwd)
@@ -127,18 +130,24 @@ export class ProjectTreeWatchManager {
     const abs = join(fullPath, filename)
     const rel = toRelativeRendererPath(fullPath, abs)
     if (!rel) return
+    void this.classifyAndQueuePath(fullPath, entry, abs, rel)
+  }
 
+  private async classifyAndQueuePath(fullPath: string, entry: TreeEntry, abs: string, rel: string): Promise<void> {
+    if (entry.disposed) return
     // Classify the path via stat. We deliberately do NOT trust fs.watch to
     // distinguish files from directories — queuing a directory path as a file
     // addition would pollute Cmd+P with folder names.
     let kind: 'file' | 'dir' | 'missing' | 'unknown'
     try {
-      const st = statSync(abs)
+      const st = await stat(abs)
       kind = st.isDirectory() ? 'dir' : 'file'
     } catch (error) {
       const code = (error as NodeJS.ErrnoException | undefined)?.code
       kind = code === 'ENOENT' ? 'missing' : 'unknown'
     }
+
+    if (entry.disposed) return
 
     if (kind === 'missing') {
       // The rel path may name either a file or a directory that just went

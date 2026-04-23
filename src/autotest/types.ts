@@ -455,6 +455,7 @@ export interface TerminalDebugApi {
     status: 'idle' | 'initializing' | 'ready' | 'error' | 'disposed'
     open: boolean
     visible: boolean
+    outputVisible?: boolean
     webglActive: boolean
     rendererMode: 'webgl' | 'fallback'
     rendererWebglAvailable: boolean

@@ -34,6 +34,8 @@ import { testMarkdownLatexPreview } from './test-markdown-latex-preview'
 import { testMermaidPanZoom } from './test-mermaid-panzoom'
 import { testProjectEditorSqlite } from './test-project-editor-sqlite'
 import { testTerminalPerf } from './test-terminal-perf'
+import { testTerminalArchitectureBaseline } from './test-terminal-architecture-baseline'
+import { testPromptInputLatency, testPromptInputLongtail } from './test-prompt-input-latency'
 import { testTerminalFocusActivation } from './test-terminal-focus-activation'
 import { testTerminalStress } from './test-terminal-stress'
 import { testImageDiff } from './test-image-diff'
@@ -542,6 +544,27 @@ export async function runAllTests(ctx: AutotestContext): Promise<void> {
       log('phase5.6:begin')
       const results = await testTerminalPerf(ctx)
       collectSuiteResults('TerminalPerf', results)
+      await sleep(500)
+    }
+
+    if (!ctx.cancelled() && shouldRun('terminal-architecture-baseline')) {
+      log('phase5.65:begin')
+      const results = await testTerminalArchitectureBaseline(ctx)
+      collectSuiteResults('TerminalArchitectureBaseline', results)
+      await sleep(500)
+    }
+
+    if (!ctx.cancelled() && shouldRun('prompt-input-latency')) {
+      log('phase5.66:begin')
+      const results = await testPromptInputLatency(ctx)
+      collectSuiteResults('PromptInputLatency', results)
+      await sleep(500)
+    }
+
+    if (!ctx.cancelled() && shouldRun('prompt-input-longtail')) {
+      log('phase5.67:begin')
+      const results = await testPromptInputLongtail(ctx)
+      collectSuiteResults('PromptInputLongtail', results)
       await sleep(500)
     }
 

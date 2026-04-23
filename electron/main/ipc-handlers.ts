@@ -17,29 +17,10 @@ import { getAppStateStorage, AppState } from './app-state-storage'
 import { readCurrentChangelog } from './changelog'
 import { getTelemetryService } from './telemetry/telemetry-service'
 import { getTelemetryConsent, setTelemetryConsent } from './telemetry/telemetry-consent'
+import { getTerminalCwd, getTerminalGitInfo } from './git-utils'
+import type { GitFileStatus, GitHistoryDiffOptions, GitHistoryFileContentOptions } from './git-utils'
+import { gitIpcWorkerClient } from './git-ipc-worker-client'
 import {
-  checkGitInstalled,
-  getGitDiff,
-  getGitHistory,
-  getGitHistoryDiff,
-  getGitHistoryFileContent,
-  getGitFileContent,
-  getGitRepoMeta,
-  getTerminalCwd,
-  getTerminalGitInfo,
-  resolveRepoRoot,
-  saveGitFileContent,
-  stageGitFile,
-  unstageGitFile,
-  discardGitFile,
-  detectSubmodulesRecursive,
-  updateGitIndexContent,
-  GitFileStatus,
-  GitHistoryDiffOptions,
-  GitHistoryFileContentOptions
-} from './git-utils'
-import {
-  listDirectory,
   readProjectFile,
   resolveInRoot,
   saveProjectFile,
@@ -47,18 +28,15 @@ import {
   createProjectFolder,
   renameProjectPath,
   deleteProjectPath,
-  getProjectSqliteSchema,
-  readProjectSqliteTableRows,
-  insertProjectSqliteRow,
-  updateProjectSqliteRow,
-  deleteProjectSqliteRow,
-  executeProjectSqlite
 } from './project-editor-utils'
+import { projectFsWorkerClient } from './project-fs-worker-client'
+import { sqliteWorkerClient } from './sqlite-worker-client'
 import { getSettingsStorage, SettingsState, ShortcutConfig } from './settings-storage'
 import { getShortcutManager } from './shortcut-manager'
 import { getAppInfo } from './app-info'
 import { getFeedbackStorage } from './feedback-storage'
 import { gitRuntimeManager } from './git-runtime-manager'
+import { mainWorkScheduler } from './main-work-scheduler'
 import { openExternalUrlWithConfirm } from './external-link-guard'
 import { RipgrepSearchManager } from './ripgrep-search'
 import { browserViewManager } from './browser-view-manager'
@@ -66,6 +44,7 @@ import { FileWatchManager } from './file-watch-manager'
 import { ImageWatchManager } from './image-watch-manager'
 import { ProjectTreeWatchManager } from './project-tree-watch-manager'
 import { getUpdateService } from './update-service'
+import { perfTraceLogger } from './perf-trace-logger'
 import { IPC } from '../shared/ipc-channels'
 
 let gitWatchManager: GitWatchManager | null = null
@@ -74,6 +53,7 @@ let fileWatchManager: FileWatchManager | null = null
 let imageWatchManager: ImageWatchManager | null = null
 let projectTreeWatchManager: ProjectTreeWatchManager | null = null
 let feedbackDebugLastOpenedUrl: string | null = null
+let terminalIpcDiagTimer: ReturnType<typeof setInterval> | null = null
 
 type TerminalInputSequencePayload = {
   kind: 'raw' | 'paste'
@@ -119,6 +99,7 @@ class TerminalDataBuffer {
   private timer: ReturnType<typeof setTimeout> | null = null
   private disposed = false
   private interactiveBoostUntil = 0
+  private visible = true
 
   // IPC flush interval.  The previous value of 16 ms (~60 fps) sent up to
   // 360 IPC messages/s across 6 terminals, saturating the renderer's main
@@ -130,6 +111,7 @@ class TerminalDataBuffer {
   private static readonly FLUSH_INTERVAL_MS = 100
   // Force flush when buffer exceeds 64KB (keeps large bursts responsive)
   private static readonly FORCE_FLUSH_BYTES = 64 * 1024
+  private static readonly HIDDEN_MAX_BYTES = 512 * 1024
 
   constructor(
     private readonly terminalId: string,
@@ -152,15 +134,36 @@ class TerminalDataBuffer {
     this._fastPathEnabled = enabled
   }
 
+  setVisible(visible: boolean): void {
+    if (this.disposed || this.visible === visible) return
+    this.visible = visible
+    if (visible) {
+      this.flush()
+      return
+    }
+    if (this.timer) {
+      clearTimeout(this.timer)
+      this.timer = null
+    }
+    this.trimToMaxBytes(TerminalDataBuffer.HIDDEN_MAX_BYTES)
+  }
+
   notifyInteractiveInput(): void {
     this.interactiveBoostUntil = Date.now() + INTERACTIVE_BOOST_WINDOW_MS
-    if (this.chunks.length > 0) {
+    if (this.visible && this.chunks.length > 0) {
       this.flush()
     }
   }
 
   push(data: string): void {
     if (this.disposed) return
+
+    if (!this.visible) {
+      this.chunks.push(data)
+      this.totalBytes += data.length
+      this.trimToMaxBytes(TerminalDataBuffer.HIDDEN_MAX_BYTES)
+      return
+    }
 
     const interactiveBoostActive = this._fastPathEnabled && Date.now() < this.interactiveBoostUntil
 
@@ -215,14 +218,31 @@ class TerminalDataBuffer {
     this.send(this.terminalId, merged)
   }
 
+  private trimToMaxBytes(maxBytes: number): void {
+    while (this.totalBytes > maxBytes && this.chunks.length > 1) {
+      const dropped = this.chunks.shift()!
+      this.totalBytes -= dropped.length
+    }
+
+    if (this.totalBytes <= maxBytes || this.chunks.length === 0) return
+
+    const retained = this.chunks[0].slice(-maxBytes)
+    this.chunks[0] = retained
+    this.totalBytes = retained.length
+  }
+
   dispose(): void {
     this.disposed = true
     if (this.timer) {
       clearTimeout(this.timer)
       this.timer = null
     }
-    // Flush remaining data before disposal
-    this.flush()
+    if (this.visible) {
+      this.flush()
+    } else {
+      this.chunks = []
+      this.totalBytes = 0
+    }
   }
 }
 
@@ -234,6 +254,7 @@ const terminalDataBuffers = new Map<string, TerminalDataBuffer>()
 // created (race between renderer setVisibility and terminal:create) is
 // not lost.  When a new buffer is created it reads from this map.
 const terminalFastPathState = new Map<string, boolean>()
+const terminalOutputVisibilityState = new Map<string, boolean>()
 const terminalBracketedPasteState = new Map<string, boolean>()
 
 // Buffer request waiting queue
@@ -358,14 +379,22 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     }
   }
 
-  // --- Diagnostic counters (ONWARD_DEBUG=1) ---
+  perfTraceLogger.startGitRuntimeMonitor(() => gitRuntimeManager.getMetrics())
+
+  // --- Diagnostic counters (ONWARD_DEBUG=1 / ONWARD_PERF_TRACE=1) ---
   const ipcDataCounters = new Map<string, { messages: number; bytes: number }>()
-  let diagTimer: ReturnType<typeof setInterval> | null = null
-  if (shouldLog) {
-    diagTimer = setInterval(() => {
+  if (shouldLog || perfTraceLogger.isEnabled()) {
+    terminalIpcDiagTimer = setInterval(() => {
       for (const [tid, c] of ipcDataCounters) {
         if (c.messages > 0) {
-          console.log(`[PerfDiag] terminal:data tid=${tid} ipc/s=${c.messages} bytes/s=${c.bytes}`)
+          if (shouldLog) {
+            console.log(`[PerfDiag] terminal:data tid=${tid} ipc/s=${c.messages} bytes/s=${c.bytes}`)
+          }
+          perfTraceLogger.record('main:terminal-data-ipc-summary', {
+            terminalId: tid,
+            messagesPerSecond: c.messages,
+            bytesPerSecond: c.bytes
+          })
           c.messages = 0
           c.bytes = 0
         }
@@ -383,6 +412,10 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
 
   ipcMain.on(IPC.DEBUG_LOG, (_event, payload: { message?: string; data?: unknown }) => {
     log('[RendererDebug]', payload?.message ?? '', payload?.data ?? '')
+  })
+  ipcMain.on(IPC.DEBUG_PERF_TRACE, (_event, payload: { event?: string; data?: Record<string, unknown> }) => {
+    if (!payload?.event) return
+    perfTraceLogger.record(payload.event, payload.data)
   })
 
   // Listen to buffer responses returned by the renderer process
@@ -441,6 +474,15 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   ipcMain.handle(IPC.DEBUG_GET_GIT_RUNTIME_METRICS, () => {
     return gitRuntimeManager.getMetrics()
   })
+  ipcMain.handle(IPC.DEBUG_GET_MAIN_WORK_METRICS, () => {
+    return mainWorkScheduler.getMetrics()
+  })
+  ipcMain.handle(IPC.DEBUG_GET_PERF_TRACE_INFO, () => {
+    return perfTraceLogger.getInfo()
+  })
+  ipcMain.handle(IPC.DEBUG_RESET_PERF_TRACE_METRICS, () => {
+    return perfTraceLogger.resetEventLoopMetrics()
+  })
   ipcMain.handle(IPC.DEBUG_FEEDBACK_RESET, () => {
     feedbackDebugLastOpenedUrl = null
     getFeedbackStorage().debugReset()
@@ -463,12 +505,20 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     }
   })
   ipcMain.handle(IPC.DEBUG_QUIT, () => {
-    // Flush telemetry then exit — fire-and-forget with a short timeout
-    getTelemetryService().shutdown()
-      .catch(() => {})
-      .finally(() => app.exit(0))
-    // Fallback: force exit after 3 seconds if flush hangs
-    setTimeout(() => app.exit(0), 3000)
+    // Flush telemetry and stop PTYs before debug/autotest exit.
+    const timeout = new Promise<void>((resolve) => setTimeout(resolve, 3000))
+    const shutdown = Promise.all([
+      getTelemetryService().shutdown().catch(() => {}),
+      ptyManager.shutdownAll().then((result) => {
+        if (result.timedOut > 0) {
+          console.warn(`[PTY] debug quit shutdown timed out: ${result.timedOut}/${result.total}`)
+        }
+      }).catch((error) => {
+        console.warn('[PTY] debug quit shutdown failed:', error)
+      })
+    ]).then(() => {})
+
+    Promise.race([shutdown, timeout]).finally(() => app.exit(0))
   })
 
   // Saved cwd for terminals running coding agents, so that
@@ -553,6 +603,10 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
       const pendingFastPath = terminalFastPathState.get(id)
       if (pendingFastPath !== undefined) {
         dataBuffer.setFastPathEnabled(pendingFastPath)
+      }
+      const pendingOutputVisibility = terminalOutputVisibilityState.get(id)
+      if (pendingOutputVisibility !== undefined) {
+        dataBuffer.setVisible(pendingOutputVisibility)
       }
 
       // Throttle git activity notifications from PTY output (500ms)
@@ -774,6 +828,12 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     if (buf) buf.setFastPathEnabled(enabled)
   })
 
+  ipcMain.on(IPC.TERMINAL_SET_OUTPUT_VISIBILITY, (_, id: string, visible: boolean) => {
+    terminalOutputVisibilityState.set(id, visible)
+    const buf = terminalDataBuffers.get(id)
+    if (buf) buf.setVisible(visible)
+  })
+
   ipcMain.on(IPC.TERMINAL_NOTIFY_INTERACTIVE_INPUT, (_, id: string) => {
     const buf = terminalDataBuffers.get(id)
     if (buf) buf.notifyInteractiveInput()
@@ -793,6 +853,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
       terminalDataBuffers.delete(id)
     }
     terminalFastPathState.delete(id)
+    terminalOutputVisibilityState.delete(id)
     terminalBracketedPasteState.delete(id)
     ipcDataCounters.delete(id)
     gitWatchManager?.unsubscribe(id)
@@ -1152,67 +1213,71 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   ipcMain.handle(IPC.APP_STATE_SAVE, (_, state: AppState) => {
     return appStateStorage.save(state)
   })
+  ipcMain.handle(IPC.APP_STATE_SAVE_PATCH, (_, patch: Partial<AppState>) => {
+    return appStateStorage.savePatch(patch)
+  })
+  ipcMain.handle(IPC.APP_STATE_FLUSH, () => {
+    return appStateStorage.flush()
+  })
 
   // Git handlers
   // Check if Git is installed
   ipcMain.handle(IPC.GIT_CHECK_INSTALLED, async () => {
-    return await checkGitInstalled()
+    return await gitIpcWorkerClient.checkInstalled()
   })
 
   // Resolve git repo root for a given path
   ipcMain.handle(IPC.GIT_RESOLVE_REPO_ROOT, async (_, cwd: string) => {
-    return await resolveRepoRoot(cwd)
+    return await gitIpcWorkerClient.resolveRepoRoot(cwd)
   })
 
   // Get Git diff for a directory
   ipcMain.handle(IPC.GIT_GET_DIFF, async (_, cwd: string, options?: { scope?: 'root-only' | 'full' }) => {
-    return await getGitDiff(cwd, options)
+    return await gitIpcWorkerClient.getDiff(cwd, options)
   })
 
   // Get Git history list
   ipcMain.handle(IPC.GIT_GET_HISTORY, async (_, cwd: string, options?: { limit?: number; skip?: number }) => {
-    return await getGitHistory(cwd, options?.limit, options?.skip)
+    return await gitIpcWorkerClient.getHistory(cwd, options?.limit, options?.skip)
   })
 
   // Get Git history diff (range + file)
   ipcMain.handle(IPC.GIT_GET_HISTORY_DIFF, async (_, cwd: string, options: GitHistoryDiffOptions) => {
-    return await getGitHistoryDiff(cwd, options)
+    return await gitIpcWorkerClient.getHistoryDiff(cwd, options)
   })
 
   ipcMain.handle(IPC.GIT_GET_HISTORY_FILE_CONTENT, async (_, cwd: string, options: GitHistoryFileContentOptions) => {
-    return await getGitHistoryFileContent(cwd, options)
+    return await gitIpcWorkerClient.getHistoryFileContent(cwd, options)
   })
 
   // Get Git file content for diff view
   ipcMain.handle(IPC.GIT_GET_FILE_CONTENT, async (_, cwd: string, file: Pick<GitFileStatus, 'filename' | 'status' | 'originalFilename' | 'changeType' | 'isSubmoduleEntry'>, repoRoot?: string) => {
-    return await getGitFileContent(cwd, file, repoRoot)
+    return await gitIpcWorkerClient.getFileContent(cwd, file, repoRoot)
   })
 
   // Save file content to workspace
   ipcMain.handle(IPC.GIT_SAVE_FILE_CONTENT, async (_, cwd: string, filename: string, content: string) => {
-    return await saveGitFileContent(cwd, filename, content)
+    return await gitIpcWorkerClient.saveFileContent(cwd, filename, content)
   })
 
   ipcMain.handle(IPC.GIT_STAGE_FILE, async (_, cwd: string, filename: string, repoRoot?: string) => {
-    return await stageGitFile(cwd, filename, repoRoot)
+    return await gitIpcWorkerClient.stageFile(cwd, filename, repoRoot)
   })
 
   ipcMain.handle(IPC.GIT_UNSTAGE_FILE, async (_, cwd: string, filename: string, repoRoot?: string) => {
-    return await unstageGitFile(cwd, filename, repoRoot)
+    return await gitIpcWorkerClient.unstageFile(cwd, filename, repoRoot)
   })
 
   ipcMain.handle(IPC.GIT_DISCARD_FILE, async (_, cwd: string, file: Pick<GitFileStatus, 'filename' | 'changeType' | 'status' | 'isSubmoduleEntry'>, repoRoot?: string) => {
-    return await discardGitFile(cwd, file, repoRoot)
+    return await gitIpcWorkerClient.discardFile(cwd, file, repoRoot)
   })
 
   ipcMain.handle(IPC.GIT_GET_SUBMODULES, async (_, cwd: string) => {
-    const meta = await getGitRepoMeta(cwd)
-    if (!meta.isRepo || !meta.repoRoot || !meta.gitExecutable) return []
-    return await detectSubmodulesRecursive(meta.repoRoot, meta.gitExecutable)
+    return await gitIpcWorkerClient.getSubmodules(cwd)
   })
 
   ipcMain.handle(IPC.GIT_UPDATE_INDEX_CONTENT, async (_, cwd: string, filename: string, content: string) => {
-    return await updateGitIndexContent(cwd, filename, content)
+    return await gitIpcWorkerClient.updateIndexContent(cwd, filename, content)
   })
 
   // Get terminal's current working directory
@@ -1247,17 +1312,24 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
 
   // Background diff cache warming — pre-compute diff so opening the panel is instant
   ipcMain.handle(IPC.GIT_WARM_DIFF_CACHE, async (_, cwd: string) => {
-    try {
-      await getGitDiff(cwd, { scope: 'full' })
-      return { success: true }
-    } catch {
-      return { success: false }
-    }
+    return await gitIpcWorkerClient.warmDiffCache(cwd)
   })
 
   // Project editor handlers
   ipcMain.handle(IPC.PROJECT_LIST_DIRECTORY, async (_, root: string, path: string) => {
-    return await listDirectory(root, path)
+    return await projectFsWorkerClient.listDirectory(root, path)
+  })
+
+  ipcMain.handle(IPC.PROJECT_BUILD_FILE_INDEX, async (_, root: string) => {
+    return await projectFsWorkerClient.buildFileIndex(root)
+  })
+
+  ipcMain.handle(IPC.PROJECT_SEARCH_FILENAMES, async (_, root: string, query: string, limit?: number) => {
+    return await projectFsWorkerClient.searchFilenames(root, query, limit ?? 80)
+  })
+
+  ipcMain.handle(IPC.PROJECT_INVALIDATE_FILE_INDEX, async (_, root: string) => {
+    return await projectFsWorkerClient.invalidateFileIndex(root)
   })
 
   ipcMain.handle(IPC.PROJECT_READ_FILE, async (_, root: string, path: string) => {
@@ -1327,41 +1399,42 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   })
 
   ipcMain.handle(IPC.PROJECT_SQLITE_GET_SCHEMA, async (_, root: string, path: string) => {
-    return await getProjectSqliteSchema(root, path)
+    return await sqliteWorkerClient.getSchema(root, path)
   })
 
   ipcMain.handle(
     IPC.PROJECT_SQLITE_READ_TABLE_ROWS,
     async (_, root: string, path: string, table: string, limit?: number, offset?: number) => {
-      return await readProjectSqliteTableRows(root, path, table, limit, offset)
+      return await sqliteWorkerClient.readTableRows(root, path, table, limit, offset)
     }
   )
 
   ipcMain.handle(
     IPC.PROJECT_SQLITE_INSERT_ROW,
     async (_, root: string, path: string, table: string, values: Record<string, unknown>) => {
-      return await insertProjectSqliteRow(root, path, table, values)
+      return await sqliteWorkerClient.insertRow(root, path, table, values)
     }
   )
 
   ipcMain.handle(
     IPC.PROJECT_SQLITE_UPDATE_ROW,
     async (_, root: string, path: string, table: string, key: unknown, values: Record<string, unknown>) => {
-      return await updateProjectSqliteRow(root, path, table, key, values)
+      return await sqliteWorkerClient.updateRow(root, path, table, key, values)
     }
   )
 
   ipcMain.handle(IPC.PROJECT_SQLITE_DELETE_ROW, async (_, root: string, path: string, table: string, key: unknown) => {
-    return await deleteProjectSqliteRow(root, path, table, key)
+    return await sqliteWorkerClient.deleteRow(root, path, table, key)
   })
 
   ipcMain.handle(IPC.PROJECT_SQLITE_EXECUTE, async (_, root: string, path: string, sql: string) => {
-    return await executeProjectSqlite(root, path, sql)
+    return await sqliteWorkerClient.execute(root, path, sql)
   })
 
   ripgrepSearchManager = new RipgrepSearchManager()
 
   ipcMain.handle(IPC.PROJECT_SEARCH_START, async (_, options: {
+    searchId?: string
     rootPath: string
     query: string
     isRegex: boolean
@@ -1555,9 +1628,18 @@ export function cleanupIpcHandlers(): void {
   }
   terminalDataBuffers.clear()
   terminalFastPathState.clear()
+  terminalOutputVisibilityState.clear()
+  if (terminalIpcDiagTimer) {
+    clearInterval(terminalIpcDiagTimer)
+    terminalIpcDiagTimer = null
+  }
 
   gitWatchManager?.dispose()
   gitWatchManager = null
+  gitIpcWorkerClient.dispose()
+  sqliteWorkerClient.dispose()
+  getAppStateStorage().dispose()
+  projectFsWorkerClient.dispose()
   ripgrepSearchManager?.dispose()
   ripgrepSearchManager = null
   fileWatchManager?.dispose()
@@ -1587,6 +1669,7 @@ export function cleanupIpcHandlers(): void {
   ipcMain.removeHandler(IPC.TERMINAL_SEND_INPUT_SEQUENCE)
   ipcMain.removeHandler(IPC.TERMINAL_GET_INPUT_CAPABILITIES)
   ipcMain.removeAllListeners(IPC.TERMINAL_SET_BUFFER_FAST_PATH)
+  ipcMain.removeAllListeners(IPC.TERMINAL_SET_OUTPUT_VISIBILITY)
   ipcMain.removeAllListeners(IPC.TERMINAL_NOTIFY_INTERACTIVE_INPUT)
   ipcMain.removeHandler(IPC.TERMINAL_RESIZE)
   ipcMain.removeHandler(IPC.TERMINAL_DISPOSE)
@@ -1629,6 +1712,8 @@ export function cleanupIpcHandlers(): void {
   ipcMain.removeHandler(IPC.CODING_AGENT_LAUNCH)
   ipcMain.removeHandler(IPC.APP_STATE_LOAD)
   ipcMain.removeHandler(IPC.APP_STATE_SAVE)
+  ipcMain.removeHandler(IPC.APP_STATE_SAVE_PATCH)
+  ipcMain.removeHandler(IPC.APP_STATE_FLUSH)
   ipcMain.removeHandler(IPC.GIT_CHECK_INSTALLED)
   ipcMain.removeHandler(IPC.GIT_RESOLVE_REPO_ROOT)
   ipcMain.removeHandler(IPC.GIT_GET_DIFF)
@@ -1649,6 +1734,9 @@ export function cleanupIpcHandlers(): void {
   ipcMain.removeHandler(IPC.GIT_NOTIFY_TERMINAL_FOCUS)
   ipcMain.removeHandler(IPC.GIT_NOTIFY_TERMINAL_GIT_UPDATE)
   ipcMain.removeHandler(IPC.PROJECT_LIST_DIRECTORY)
+  ipcMain.removeHandler(IPC.PROJECT_BUILD_FILE_INDEX)
+  ipcMain.removeHandler(IPC.PROJECT_SEARCH_FILENAMES)
+  ipcMain.removeHandler(IPC.PROJECT_INVALIDATE_FILE_INDEX)
   ipcMain.removeHandler(IPC.PROJECT_READ_FILE)
   ipcMain.removeHandler(IPC.PROJECT_SAVE_FILE)
   ipcMain.removeHandler(IPC.PROJECT_CREATE_FILE)
@@ -1676,9 +1764,13 @@ export function cleanupIpcHandlers(): void {
   ipcMain.removeHandler(IPC.DEBUG_GET_APP_METRICS)
   ipcMain.removeHandler(IPC.DEBUG_FOCUS_WINDOW)
   ipcMain.removeHandler(IPC.DEBUG_GET_GIT_RUNTIME_METRICS)
+  ipcMain.removeHandler(IPC.DEBUG_GET_MAIN_WORK_METRICS)
+  ipcMain.removeHandler(IPC.DEBUG_GET_PERF_TRACE_INFO)
+  ipcMain.removeHandler(IPC.DEBUG_RESET_PERF_TRACE_METRICS)
   ipcMain.removeHandler(IPC.DEBUG_READ_TELEMETRY_LOG)
   ipcMain.removeHandler(IPC.DEBUG_QUIT)
   ipcMain.removeAllListeners(IPC.DEBUG_LOG)
+  ipcMain.removeAllListeners(IPC.DEBUG_PERF_TRACE)
   ipcMain.removeAllListeners(IPC.TERMINAL_BUFFER_RESPONSE)
   ipcMain.removeAllListeners(IPC.PROMPT_BRIDGE_RESPONSE)
   // Clear all pending buffer requests

@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useCallback, useMemo, useRef, useEffect, memo } from 'react'
+import { useState, useCallback, useMemo, useRef, useEffect, memo, startTransition } from 'react'
 import { Prompt, PromptSendRecord } from '../../types/electron'
 import type { TerminalBatchResult, TerminalInfo } from '../../types/prompt'
 import type { EditorDraft, PromptCleanupConfig, PromptSchedule } from '../../types/tab.d.ts'
@@ -1455,19 +1455,21 @@ const PromptEditorWithAppend = memo(function PromptEditorWithAppend({
     }
 
     parentNotifyTimerRef.current = setTimeout(() => {
-      onContentChange(content)
-      onTitleChange(title)
+      startTransition(() => {
+        onContentChange(content)
+        onTitleChange(title)
 
-      if (!title.trim() && !content.trim()) {
-        onEditorDraftChange(null)
-      } else {
-        onEditorDraftChange({
-          title,
-          content,
-          height,
-          savedAt: Date.now()
-        })
-      }
+        if (!title.trim() && !content.trim()) {
+          onEditorDraftChange(null)
+        } else {
+          onEditorDraftChange({
+            title,
+            content,
+            height,
+            savedAt: Date.now()
+          })
+        }
+      })
     }, 300)
 
     return () => {

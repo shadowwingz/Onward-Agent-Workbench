@@ -4,7 +4,6 @@
  */
 
 import BetterSqlite3 from 'better-sqlite3'
-import { app } from 'electron'
 import { readdir, stat, readFile, writeFile, mkdir, rename, rm, unlink, access } from 'fs/promises'
 import { resolve, relative, dirname, sep, normalize, extname, join } from 'path'
 import { MAX_IMAGE_FILE_SIZE, bufferToImageDataUrl, isSupportedImageFile } from './image-utils'
@@ -43,12 +42,13 @@ function toFileUrl(fullPath: string): string {
   return `file://${segments.join('/')}`
 }
 
-function getResourcesBasePath(): string {
+async function getResourcesBasePath(): Promise<string> {
+  const { app } = await import('electron')
   return app.isPackaged ? join(process.resourcesPath, 'resources') : join(app.getAppPath(), 'resources')
 }
 
-function buildPdfViewerUrl(fullPath: string): string {
-  const viewerPath = join(getResourcesBasePath(), 'pdfjs', 'app', 'viewer.html')
+async function buildPdfViewerUrl(fullPath: string): Promise<string> {
+  const viewerPath = join(await getResourcesBasePath(), 'pdfjs', 'app', 'viewer.html')
   const viewerUrl = toFileUrl(viewerPath)
   const fileUrl = toFileUrl(fullPath)
   const parts = fullPath.split(sep)
@@ -497,7 +497,7 @@ export async function readProjectFile(root: string, path: string) {
         isImage: false,
         isSqlite: false,
         isPdf: true,
-        previewUrl: buildPdfViewerUrl(fullPath),
+        previewUrl: await buildPdfViewerUrl(fullPath),
         previewPath: fullPath
       }
     }

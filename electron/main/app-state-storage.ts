@@ -5,7 +5,9 @@
 
 import { app } from 'electron'
 import { join } from 'path'
-import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync } from 'fs'
+import { readFileSync, existsSync, renameSync } from 'fs'
+import { appStateWorkerClient } from './app-state-worker-client'
+import { perfTraceLogger } from './perf-trace-logger'
 
 /**
  * Prompt data structure
@@ -276,6 +278,9 @@ class AppStateStorage {
   private legacyConfigPath: string
   private legacyPromptsPath: string
   private state: AppState
+  private persistVersion = 0
+  private pendingPersist: Promise<boolean> | null = null
+  private persistQueued = false
 
   constructor() {
     const userDataPath = app.getPath('userData')
@@ -767,16 +772,48 @@ class AppStateStorage {
   /**
    * Save state data to file
    */
-  private persist(): void {
-    try {
-      const dir = app.getPath('userData')
-      if (!existsSync(dir)) {
-        mkdirSync(dir, { recursive: true })
-      }
-      writeFileSync(this.storagePath, JSON.stringify(this.state, null, 2), 'utf-8')
-    } catch (error) {
-      console.error('Failed to save app state:', error)
+  private persist(): Promise<boolean> {
+    if (this.pendingPersist) {
+      this.persistQueued = true
+      return this.pendingPersist
     }
+    return this.startPersist()
+  }
+
+  private startPersist(): Promise<boolean> {
+    const version = ++this.persistVersion
+    const startedAt = Date.now()
+    const snapshot = this.state
+    const promise = appStateWorkerClient.saveSnapshot(this.storagePath, snapshot)
+      .then((result) => {
+        perfTraceLogger.record('main:app-state-save', {
+          version,
+          bytes: result.bytes,
+          workerDurationMs: result.durationMs,
+          elapsedMs: Date.now() - startedAt
+        })
+        return true
+      })
+      .catch((error) => {
+        console.error('Failed to save app state:', error)
+        perfTraceLogger.record('main:app-state-save-error', {
+          version,
+          elapsedMs: Date.now() - startedAt,
+          error: String(error)
+        })
+        return false
+      })
+      .finally(() => {
+        if (this.pendingPersist === promise) {
+          this.pendingPersist = null
+        }
+        if (this.persistQueued) {
+          this.persistQueued = false
+          void this.startPersist()
+        }
+      })
+    this.pendingPersist = promise
+    return promise
   }
 
   /**
@@ -862,25 +899,56 @@ class AppStateStorage {
    * Get current state
    */
   get(): AppState {
-    return JSON.parse(JSON.stringify(this.state))
+    if (typeof structuredClone === 'function') {
+      return structuredClone(this.state)
+    }
+    return JSON.parse(JSON.stringify(this.state)) as AppState
   }
 
   /**
    * Save complete state
    */
-  save(state: AppState): boolean {
+  async save(state: AppState): Promise<boolean> {
     try {
       this.state = {
         ...this.validateState(state),
         updatedAt: Date.now()
       }
       this.logUIPreferences('save', this.state.uiPreferences)
-      this.persist()
-      return true
+      return await this.persist()
     } catch (error) {
       console.error('Failed to save app state:', error)
       return false
     }
+  }
+
+  async savePatch(patch: Partial<AppState>): Promise<boolean> {
+    try {
+      this.state = {
+        ...this.validateState({
+          ...this.state,
+          ...patch
+        }),
+        updatedAt: Date.now()
+      }
+      return await this.persist()
+    } catch (error) {
+      console.error('Failed to patch app state:', error)
+      return false
+    }
+  }
+
+  async flush(): Promise<boolean> {
+    while (this.pendingPersist || this.persistQueued) {
+      if (this.pendingPersist) {
+        await this.pendingPersist
+      }
+    }
+    return await this.persist()
+  }
+
+  dispose(): void {
+    appStateWorkerClient.dispose()
   }
 }
 

@@ -135,28 +135,247 @@ pwsh test/run-terminal-stress-autotest.ps1
 bash test/run-terminal-stress-autotest.sh
 ```
 
-These tests programmatically create terminals, inject output, toggle visibility via `setVisibility()`, and measure performance. They complement the manual test above but do not replace it — manual testing captures the real Prompt input feel that automated probes cannot fully measure.
+These tests programmatically create terminals, inject output, toggle visibility via `setVisibility()`, and measure performance. They complement the manual test above but do not replace it because manual testing captures the real Prompt input feel that automated probes cannot fully measure.
+
+## 3.1 Terminal Architecture Baseline Suite
+
+Use this suite before changing the terminal architecture. It records a JSON
+baseline for the current build so later optimization branches can report
+percentage improvements against the same workload.
+
+```powershell
+# Windows
+pwsh test/run-terminal-architecture-baseline-autotest.ps1
+```
+
+```bash
+# macOS / Linux
+bash test/run-terminal-architecture-baseline-autotest.sh
+```
+
+The runner prepares a dedicated fixture under
+`test/fixtures/terminal-architecture-baseline/workdir`, launches the packaged
+development app with `ONWARD_AUTOTEST_SUITE=terminal-architecture-baseline`, and
+writes a result file under `test/results/terminal-architecture-baseline/`.
+
+The suite records these scenarios:
+
+| Scenario | Purpose |
+|----------|---------|
+| `idle-input` | Baseline xterm keystroke-to-echo latency with no terminal output pressure |
+| `visible-output-5` | Five visible terminals stream output while the sixth receives input |
+| `visible-output-5-git-diff` | Visible output plus repeated renderer-to-main Git diff requests |
+| `hidden-output-5-git-diff` | Hidden output plus Git diff pressure to isolate renderer write cost |
+| `visible-output-5-search` | Visible output plus project search pressure over the fixture tree |
+
+Primary comparison metrics:
+
+| Metric | Meaning |
+|--------|---------|
+| `inputLatency.p95Ms` | Main acceptance metric for typing responsiveness |
+| `inputLatency.maxMs` | Worst observed keystroke-to-echo delay |
+| `perf.avgFps` / `perf.minFps` | Renderer frame stability while terminal data is flowing |
+| `perf.avgIpcMsgPerSec` | IPC pressure from terminal data and background work |
+| `perf.avgXtermWritesPerSec` / `perf.maxXtermWriteMs` | Renderer terminal write pressure |
+| `gitDiffPressure.p95Ms` | Main-process Git workload duration under terminal output |
+| `searchPressure.p95Ms` | Project search workload duration under terminal output |
+
+When comparing an optimization branch against the baseline, use the same runner
+and compute:
+
+```text
+improvement_pct = (baseline_value - candidate_value) / baseline_value * 100
+```
+
+For latency and IPC metrics, positive values are improvements. For FPS, invert
+the formula or report the direct FPS increase:
+
+```text
+fps_change_pct = (candidate_fps - baseline_fps) / baseline_fps * 100
+```
+
+Use the checked-in comparison tool to keep the optimization measurable:
+
+```powershell
+node test/compare-performance-baseline.mjs `
+  --suite terminal-architecture-baseline `
+  --profile optimization `
+  --before test/results/terminal-architecture-baseline/<pre-optimization>.json `
+  --after test/results/terminal-architecture-baseline/<candidate>.json
+```
+
+```bash
+node test/compare-performance-baseline.mjs \
+  --suite terminal-architecture-baseline \
+  --profile optimization \
+  --before test/results/terminal-architecture-baseline/<pre-optimization>.json \
+  --after test/results/terminal-architecture-baseline/<candidate>.json
+```
+
+The `optimization` profile verifies that the candidate still clears the expected
+improvement floor over the pre-optimization baseline. The `regression` profile
+is for comparing against an already optimized reference build and allows only a
+small absolute tolerance.
+
+## 3.2 Prompt Input Latency Baseline Suite
+
+Use this suite when validating the scenario where multiple Tasks are refreshing
+while the user types in the Prompt input area. This is the primary acceptance
+point for prompt responsiveness regressions.
+
+```powershell
+# Windows
+pwsh test/run-prompt-input-latency-autotest.ps1
+```
+
+```bash
+# macOS / Linux
+bash test/run-prompt-input-latency-autotest.sh
+```
+
+The runner prepares a dedicated fixture under
+`test/fixtures/prompt-input-latency/workdir`, launches the packaged development
+app with `ONWARD_AUTOTEST_SUITE=prompt-input-latency`, and writes JSON results
+under `test/results/prompt-input-latency/`.
+
+The suite records these scenarios:
+
+| Scenario | Purpose |
+|----------|---------|
+| `idle-prompt-input` | Prompt textarea input latency with no terminal output pressure |
+| `visible-output-2-prompt-input` | Prompt textarea input latency while two visible terminal Tasks stream output |
+| `visible-output-5-prompt-input` | Prompt textarea input latency while five visible terminal Tasks stream output |
+| `visible-output-5-git-diff-prompt-input` | Prompt textarea input latency while five visible terminal Tasks stream output and Git Diff pressure runs |
+| `visible-output-5-search-prompt-input` | Prompt textarea input latency while five visible terminal Tasks stream output and project search pressure runs |
+
+Primary prompt input metrics:
+
+| Metric | Meaning |
+|--------|---------|
+| `promptInput.inputLatency.p95Ms` | Main acceptance metric: scheduled input to next paint |
+| `promptInput.inputLatency.p99Ms` | Long-tail latency for rare but visible stalls |
+| `promptInput.inputLatency.p999Ms` | Extreme long-tail latency for periodic freeze detection |
+| `promptInput.inputLatency.stddevMs` | Latency variance; high values indicate intermittent stalls even when p95 is stable |
+| `promptInput.inputLatency.maxMs` | Worst observed scheduled input to next paint |
+| `promptInput.eventLoopDelay.p95Ms` | Renderer main-thread delay before the input callback can run |
+| `promptInput.paintDelay.p95Ms` | Callback-to-next-paint delay after the textarea input is applied |
+| `promptInput.mismatches` | Number of samples where the textarea value did not match the expected typed value |
+
+Recommended acceptance target after optimization:
+
+| Condition | Target |
+|-----------|--------|
+| `visible-output-2-prompt-input` | `promptInput.inputLatency.p95Ms <= 80ms`, `mismatches = 0` |
+| `visible-output-5-prompt-input` | `promptInput.inputLatency.p95Ms <= 120ms`, `mismatches = 0` |
+| `visible-output-5-git-diff-prompt-input` | `promptInput.inputLatency.p95Ms <= 120ms`, `mismatches = 0` |
+| `visible-output-5-search-prompt-input` | `promptInput.inputLatency.p95Ms <= 120ms`, `mismatches = 0` |
+| Any prompt input scenario | `promptInput.inputLatency.maxMs <= 250ms` unless the host is under unrelated system load |
+
+The runner can also run the comparison gate automatically:
+
+```powershell
+pwsh test/run-prompt-input-latency-autotest.ps1 `
+  -CompareBaselineFile test/results/prompt-input-latency/<pre-optimization>.json `
+  -CompareProfile optimization
+```
+
+```bash
+bash test/run-prompt-input-latency-autotest.sh "" "" "" \
+  test/results/prompt-input-latency/<pre-optimization>.json \
+  optimization
+```
+
+### 3.4 Prompt Input Long-Tail Test
+
+Use this suite when the bug is intermittent: for example, six Tasks appear to
+freeze every 7 to 8 seconds while the user continuously types into Prompt. The
+short prompt suite is good for average behavior and p95; this suite is designed
+to catch outliers and periodic stalls.
+
+```powershell
+# Windows
+pwsh test/run-prompt-input-longtail-autotest.ps1
+```
+
+```bash
+# macOS / Linux
+bash test/run-prompt-input-longtail-autotest.sh
+```
+
+The suite launches six visible terminal Tasks. Each Task repeatedly runs
+`git status --porcelain=2 --branch -uall` in a heavy fixture repository and
+prints a status line, while the Prompt test schedules input every 80ms for
+72 seconds. The measured latency is scheduled input time to the next paint after
+the typed character is visible. This intentionally includes renderer event-loop
+stalls before the input callback can run.
+
+The fixture is intentionally heavier than the short prompt suite: it creates a
+Git worktree with many tracked, modified, and untracked files so periodic
+terminal GitWatch/status refreshes have enough cost to expose 7 to 8 second
+stall patterns.
+
+Long-tail-only metrics:
+
+| Metric | Meaning |
+|--------|---------|
+| `promptInput.inputLatency.stddevMs` | Spread of latency samples; the primary variance signal |
+| `promptInput.inputLatency.p99Ms` | 99th percentile scheduled input-to-paint latency |
+| `promptInput.inputLatency.p999Ms` | 99.9th percentile scheduled input-to-paint latency |
+| `promptInput.over250Ms` | Number of samples above 250ms |
+| `promptInput.over500Ms` | Number of samples above 500ms |
+| `promptInput.buckets[]` | One-second buckets with max / p95 / p99 / stall counts |
+| `promptInput.topOutliers[]` | Worst individual samples with timestamp offsets |
+| `promptInput.stallWindows[]` | Consecutive samples above the stall threshold |
+| `gitRuntime.delta.kinds.gitScheduled` | Git tasks scheduled by app runtime during the scenario |
+| `gitRuntime.delta.scheduler.dedupHits` | Runtime-level Git task deduplication hits |
+| `gitRuntime.delta.latencies.titleRefreshCount` | Terminal title/status refresh completions during the scenario |
+| `mainEventLoop.maxDriftMs` | Browser/Main process event-loop stall observed after scenario reset |
+| `mainEventLoop.over1000Ms` / `over3000Ms` / `over6000Ms` | Count of Main event-loop stalls beyond severe freeze thresholds |
+| `perfTrace.logPath` | JSONL trace file used to inspect stall timing and causal events |
+
+Recommended long-tail target:
+
+| Condition | Target |
+|-----------|--------|
+| `visible-output-6-git-status-prompt-longtail` | `p99Ms <= 160ms`, `p999Ms <= 300ms`, `maxMs <= 600ms` |
+| Variance | `stddevMs <= 60ms` |
+| Extreme stalls | `over250Ms <= 3`, `over500Ms = 0`, `mismatches = 0` |
+| Main process stall | `mainEventLoop.maxDriftMs <= 1000ms`, `over1000Ms = 0`, `over3000Ms = 0`, `over6000Ms = 0` |
 
 ## 4. Performance Architecture Overview
 
-The terminal data pipeline and where throttling occurs:
+The terminal data pipeline and where scheduling occurs:
 
 ```
 PTY (node-pty)
-  -> TerminalDataBuffer (main process, 100ms flush interval)
-     -> IPC: webContents.send('terminal:data', id, merged)
-        -> Renderer: registerGlobalDataListener()
-           -> pendingData[] buffer (per session)
-              -> requestAnimationFrame + 50ms throttle
-                 -> terminal.write(merged)  (~20 fps)
+  -> TerminalDataBuffer (main process)
+     -> output visibility gate
+        -> IPC: webContents.send('terminal:data', id, merged)
+           -> Renderer: registerGlobalDataListener()
+              -> pendingData[] buffer (per session)
+                 -> TerminalOutputScheduler
+                    -> requestAnimationFrame + frame budget
+                       -> terminal.write(chunk)
 ```
 
 Key optimization points:
-- **Main process**: `TerminalDataBuffer.FLUSH_INTERVAL_MS = 100` (was 16)
-- **Renderer**: `VISIBLE_WRITE_THROTTLE_MS = 50` with rAF scheduling
-- **Focused terminal input**: recent user input enables a short interactive bypass window in both main and renderer
-- **Hidden terminals**: Data buffered in `pendingData[]`, skips `terminal.write()` entirely
+- **Main process**: terminal data is retained or dropped by explicit output visibility so hidden or non-consumed task output does not continuously cross IPC.
+- **Renderer**: `TerminalOutputScheduler` uses frame budgets, chunk limits, and round-robin fairness across terminals.
+- **Prompt input lane**: capture-phase input detection and `navigator.scheduling.isInputPending()` make terminal output yield while the Prompt editor is active.
+- **Focused terminal input**: recent terminal input enables a short interactive boost for the focused session.
+- **Hidden terminals**: hidden output avoids renderer `terminal.write()` and avoids sustained IPC pressure.
 - **WebGL pooling**: Hidden terminals release GPU contexts via `setVisibility(false)`
+- **GitWatch**: terminal output does not promote every task to interactive priority. Repository fingerprint and branch/status refreshes are shared per repo with in-flight coalescing so six visible Tasks in the same repo do not run six identical Git refreshes in the same burst. Terminal title/status refreshes must avoid untracked-file scans; full untracked enumeration belongs to explicit Git Diff / Git History flows.
+
+Comparison gate expectations for the optimized architecture:
+
+| Suite | Gate |
+|-------|------|
+| Prompt input | `visible-output-2-prompt-input` p95 <= 80ms, `visible-output-5-prompt-input` p95 <= 120ms, max <= 250ms, mismatches = 0 |
+| Prompt long-tail | six visible output Tasks keep p99 <= 160ms, p999 <= 300ms, max <= 600ms, stddev <= 60ms, over500 = 0 |
+| Terminal architecture | terminal echo median p50 <= 50ms for critical scenarios |
+| Hidden output isolation | hidden git IPC <= 10/s and renderer hidden buffered MB <= 1 |
+| Frame stability | critical scenarios keep average FPS >= 28 |
 
 ## 5. Regression Checklist
 

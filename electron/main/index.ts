@@ -29,6 +29,7 @@ import { getWindowStateStorage } from './window-state-storage'
 import { getTelemetryService } from './telemetry/telemetry-service'
 import { TELEMETRY_RESET_CONSENT } from './telemetry/telemetry-constants'
 import { startSessionHeartbeat, stopSessionHeartbeat, getSessionDurationMs } from './telemetry/telemetry-session-tracker'
+import { perfTraceLogger } from './perf-trace-logger'
 import { IPC } from '../shared/ipc-channels'
 
 // ONWARD_SMOKE_LAUNCH=1 makes the main process self-quit once the main window
@@ -93,6 +94,14 @@ async function persistTerminalCwdSnapshot(): Promise<void> {
   }
 }
 
+async function flushAppStateStorage(): Promise<void> {
+  try {
+    await getAppStateStorage().flush()
+  } catch (error) {
+    console.warn('[AppState] flush failed during shutdown:', error)
+  }
+}
+
 function persistWindowState(): void {
   if (!mainWindow || mainWindow.isDestroyed()) return
 
@@ -144,6 +153,7 @@ export async function requestQuit(): Promise<void> {
     persistWindowState()
     await shutdownTelemetry()
     await persistTerminalCwdSnapshot()
+    await flushAppStateStorage()
     const shutdownResult = await ptyManager.shutdownAll()
     if (shutdownResult.timedOut > 0) {
       console.warn(
@@ -171,6 +181,7 @@ export async function requestRestartToApplyUpdate(): Promise<{ success: boolean;
   persistWindowState()
   await shutdownTelemetry()
   await persistTerminalCwdSnapshot()
+  await flushAppStateStorage()
   const shutdownResult = await ptyManager.shutdownAll()
   if (shutdownResult.timedOut > 0) {
     console.warn(
@@ -193,6 +204,7 @@ export async function requestQuitForDebug(): Promise<{ success: boolean; error?:
   persistWindowState()
   await shutdownTelemetry()
   await persistTerminalCwdSnapshot()
+  await flushAppStateStorage()
   const shutdownResult = await ptyManager.shutdownAll()
   if (shutdownResult.timedOut > 0) {
     console.warn(
@@ -401,6 +413,10 @@ function createWindow(displayName: string): void {
     }
     mainWindow.webContents.on('render-process-gone', (_event, details) => {
       log('[Window] render-process-gone', details)
+      perfTraceLogger.record('main:renderer-process-gone', {
+        reason: details.reason,
+        exitCode: details.exitCode
+      })
       getTelemetryService().track('error/rendererCrash', {
         reason: details.reason,
         exitCode: details.exitCode
@@ -408,6 +424,7 @@ function createWindow(displayName: string): void {
     })
     mainWindow.webContents.on('unresponsive', () => {
       log('[Window] renderer unresponsive')
+      perfTraceLogger.record('main:renderer-unresponsive')
     })
     mainWindow.webContents.on('console-message', (_event, level, message, line, sourceId) => {
       log('[Renderer]', { level, message, line, sourceId })
@@ -465,6 +482,8 @@ function createWindow(displayName: string): void {
 
 app.whenReady().then(() => {
   const appInfo = initializeAppIdentity()
+  perfTraceLogger.start()
+  perfTraceLogger.startEventLoopMonitor()
 
   // Windows: check for a pending update that wasn't applied during the
   // previous quit (e.g. the helper script was killed by Job Object cleanup).
@@ -578,5 +597,6 @@ app.on('will-quit', () => {
   getUpdateService().stop()
   stopApiServer()
   cleanupIpcHandlers()
+  perfTraceLogger.stop()
   getTrayManager().destroy()
 })

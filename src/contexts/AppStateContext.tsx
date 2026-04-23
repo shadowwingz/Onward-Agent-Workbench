@@ -7,6 +7,7 @@ import React, { createContext, useContext, useEffect, useState, useCallback, use
 import type { AppState, TabState, GlobalPrompt, LocalPrompt, EditorDraft, ProjectEditorState, PromptCleanupConfig, PromptSchedule, UIPreferences } from '../types/tab.d.ts'
 import type { Prompt } from '../types/electron.d.ts'
 import { normalizeProjectCwd as normalizeProjectCwdImpl } from '../utils/pathNormalize'
+import { perfTrace } from '../utils/perf-trace'
 
 export const normalizeProjectCwd = normalizeProjectCwdImpl
 
@@ -208,7 +209,7 @@ function applyProjectEditorStateUpdate(
   }
 }
 
-const DEBUG_APP_STATE = Boolean(window.electronAPI?.debug?.enabled)
+const DEBUG_APP_STATE = Boolean(window.electronAPI?.debug?.enabled || window.electronAPI?.debug?.perfTraceEnabled)
 
 function normalizePromptEditorHeight(value: number | null | undefined): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) {
@@ -257,6 +258,29 @@ function createDefaultAppState(): AppState {
     uiPreferences: {},
     updatedAt: Date.now()
   }
+}
+
+const APP_STATE_PATCH_KEYS: Array<keyof AppState> = [
+  'activeTabId',
+  'tabs',
+  'globalPrompts',
+  'promptCleanup',
+  'lastFocusedTerminalId',
+  'projectEditorStates',
+  'promptSchedules',
+  'uiPreferences',
+  'updatedAt'
+]
+
+function buildAppStatePatch(previous: AppState | null, next: AppState): Partial<AppState> {
+  if (!previous) return next
+  const patch: Partial<AppState> = {}
+  for (const key of APP_STATE_PATCH_KEYS) {
+    if (previous[key] !== next[key]) {
+      ;(patch as Record<keyof AppState, unknown>)[key] = next[key]
+    }
+  }
+  return patch
 }
 
 interface AppStateContextValue {
@@ -333,6 +357,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
   const [state, setState] = useState<AppState>(createDefaultAppState())
   const stateRef = useRef(state)
   stateRef.current = state
+  const lastPersistedStateRef = useRef<AppState | null>(null)
   const [isLoaded, setIsLoaded] = useState(false)
   const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null)
   const draftSaveTimeoutRef = useRef<NodeJS.Timeout | null>(null)
@@ -393,6 +418,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
           uiPreferences: loadedState.uiPreferences ?? {}
         }
         stateRef.current = normalizedState
+        lastPersistedStateRef.current = normalizedState
         setState(normalizedState)
         const shouldSave = normalizedState.tabs.some((tab, index) => {
           const original = loadedState.tabs[index]
@@ -403,6 +429,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
         })
         if (shouldSave) {
           await window.electronAPI.appState.save(normalizedState)
+          lastPersistedStateRef.current = normalizedState
         }
       } catch (error) {
         console.error('Failed to load app state:', error)
@@ -492,19 +519,33 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
 
       // Await save to ensure data is written to disk before quit proceeds
       await window.electronAPI.appState.save(finalState)
+      await window.electronAPI.appState.flush()
+      lastPersistedStateRef.current = finalState
     })
   }, [])
 
+  const persistState = useCallback((newState: AppState, previousState?: AppState | null) => {
+    const previous = previousState ?? lastPersistedStateRef.current
+    const patch = buildAppStatePatch(previous, newState)
+    lastPersistedStateRef.current = newState
+    if (Object.keys(patch).length === 0) return
+    if (Object.keys(patch).length >= APP_STATE_PATCH_KEYS.length) {
+      window.electronAPI.appState.save(newState)
+      return
+    }
+    window.electronAPI.appState.savePatch(patch)
+  }, [])
+
   // Debounced state save
-  const saveState = useCallback((newState: AppState) => {
+  const saveState = useCallback((newState: AppState, previousState?: AppState | null) => {
     if (saveTimeoutRef.current) {
       clearTimeout(saveTimeoutRef.current)
     }
     saveTimeoutRef.current = setTimeout(() => {
       saveTimeoutRef.current = null
-      window.electronAPI.appState.save(newState)
+      persistState(newState, previousState)
     }, 500)
-  }, [])
+  }, [persistState])
 
   // Update state and save
   const updateState = useCallback((updater: (prev: AppState) => AppState) => {
@@ -517,7 +558,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
         updatedAt: Date.now()
       }
       stateRef.current = newState
-      saveState(newState)
+      saveState(newState, prev)
       return newState
     })
   }, [saveState])
@@ -533,7 +574,10 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       })
       const hasActivity = Object.values(snapshot).some((count) => typeof count === 'number' && count > 0)
       if (hasActivity) {
-        console.log('[AppState] perf:1s', snapshot)
+        if (window.electronAPI.debug.enabled) {
+          console.log('[AppState] perf:1s', snapshot)
+        }
+        perfTrace('renderer:appstate-summary', snapshot)
         try {
           window.electronAPI.debug.log('appstate:perf:1s', snapshot)
         } catch {
@@ -622,7 +666,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
         updatedAt: Date.now()
       }
       stateRef.current = newState
-      saveState(newState)
+      saveState(newState, prev)
       return newState
     })
     return canClose
@@ -1018,11 +1062,11 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
         }
         stateRef.current = newState
         // Save directly without ordinary anti-shake
-        window.electronAPI.appState.save(newState)
+        persistState(newState, prev)
         return newState
       })
     }, DRAFT_SAVE_DEBOUNCE_MS)
-  }, [])
+  }, [persistState])
 
   // Tab-level draft anti-shake saving (independent timer for each Tab)
   const updateEditorDraftForTab = useCallback((tabId: string, draft: EditorDraft | null) => {
@@ -1045,12 +1089,12 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
           updatedAt: Date.now()
         }
         stateRef.current = newState
-        window.electronAPI.appState.save(newState)
+        persistState(newState, prev)
         return newState
       })
     }, DRAFT_SAVE_DEBOUNCE_MS)
     draftSaveTimersRef.current.set(tabId, timer)
-  }, [])
+  }, [persistState])
 
   const updatePromptEditorHeightForTab = useCallback((tabId: string, height: number) => {
     if (DEBUG_APP_STATE) {
@@ -1080,12 +1124,12 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
           updatedAt: Date.now()
         }
         stateRef.current = newState
-        window.electronAPI.appState.save(newState)
+        persistState(newState, prev)
         return newState
       })
     }, DRAFT_SAVE_DEBOUNCE_MS)
     promptEditorHeightTimersRef.current.set(tabId, timer)
-  }, [])
+  }, [persistState])
 
   const setTerminalLastCwd = useCallback((terminalId: string, cwd: string | null) => {
     if (DEBUG_APP_STATE) {
@@ -1185,8 +1229,8 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       clearTimeout(saveTimeoutRef.current)
       saveTimeoutRef.current = null
     }
-    window.electronAPI.appState.save(nextState)
-  }, [])
+    persistState(nextState, currentState)
+  }, [persistState])
 
   // Add a scheduled task
   const addSchedule = useCallback((schedule: Omit<PromptSchedule, 'executedCount' | 'createdAt' | 'lastExecutedAt' | 'missedExecutions'>) => {
@@ -1253,10 +1297,10 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
         clearTimeout(saveTimeoutRef.current)
         saveTimeoutRef.current = null
       }
-      window.electronAPI.appState.save(newState)
+      persistState(newState, prev)
       return newState
     })
-  }, [])
+  }, [persistState])
 
   const value: AppStateContextValue = useMemo(() => ({
     state,

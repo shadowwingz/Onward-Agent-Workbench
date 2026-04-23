@@ -378,6 +378,13 @@ export const TerminalGrid = memo(function TerminalGrid({
     visibleTerminalIdsRef.current = visibleTerminals.map(term => term.id)
   }, [visibleTerminals])
 
+  useLayoutEffect(() => {
+    const visibleIds = new Set(visibleTerminals.map(term => term.id))
+    terminals.forEach((term) => {
+      terminalSessionManager.setOutputVisibility(term.id, !hidden && visibleIds.has(term.id))
+    })
+  }, [hidden, terminals, visibleTerminals])
+
   useEffect(() => {
     latestFocusRequestRef.current = focusRequest
   }, [focusRequest])

@@ -9,6 +9,7 @@ export type GitTaskKind = 'git' | 'cwd' | 'misc'
 export interface GitTaskOptions {
   key?: string
   repoKey?: string
+  repoConcurrencyLimit?: number
   priority?: GitTaskPriority
   kind?: GitTaskKind
   label?: string
@@ -141,6 +142,11 @@ function normalizeKind(kind: GitTaskKind | undefined): GitTaskKind {
   return 'git'
 }
 
+function normalizeRepoConcurrencyLimit(value: number | undefined): number | undefined {
+  if (value === undefined) return undefined
+  return clampPositive(value, 1)
+}
+
 function priorityRank(priority: GitTaskPriority): number {
   switch (priority) {
     case 'high':
@@ -186,6 +192,7 @@ export class GitRuntimeManager {
     const normalizedOptions: QueueTask<T>['options'] = {
       key: options.key,
       repoKey: options.repoKey,
+      repoConcurrencyLimit: normalizeRepoConcurrencyLimit(options.repoConcurrencyLimit),
       priority: normalizePriority(options.priority),
       kind: normalizeKind(options.kind),
       label: options.label
@@ -326,7 +333,8 @@ export class GitRuntimeManager {
   private canRunTask(task: QueueTask<unknown>): boolean {
     if (!task.options.repoKey) return true
     const current = this.inflightByRepo.get(task.options.repoKey) || 0
-    return current < this.maxPerRepoInflight
+    const limit = task.options.repoConcurrencyLimit ?? this.maxPerRepoInflight
+    return current < limit
   }
 
   private startTask(task: QueueTask<unknown>): void {

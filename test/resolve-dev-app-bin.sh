@@ -19,7 +19,7 @@ detect_dev_product_name() {
   branch="$(git -C "$root_dir" rev-parse --abbrev-ref HEAD 2>/dev/null || echo detached)"
   branch="$(sanitize_branch_name "$branch")"
   local version
-  version="$(node -p "require('$root_dir/package.json').version" 2>/dev/null || echo 0.0.0)"
+  version="$(cd "$root_dir" && node -p "require('./package.json').version" 2>/dev/null || echo 0.0.0)"
   printf 'Under Development %s-%s\n' "$version" "$branch"
 }
 
@@ -30,6 +30,7 @@ resolve_dev_app_bin() {
     "$root_dir/release/mac-arm64/$product_name.app/Contents/MacOS/$product_name"
     "$root_dir/release/mac/$product_name.app/Contents/MacOS/$product_name"
     "$root_dir/release/linux-unpacked/$product_name"
+    "$root_dir/release/win-unpacked/$product_name.exe"
   )
   local candidate
   for candidate in "${candidates[@]}"; do
@@ -40,7 +41,7 @@ resolve_dev_app_bin() {
   done
 
   local fallback
-  fallback="$(find "$root_dir/release" -type f \( -path "*/Contents/MacOS/Under Development *" -o -path "*/linux-unpacked/Under Development *" \) 2>/dev/null | head -n 1 || true)"
+  fallback="$(find "$root_dir/release" \( -path "*/Contents/MacOS/Under Development *" -o -path "*/linux-unpacked/Under Development *" -o -name "Under Development *.exe" \) 2>/dev/null | head -n 1 || true)"
   if [[ -n "$fallback" ]]; then
     printf '%s\n' "$fallback"
     return 0
