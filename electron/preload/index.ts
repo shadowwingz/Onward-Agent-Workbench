@@ -99,6 +99,7 @@ export interface TerminalAPI {
   ) => Promise<{ ok: boolean; phase?: 'content' | 'enter'; error?: string }>
   getInputCapabilities: (id: string) => Promise<TerminalInputCapabilities>
   setBufferFastPath: (id: string, enabled: boolean) => void
+  setOutputVisibility: (id: string, visible: boolean) => void
   notifyInteractiveInput: (id: string) => void
   dispose: (id: string) => Promise<boolean>
   onData: (callback: (id: string, data: string) => void) => () => void
@@ -250,6 +251,8 @@ export interface AppState {
 export interface AppStateAPI {
   load: () => Promise<AppState>
   save: (state: AppState) => Promise<boolean>
+  savePatch: (patch: Partial<AppState>) => Promise<boolean>
+  flush: () => Promise<boolean>
   onFlushPendingState: (callback: () => void | Promise<void>) => void
 }
 
@@ -536,6 +539,7 @@ export interface ProjectSqliteExecuteResult {
 }
 
 export interface ProjectSearchOptions {
+  searchId?: string
   rootPath: string
   query: string
   isRegex: boolean
@@ -591,6 +595,9 @@ export interface GitAPI {
 // Project Editor API
 export interface ProjectAPI {
   listDirectory: (root: string, path: string) => Promise<ProjectListResult>
+  buildFileIndex: (root: string) => Promise<string[]>
+  searchFilenames: (root: string, query: string, limit?: number) => Promise<string[]>
+  invalidateFileIndex: (root: string) => Promise<{ success: boolean }>
   readFile: (root: string, path: string) => Promise<ProjectReadResult>
   saveFile: (root: string, path: string, content: string) => Promise<ProjectSaveResult>
   createFile: (root: string, path: string, content?: string) => Promise<ProjectActionResult>
@@ -824,8 +831,31 @@ export interface GitRuntimeMetrics {
   updatedAt: number
 }
 
+export interface EventLoopStallMetrics {
+  resetAt: number
+  totalSamples: number
+  stallCount: number
+  maxDriftMs: number
+  over100Ms: number
+  over250Ms: number
+  over500Ms: number
+  over1000Ms: number
+  over3000Ms: number
+  over6000Ms: number
+  lastStallAt: number | null
+  recentStalls: Array<{ ts: number; driftMs: number }>
+}
+
+export interface PerfTraceInfo {
+  enabled: boolean
+  logPath: string | null
+  latestPointerPath: string
+  eventLoop: EventLoopStallMetrics
+}
+
 export interface DebugAPI {
   enabled: boolean
+  perfTraceEnabled: boolean
   profile: boolean
   profileCwd: string | null
   autotest: boolean
@@ -836,6 +866,10 @@ export interface DebugAPI {
   focusWindow: () => Promise<boolean>
   getAppMetrics: () => Promise<Record<string, unknown>[]>
   getGitRuntimeMetrics: () => Promise<GitRuntimeMetrics>
+  getMainWorkMetrics: () => Promise<Record<string, unknown>>
+  getPerfTraceInfo: () => Promise<PerfTraceInfo>
+  resetPerfTraceMetrics: () => Promise<EventLoopStallMetrics>
+  perfTrace: (event: string, data?: Record<string, unknown>) => void
   feedbackReset: () => Promise<void>
   feedbackSetMockIssues: (issues: FeedbackDebugRemoteIssue[]) => Promise<void>
   feedbackGetLastOpenedUrl: () => Promise<string | null>
@@ -991,6 +1025,10 @@ const terminalAPI: TerminalAPI = {
     ipcRenderer.send('terminal:set-buffer-fast-path', id, enabled)
   },
 
+  setOutputVisibility: (id: string, visible: boolean) => {
+    ipcRenderer.send('terminal:set-output-visibility', id, visible)
+  },
+
   notifyInteractiveInput: (id: string) => {
     ipcRenderer.send('terminal:notify-interactive-input', id)
   },
@@ -1129,6 +1167,14 @@ const appStateAPI: AppStateAPI = {
     return ipcRenderer.invoke('app-state:save', state)
   },
 
+  savePatch: (patch: Partial<AppState>) => {
+    return ipcRenderer.invoke('app-state:save-patch', patch)
+  },
+
+  flush: () => {
+    return ipcRenderer.invoke('app-state:flush')
+  },
+
   onFlushPendingState: (callback: () => void | Promise<void>) => {
     ipcRenderer.on('app-state:flush-pending', async () => {
       try {
@@ -1240,6 +1286,18 @@ const gitAPI: GitAPI = {
 const projectAPI: ProjectAPI = {
   listDirectory: (root: string, path: string) => {
     return ipcRenderer.invoke('project:list-directory', root, path)
+  },
+
+  buildFileIndex: (root: string) => {
+    return ipcRenderer.invoke('project:build-file-index', root)
+  },
+
+  searchFilenames: (root: string, query: string, limit?: number) => {
+    return ipcRenderer.invoke('project:search-filenames', root, query, limit)
+  },
+
+  invalidateFileIndex: (root: string) => {
+    return ipcRenderer.invoke('project:invalidate-file-index', root)
   },
 
   readFile: (root: string, path: string) => {
@@ -1489,6 +1547,7 @@ const updaterAPI: UpdaterAPI = {
 }
 
 const debugEnabled = process.env.ONWARD_DEBUG === '1' || process.env.ELECTRON_ENABLE_LOGGING === '1'
+const perfTraceEnabled = process.env.ONWARD_PERF_TRACE === '1'
 const debugProfileEnabled = process.env.ONWARD_PROFILE === '1'
 const debugProfileCwd = process.env.ONWARD_PROFILE_CWD || null
 const debugAutotestEnabled = process.env.ONWARD_AUTOTEST === '1'
@@ -1498,6 +1557,7 @@ const debugAutotestExit = process.env.ONWARD_AUTOTEST_EXIT === '1'
 
 const debugAPI: DebugAPI = {
   enabled: debugEnabled,
+  perfTraceEnabled,
   profile: debugProfileEnabled,
   profileCwd: debugProfileCwd,
   autotest: debugAutotestEnabled,
@@ -1516,6 +1576,19 @@ const debugAPI: DebugAPI = {
   },
   getGitRuntimeMetrics: () => {
     return ipcRenderer.invoke('debug:get-git-runtime-metrics')
+  },
+  getMainWorkMetrics: () => {
+    return ipcRenderer.invoke('debug:get-main-work-metrics')
+  },
+  getPerfTraceInfo: () => {
+    return ipcRenderer.invoke('debug:get-perf-trace-info')
+  },
+  resetPerfTraceMetrics: () => {
+    return ipcRenderer.invoke('debug:reset-perf-trace-metrics')
+  },
+  perfTrace: (event: string, data?: Record<string, unknown>) => {
+    if (!perfTraceEnabled) return
+    ipcRenderer.send('debug:perf-trace', { event, data })
   },
   feedbackReset: () => {
     return ipcRenderer.invoke('debug:feedback-reset')

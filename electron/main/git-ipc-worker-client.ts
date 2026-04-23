@@ -1,0 +1,342 @@
+/*
+ * SPDX-FileCopyrightText: 2026 OPPO
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { join, resolve } from 'path'
+import { Worker } from 'worker_threads'
+import { gitRuntimeManager, type GitTaskPriority } from './git-runtime-manager'
+import type {
+  GitDiffLoadOptions,
+  GitDiffResult,
+  GitFileActionResult,
+  GitFileContentResult,
+  GitFileSaveResult,
+  GitFileStatus,
+  GitHistoryDiffOptions,
+  GitHistoryDiffResult,
+  GitHistoryFileContentOptions,
+  GitHistoryFileContentResult,
+  GitHistoryResult,
+  GitSubmoduleInfo
+} from './git-utils'
+import { perfTraceLogger } from './perf-trace-logger'
+
+type GitIpcWorkerMethod =
+  | 'checkInstalled'
+  | 'resolveRepoRoot'
+  | 'getDiff'
+  | 'getHistory'
+  | 'getHistoryDiff'
+  | 'getHistoryFileContent'
+  | 'getFileContent'
+  | 'saveFileContent'
+  | 'stageFile'
+  | 'unstageFile'
+  | 'discardFile'
+  | 'getSubmodules'
+  | 'updateIndexContent'
+  | 'warmDiffCache'
+
+type WorkerRequest = {
+  id: number
+  method: GitIpcWorkerMethod
+  payload: Record<string, unknown>
+}
+
+type WorkerResponse = {
+  id: number
+  ok: boolean
+  result?: unknown
+  error?: string
+}
+
+type WorkerTaskOptions = {
+  priority?: GitTaskPriority
+  repoKey?: string | null
+  repoConcurrencyLimit?: number
+  dedupeKey?: string
+  label?: string
+}
+
+type PendingRequest = {
+  resolve: (value: unknown) => void
+  reject: (error: Error) => void
+  timer: ReturnType<typeof setTimeout>
+  method: GitIpcWorkerMethod
+  startedAt: number
+}
+
+const WORKER_REQUEST_TIMEOUT_MS = 90000
+
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value)
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`
+  const record = value as Record<string, unknown>
+  return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${stableStringify(record[key])}`).join(',')}}`
+}
+
+function repoKeyFor(cwd: string, repoRoot?: string | null): string {
+  return resolve(repoRoot || cwd)
+}
+
+class GitIpcWorkerClient {
+  private worker: Worker | null = null
+  private nextRequestId = 1
+  private pending = new Map<number, PendingRequest>()
+
+  checkInstalled(): Promise<boolean> {
+    return this.enqueueWorkerTask<boolean>('checkInstalled', {}, {
+      priority: 'low',
+      repoKey: null,
+      repoConcurrencyLimit: 1,
+      dedupeKey: 'git-ipc:check-installed',
+      label: 'worker git --version'
+    })
+  }
+
+  resolveRepoRoot(cwd: string): Promise<string> {
+    return this.enqueueWorkerTask<string>('resolveRepoRoot', { cwd }, {
+      priority: 'normal',
+      repoKey: cwd,
+      dedupeKey: `git-ipc:resolve-root:${resolve(cwd)}`,
+      label: 'worker git resolve repo root'
+    })
+  }
+
+  getDiff(cwd: string, options?: GitDiffLoadOptions): Promise<GitDiffResult> {
+    return this.enqueueWorkerTask<GitDiffResult>('getDiff', { cwd, options }, {
+      priority: 'high',
+      repoKey: cwd,
+      repoConcurrencyLimit: 1,
+      dedupeKey: `git-ipc:diff:${resolve(cwd)}:${stableStringify(options ?? {})}`,
+      label: 'worker git diff'
+    })
+  }
+
+  getHistory(cwd: string, limit?: number, skip?: number): Promise<GitHistoryResult> {
+    return this.enqueueWorkerTask<GitHistoryResult>('getHistory', { cwd, limit, skip }, {
+      priority: 'normal',
+      repoKey: cwd,
+      repoConcurrencyLimit: 1,
+      dedupeKey: `git-ipc:history:${resolve(cwd)}:${limit ?? 50}:${skip ?? 0}`,
+      label: 'worker git history'
+    })
+  }
+
+  getHistoryDiff(cwd: string, options: GitHistoryDiffOptions): Promise<GitHistoryDiffResult> {
+    return this.enqueueWorkerTask<GitHistoryDiffResult>('getHistoryDiff', { cwd, options }, {
+      priority: 'high',
+      repoKey: cwd,
+      repoConcurrencyLimit: 1,
+      dedupeKey: `git-ipc:history-diff:${resolve(cwd)}:${stableStringify(options)}`,
+      label: 'worker git history diff'
+    })
+  }
+
+  getHistoryFileContent(cwd: string, options: GitHistoryFileContentOptions): Promise<GitHistoryFileContentResult> {
+    return this.enqueueWorkerTask<GitHistoryFileContentResult>('getHistoryFileContent', { cwd, options }, {
+      priority: 'high',
+      repoKey: cwd,
+      repoConcurrencyLimit: 1,
+      dedupeKey: `git-ipc:history-file-content:${resolve(cwd)}:${stableStringify(options)}`,
+      label: 'worker git history file content'
+    })
+  }
+
+  getFileContent(
+    cwd: string,
+    file: Pick<GitFileStatus, 'filename' | 'status' | 'originalFilename' | 'changeType' | 'isSubmoduleEntry'>,
+    repoRoot?: string
+  ): Promise<GitFileContentResult> {
+    return this.enqueueWorkerTask<GitFileContentResult>('getFileContent', { cwd, file, repoRoot }, {
+      priority: 'high',
+      repoKey: repoKeyFor(cwd, repoRoot),
+      repoConcurrencyLimit: 1,
+      dedupeKey: `git-ipc:file-content:${repoKeyFor(cwd, repoRoot)}:${stableStringify(file)}`,
+      label: 'worker git file content'
+    })
+  }
+
+  saveFileContent(cwd: string, filename: string, content: string): Promise<GitFileSaveResult> {
+    return this.enqueueWorkerTask<GitFileSaveResult>('saveFileContent', { cwd, filename, content }, {
+      priority: 'high',
+      repoKey: cwd,
+      repoConcurrencyLimit: 1,
+      label: 'worker save git file content'
+    })
+  }
+
+  stageFile(cwd: string, filename: string, repoRoot?: string): Promise<GitFileActionResult> {
+    return this.enqueueWorkerTask<GitFileActionResult>('stageFile', { cwd, filename, repoRoot }, {
+      priority: 'high',
+      repoKey: repoKeyFor(cwd, repoRoot),
+      repoConcurrencyLimit: 1,
+      label: 'worker git stage file'
+    })
+  }
+
+  unstageFile(cwd: string, filename: string, repoRoot?: string): Promise<GitFileActionResult> {
+    return this.enqueueWorkerTask<GitFileActionResult>('unstageFile', { cwd, filename, repoRoot }, {
+      priority: 'high',
+      repoKey: repoKeyFor(cwd, repoRoot),
+      repoConcurrencyLimit: 1,
+      label: 'worker git unstage file'
+    })
+  }
+
+  discardFile(
+    cwd: string,
+    file: Pick<GitFileStatus, 'filename' | 'changeType' | 'status' | 'isSubmoduleEntry'>,
+    repoRoot?: string
+  ): Promise<GitFileActionResult> {
+    return this.enqueueWorkerTask<GitFileActionResult>('discardFile', { cwd, file, repoRoot }, {
+      priority: 'high',
+      repoKey: repoKeyFor(cwd, repoRoot),
+      repoConcurrencyLimit: 1,
+      label: 'worker git discard file'
+    })
+  }
+
+  getSubmodules(cwd: string): Promise<GitSubmoduleInfo[]> {
+    return this.enqueueWorkerTask<GitSubmoduleInfo[]>('getSubmodules', { cwd }, {
+      priority: 'normal',
+      repoKey: cwd,
+      repoConcurrencyLimit: 1,
+      dedupeKey: `git-ipc:submodules:${resolve(cwd)}`,
+      label: 'worker git submodules'
+    })
+  }
+
+  updateIndexContent(cwd: string, filename: string, content: string): Promise<GitFileActionResult> {
+    return this.enqueueWorkerTask<GitFileActionResult>('updateIndexContent', { cwd, filename, content }, {
+      priority: 'high',
+      repoKey: cwd,
+      repoConcurrencyLimit: 1,
+      label: 'worker git update index content'
+    })
+  }
+
+  warmDiffCache(cwd: string): Promise<{ success: boolean }> {
+    return this.enqueueWorkerTask<{ success: boolean }>('warmDiffCache', { cwd }, {
+      priority: 'low',
+      repoKey: cwd,
+      repoConcurrencyLimit: 1,
+      dedupeKey: `git-ipc:warm-diff:${resolve(cwd)}`,
+      label: 'worker warm git diff cache'
+    })
+  }
+
+  dispose(): void {
+    for (const [id, pending] of this.pending) {
+      clearTimeout(pending.timer)
+      pending.reject(new Error('Git IPC worker disposed'))
+      this.pending.delete(id)
+    }
+    if (this.worker) {
+      this.worker.terminate().catch(() => {})
+      this.worker = null
+    }
+  }
+
+  private enqueueWorkerTask<T>(
+    method: GitIpcWorkerMethod,
+    payload: Record<string, unknown>,
+    options: WorkerTaskOptions = {}
+  ): Promise<T> {
+    return gitRuntimeManager.enqueueTask(
+      {
+        key: options.dedupeKey,
+        repoKey: options.repoKey ?? undefined,
+        repoConcurrencyLimit: options.repoConcurrencyLimit,
+        priority: options.priority || 'normal',
+        kind: 'git',
+        label: options.label || `git-ipc-worker:${method}`
+      },
+      () => this.request<T>(method, payload)
+    )
+  }
+
+  private ensureWorker(): Worker {
+    if (this.worker) return this.worker
+
+    const workerPath = join(__dirname, 'git-ipc-worker-entry.js')
+    this.worker = new Worker(workerPath)
+    this.worker.on('message', (message: WorkerResponse) => {
+      this.handleMessage(message)
+    })
+    this.worker.on('error', (error) => {
+      perfTraceLogger.record('main:git-ipc-worker-error', { error: String(error) })
+    })
+    this.worker.on('exit', (code) => {
+      perfTraceLogger.record('main:git-ipc-worker-exit', {
+        code,
+        pending: this.pending.size
+      })
+      this.rejectAllPending(new Error(`Git IPC worker exited with code ${code}`))
+      this.worker = null
+    })
+    return this.worker
+  }
+
+  private request<T>(method: GitIpcWorkerMethod, payload: Record<string, unknown>): Promise<T> {
+    const worker = this.ensureWorker()
+    const id = this.nextRequestId++
+    const startedAt = Date.now()
+
+    return new Promise<T>((resolveTask, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id)
+        perfTraceLogger.record('main:git-ipc-worker-timeout', {
+          id,
+          method,
+          elapsedMs: Date.now() - startedAt
+        })
+        reject(new Error(`Git IPC worker request timed out: ${method}`))
+      }, WORKER_REQUEST_TIMEOUT_MS)
+
+      this.pending.set(id, {
+        resolve: resolveTask as (value: unknown) => void,
+        reject,
+        timer,
+        method,
+        startedAt
+      })
+
+      const request: WorkerRequest = { id, method, payload }
+      worker.postMessage(request)
+    })
+  }
+
+  private handleMessage(message: WorkerResponse): void {
+    const pending = this.pending.get(message.id)
+    if (!pending) return
+    clearTimeout(pending.timer)
+    this.pending.delete(message.id)
+
+    const elapsedMs = Date.now() - pending.startedAt
+    if (elapsedMs > 500) {
+      perfTraceLogger.record('main:git-ipc-worker-latency', {
+        id: message.id,
+        method: pending.method,
+        elapsedMs
+      })
+    }
+
+    if (message.ok) {
+      pending.resolve(message.result)
+    } else {
+      pending.reject(new Error(message.error || `Git IPC worker failed: ${pending.method}`))
+    }
+  }
+
+  private rejectAllPending(error: Error): void {
+    for (const [id, pending] of this.pending) {
+      clearTimeout(pending.timer)
+      pending.reject(error)
+      this.pending.delete(id)
+    }
+  }
+}
+
+export const gitIpcWorkerClient = new GitIpcWorkerClient()

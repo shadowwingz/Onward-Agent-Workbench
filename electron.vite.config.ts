@@ -12,10 +12,22 @@ export default defineConfig({
     plugins: [externalizeDepsPlugin()],
     build: {
       lib: {
-        entry: resolve(__dirname, 'electron/main/index.ts')
+        entry: {
+          index: resolve(__dirname, 'electron/main/index.ts'),
+          'git-status-worker-entry': resolve(__dirname, 'electron/main/git-status-worker-entry.ts'),
+          'git-ipc-worker-entry': resolve(__dirname, 'electron/main/git-ipc-worker-entry.ts'),
+          'sqlite-worker-entry': resolve(__dirname, 'electron/main/sqlite-worker-entry.ts'),
+          'app-state-worker-entry': resolve(__dirname, 'electron/main/app-state-worker-entry.ts'),
+          'project-fs-worker-entry': resolve(__dirname, 'electron/main/project-fs-worker-entry.ts'),
+          'ripgrep-search-worker-entry': resolve(__dirname, 'electron/main/ripgrep-search-worker-entry.ts')
+        },
+        formats: ['cjs']
       },
       rollupOptions: {
-        external: ['node-pty']
+        external: ['node-pty'],
+        output: {
+          entryFileNames: '[name].js'
+        }
       }
     }
   },

@@ -111,30 +111,50 @@ export function SearchPanel({
   }, [inputRef, isActive, searchType])
 
   useEffect(() => {
-    if (!isActive || searchType !== 'filename') return
+    if (!isActive || searchType !== 'filename' || !rootPath) return
     const existingIndex = getFileIndex()
-    if (existingIndex.length > 0) {
-      setFilenameResults(buildFuzzyResults(filenameQuery, existingIndex))
-      return
-    }
+    if (existingIndex.length > 0) return
 
     let cancelled = false
     setIsIndexing(true)
-    void buildFileIndex().then((index) => {
+    void buildFileIndex().then(async () => {
+      const results = await window.electronAPI.project.searchFilenames(rootPath, filenameQuery, 80)
       if (cancelled) return
       setIsIndexing(false)
-      setFilenameResults(buildFuzzyResults(filenameQuery, index))
+      setFilenameResults(results)
+    }).catch(() => {
+      if (cancelled) return
+      setIsIndexing(false)
+      setFilenameResults([])
     })
     return () => {
       cancelled = true
     }
-  }, [buildFileIndex, filenameQuery, getFileIndex, isActive, searchType])
+  }, [buildFileIndex, getFileIndex, isActive, rootPath, searchType])
 
   useEffect(() => {
-    if (searchType !== 'filename') return
-    setFilenameResults(buildFuzzyResults(filenameQuery, getFileIndex()))
-    setFilenameActiveIndex(0)
-  }, [filenameQuery, getFileIndex, searchType])
+    if (!isActive || searchType !== 'filename' || !rootPath) return
+    const existingIndex = getFileIndex()
+    if (existingIndex.length === 0) {
+      setFilenameResults(buildFuzzyResults(filenameQuery, existingIndex))
+      return
+    }
+    let cancelled = false
+    void window.electronAPI.project.searchFilenames(rootPath, filenameQuery, 80)
+      .then((results) => {
+        if (cancelled) return
+        setFilenameResults(results)
+        setFilenameActiveIndex(0)
+      })
+      .catch(() => {
+        if (cancelled) return
+        setFilenameResults([])
+        setFilenameActiveIndex(0)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [filenameQuery, getFileIndex, isActive, rootPath, searchType])
 
   const currentQuery = searchType === 'content' ? contentQuery : filenameQuery
   const setCurrentQuery = searchType === 'content' ? updateContentQuery : setFilenameQuery

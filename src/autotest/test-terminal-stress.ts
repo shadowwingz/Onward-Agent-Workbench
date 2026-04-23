@@ -84,6 +84,7 @@ function getTerminalDebugApi(): {
     status: string
     open: boolean
     visible: boolean
+    outputVisible?: boolean
     pendingDataChunks: number
     pendingDataBytes: number
   } | null

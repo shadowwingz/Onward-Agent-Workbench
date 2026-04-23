@@ -11,7 +11,6 @@ import { readFile, stat, writeFile, mkdir, access, mkdtemp, rm } from 'fs/promis
 import { constants } from 'fs'
 import { resolve, relative, sep, isAbsolute, dirname, delimiter, basename, join } from 'path'
 import { fileURLToPath } from 'url'
-import { ptyManager } from './pty-manager'
 import { gitRuntimeManager, type GitTaskKind, type GitTaskPriority } from './git-runtime-manager'
 import { MAX_IMAGE_FILE_SIZE, bufferToImageDataUrl, isSupportedImageFile } from './image-utils'
 
@@ -38,8 +37,20 @@ type GitTaskMeta = {
   priority?: GitTaskPriority
   kind?: GitTaskKind
   repoKey?: string | null
+  repoConcurrencyLimit?: number
   dedupeKey?: string
   label?: string
+}
+
+type PtyManagerModule = typeof import('./pty-manager')
+
+let ptyManagerModulePromise: Promise<PtyManagerModule> | null = null
+
+async function getPtyManager(): Promise<PtyManagerModule['ptyManager']> {
+  if (!ptyManagerModulePromise) {
+    ptyManagerModulePromise = import('./pty-manager')
+  }
+  return (await ptyManagerModulePromise).ptyManager
 }
 
 function normalizeRepoKey(cwd: string | null | undefined): string | undefined {
@@ -65,6 +76,7 @@ async function execAsync(command: string, options?: Parameters<typeof rawExecAsy
     {
       key: meta.dedupeKey,
       repoKey: normalizeRepoKey(meta.repoKey ?? normalizeExecCwd(options?.cwd)),
+      repoConcurrencyLimit: meta.repoConcurrencyLimit,
       priority: meta.priority || 'normal',
       kind: meta.kind || 'git',
       label: meta.label || command
@@ -84,6 +96,7 @@ async function execFileAsync(
     {
       key: meta.dedupeKey,
       repoKey: normalizeRepoKey(meta.repoKey ?? normalizeExecCwd(options?.cwd)),
+      repoConcurrencyLimit: meta.repoConcurrencyLimit,
       priority: meta.priority || 'normal',
       kind: meta.kind || 'git',
       label: meta.label || label
@@ -259,6 +272,7 @@ const MAX_DIFF_OUTPUT = 10 * 1024 * 1024 // 10MB
 const TERMINAL_CWD_CACHE_TTL = 1200
 const TERMINAL_INFO_CACHE_TTL = 2000
 const GIT_META_CACHE_TTL = 1000
+const GIT_DIFF_REQUEST_CACHE_TTL = 250
 let cachedGitExecutable: string | null | undefined
 let cachedGitAvailable: boolean | null = null
 let cachedGitCheckedAt: number | null = null
@@ -281,6 +295,8 @@ const submoduleCache = new Map<string, { value: GitSubmoduleInfo[]; at: number }
 const superprojectCache = new Map<string, { value: string | null; at: number }>()
 const singleRepoDiffCache = new Map<string, { value: { files: GitFileStatus[]; error?: string }; at: number }>()
 const singleRepoDiffInFlight = new Map<string, Promise<{ files: GitFileStatus[]; error?: string }>>()
+const gitDiffRequestCache = new Map<string, { value: GitDiffResult; at: number }>()
+const gitDiffRequestInFlight = new Map<string, Promise<GitDiffResult>>()
 
 function getExecEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env }
@@ -535,6 +551,7 @@ export async function getTerminalCwd(terminalId: string): Promise<string | null>
 
   const task: Promise<string | null> = (async () => {
     const probeStartedAt = Date.now()
+    const ptyManager = await getPtyManager()
     const ptyProcess = ptyManager.get(terminalId)
     if (!ptyProcess) {
       terminalCwdCache.set(terminalId, { value: null, at: Date.now() })
@@ -1006,16 +1023,20 @@ export async function getGitRepoFingerprint(gitDir: string | null, repoRoot: str
   return [headToken, indexToken, packedRefsToken, refsToken, logsHeadToken].join('|')
 }
 
-export async function getGitBranchAndStatus(cwd: string): Promise<GitBranchAndStatus> {
+export async function getGitBranchAndStatus(
+  cwd: string,
+  options: { priority?: GitTaskPriority; includeUntracked?: boolean } = {}
+): Promise<GitBranchAndStatus> {
   const meta = await getGitRepoMeta(cwd)
   if (!meta.isRepo || !meta.repoRoot) {
     return { branch: null, status: 'unknown' }
   }
 
   try {
+    const untrackedArg = options.includeUntracked ? '--untracked-files=all' : '--untracked-files=no'
     const { stdout } = await execFileAsync(
       meta.gitExecutable || 'git',
-      ['-c', 'core.quotepath=false', 'status', '--porcelain=2', '--branch', '-uall'],
+      ['-c', 'core.quotepath=false', 'status', '--porcelain=2', '--branch', untrackedArg],
       {
         cwd: meta.repoRoot,
         timeout: EXEC_TIMEOUT,
@@ -1024,9 +1045,10 @@ export async function getGitBranchAndStatus(cwd: string): Promise<GitBranchAndSt
       },
       {
         repoKey: meta.repoRoot,
-        priority: 'high',
-        dedupeKey: `branch-status:${resolve(meta.repoRoot)}`,
-        label: 'git status --porcelain=2 --branch -uall'
+        repoConcurrencyLimit: 1,
+        priority: options.priority || 'low',
+        dedupeKey: `branch-status:${options.includeUntracked ? 'uall' : 'uno'}:${resolve(meta.repoRoot)}`,
+        label: `git status --porcelain=2 --branch ${untrackedArg}`
       }
     )
     const output = typeof stdout === 'string' ? stdout : stdout.toString('utf-8')
@@ -1491,6 +1513,28 @@ function cloneGitFileStatuses(files: GitFileStatus[]): GitFileStatus[] {
   return files.map((file) => ({ ...file }))
 }
 
+function cloneGitDiffResult(result: GitDiffResult): GitDiffResult {
+  return {
+    ...result,
+    files: cloneGitFileStatuses(result.files),
+    repos: result.repos?.map((repo) => ({ ...repo }))
+  }
+}
+
+function getGitDiffRequestKey(cwd: string, options?: GitDiffLoadOptions): string {
+  const scope = options?.scope === 'root-only' ? 'root-only' : 'full'
+  return `${resolve(cwd)}::${scope}`
+}
+
+function pruneGitDiffRequestCache(now: number): void {
+  if (gitDiffRequestCache.size <= 64) return
+  for (const [key, entry] of gitDiffRequestCache) {
+    if (now - entry.at > GIT_DIFF_REQUEST_CACHE_TTL) {
+      gitDiffRequestCache.delete(key)
+    }
+  }
+}
+
 function isGitPathAtOrInside(pathValue: string, parentPath: string): boolean {
   return pathValue === parentPath || pathValue.startsWith(`${parentPath}/`)
 }
@@ -1598,7 +1642,7 @@ async function getSingleRepoDiff(
   }
 
   const task = (async () => {
-    const diffMeta: GitTaskMeta = { repoKey: repoRoot, priority: 'high' }
+    const diffMeta: GitTaskMeta = { repoKey: repoRoot, repoConcurrencyLimit: 1, priority: 'normal' }
 
     let statusOutput = ''
     try {
@@ -1670,7 +1714,32 @@ async function getSingleRepoDiff(
  * Get Git Diff information
  */
 export async function getGitDiff(cwd: string, options?: GitDiffLoadOptions): Promise<GitDiffResult> {
+  const cacheKey = getGitDiffRequestKey(cwd, options)
+  const now = Date.now()
+  const cached = gitDiffRequestCache.get(cacheKey)
+  if (cached && now - cached.at < GIT_DIFF_REQUEST_CACHE_TTL) {
+    return cloneGitDiffResult(cached.value)
+  }
 
+  const inflight = gitDiffRequestInFlight.get(cacheKey)
+  if (inflight) {
+    return cloneGitDiffResult(await inflight)
+  }
+
+  const task = loadGitDiff(cwd, options)
+  gitDiffRequestInFlight.set(cacheKey, task)
+  try {
+    const value = await task
+    const capturedAt = Date.now()
+    gitDiffRequestCache.set(cacheKey, { value: cloneGitDiffResult(value), at: capturedAt })
+    pruneGitDiffRequestCache(capturedAt)
+    return cloneGitDiffResult(value)
+  } finally {
+    gitDiffRequestInFlight.delete(cacheKey)
+  }
+}
+
+async function loadGitDiff(cwd: string, options?: GitDiffLoadOptions): Promise<GitDiffResult> {
   // Use getGitRepoMeta (single git process) for install + repo + root checks
   const meta = await getGitRepoMeta(cwd)
   if (!meta.gitExecutable) {

@@ -8,6 +8,8 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT_DIR/test/resolve-dev-app-bin.sh"
 APP_BIN="${1:-$(resolve_dev_app_bin "$ROOT_DIR" || true)}"
 LOG_FILE="${2:-/tmp/onward-global-search-autotest.log}"
+WORK_DIR="$ROOT_DIR/test/fixtures/global-search/workdir"
+USER_DATA_DIR="$ROOT_DIR/test/fixtures/global-search/user-data"
 
 if [[ -z "$APP_BIN" || ! -x "$APP_BIN" ]]; then
   echo "ERROR: app binary not found or not executable: ${APP_BIN:-<empty>}" >&2
@@ -15,15 +17,37 @@ if [[ -z "$APP_BIN" || ! -x "$APP_BIN" ]]; then
   exit 1
 fi
 
+mkdir -p "$WORK_DIR"
+case "$USER_DATA_DIR" in
+  "$ROOT_DIR"/test/fixtures/global-search/user-data)
+    rm -rf "$USER_DATA_DIR"
+    mkdir -p "$USER_DATA_DIR"
+    ;;
+  *)
+    echo "Refusing to delete userData outside repo: $USER_DATA_DIR" >&2
+    exit 1
+    ;;
+esac
 rm -f "$LOG_FILE"
 
 echo "Starting global search autotest..."
+echo "  Binary:   $APP_BIN"
+echo "  CWD:      $WORK_DIR"
+echo "  UserData: $USER_DATA_DIR"
+echo "  Log:      $LOG_FILE"
+
+PROCESS_NAME="$(basename "$APP_BIN")"
+if command -v pkill >/dev/null 2>&1; then
+  pkill -x "$PROCESS_NAME" 2>/dev/null || true
+  sleep 0.5
+fi
 
 ONWARD_DEBUG=1 \
 ONWARD_AUTOTEST=1 \
 ONWARD_AUTOTEST_SUITE=global-search \
-ONWARD_AUTOTEST_CWD="$ROOT_DIR" \
+ONWARD_AUTOTEST_CWD="$WORK_DIR" \
 ONWARD_AUTOTEST_EXIT=1 \
+ONWARD_USER_DATA_DIR="$USER_DATA_DIR" \
 "$APP_BIN" > "$LOG_FILE" 2>&1 || true
 
 if grep -q "\[AutoTest\] FAIL" "$LOG_FILE"; then
