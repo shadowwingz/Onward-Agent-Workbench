@@ -17,7 +17,10 @@ const ALLOWLIST = new Set([
   'docs/lessons.md',
   // Test files may contain Chinese strings as test data (not comments)
   'test/test-full-e2e.ts',
-  'test/test-prompt-integrity.ts'
+  'test/test-prompt-integrity.ts',
+  // Project instruction files may quote Chinese phrases from user usage.
+  'CLAUDE.md',
+  'AGENTS.md'
 ])
 const TEXT_EXTENSIONS = new Set([
   '.ts',
@@ -52,6 +55,9 @@ function isAllowlistedPath(relPath) {
   // Vendored pdf.js ships Unicode normalization ranges that include Han
   // script blocks; it is third-party code we don't modify.
   if (relPath.startsWith('resources/pdfjs/')) return true
+  // Regression reports are engineering logs that may quote Chinese from
+  // CLAUDE.md / AGENTS.md or user-facing failure snapshots.
+  if (relPath.startsWith('test/report/')) return true
   return false
 }
 

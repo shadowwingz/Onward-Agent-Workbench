@@ -77,6 +77,7 @@ $env:ONWARD_AUTOTEST = "1"
 $env:ONWARD_AUTOTEST_SUITE = "global-search"
 $env:ONWARD_AUTOTEST_CWD = $WorkDir
 $env:ONWARD_AUTOTEST_EXIT = "1"
+$env:ONWARD_AUTOTEST_SKIP_CONSENT = "1"
 $env:ONWARD_USER_DATA_DIR = $UserDataDir
 
 try {

@@ -25,6 +25,24 @@ export const TELEMETRY_BUILD_DISABLED = process.env.ONWARD_TELEMETRY_DISABLED ==
 export const TELEMETRY_RESET_CONSENT = process.env.ONWARD_TELEMETRY_RESET_CONSENT === '1'
 
 /**
+ * Autotest: suppress the first-run telemetry consent dialog without writing
+ * any persisted state. When in autotest mode (`ONWARD_AUTOTEST=1`) or when
+ * `ONWARD_AUTOTEST_SKIP_CONSENT=1` is set explicitly, a stored consent of
+ * `null` is reported to the renderer as `false` (declined), so the
+ * ConsentDialog never mounts and autotest clicks are not intercepted by a
+ * modal overlay on fresh `ONWARD_USER_DATA_DIR` runs. No telemetry data is
+ * sent because the effective consent is declined. Explicit stored values
+ * (true/false) are always honored as-is.
+ *
+ * Two env vars feed this flag so the behavior is automatic in the full
+ * autotest harness (covers every `test/run-*-autotest.sh`) while still
+ * letting manual test drivers opt in without full autotest mode.
+ */
+export const TELEMETRY_AUTOTEST_SKIP_CONSENT =
+  process.env.ONWARD_AUTOTEST_SKIP_CONSENT === '1' ||
+  process.env.ONWARD_AUTOTEST === '1'
+
+/**
  * Debug: use a fast heartbeat interval (5 seconds) for telemetry testing.
  * Set ONWARD_TELEMETRY_FAST_HEARTBEAT=1 to accelerate heartbeat for testing.
  */

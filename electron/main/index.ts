@@ -495,6 +495,14 @@ app.whenReady().then(() => {
     return
   }
 
+  // Autotest: skip the first-run consent dialog. Logs on startup per the
+  // debug-env-variable convention; no persisted state is touched.
+  if (process.env.ONWARD_AUTOTEST_SKIP_CONSENT === '1') {
+    console.log('[Telemetry] Consent dialog suppressed (ONWARD_AUTOTEST_SKIP_CONSENT=1); effective consent = declined')
+  } else if (process.env.ONWARD_AUTOTEST === '1') {
+    console.log('[Telemetry] Consent dialog suppressed in autotest mode (ONWARD_AUTOTEST=1); effective consent = declined. Set ONWARD_TELEMETRY_RESET_CONSENT=1 to override with a real consent = true.')
+  }
+
   // Debug: reset telemetry consent
   if (TELEMETRY_RESET_CONSENT) {
     const isAutotest = process.env.ONWARD_AUTOTEST === '1'
