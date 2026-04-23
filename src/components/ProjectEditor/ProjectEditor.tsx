@@ -44,7 +44,6 @@ import {
 import { initializeFileIndexCacheBridge } from './GlobalSearch/fileIndexCacheBootstrap'
 import { PreviewSearchBar } from './PreviewSearch/PreviewSearchBar'
 import type { PreviewSearchHandle } from './PreviewSearch/PreviewSearchBar'
-import { SORT_LINE_EPSILON_PX } from './PreviewSearch/usePreviewSearch'
 import { SqliteViewer } from './SqliteViewer'
 import { PdfReader, type PdfReaderHandle } from './PdfReader'
 import { EpubReader, type EpubReaderHandle } from './EpubReader'
@@ -5754,22 +5753,26 @@ export function ProjectEditor({
         return previewSearchRef.current?.getCurrentIndex() ?? -1
       },
       getPreviewSearchMatchPositions: () => {
-        const preview = previewRef.current
-        if (!preview) return []
-        const marks = Array.from(preview.querySelectorAll('mark.preview-search-highlight'))
-        const containerRect = preview.getBoundingClientRect()
-        return marks.map(mark => {
-          const rect = mark.getBoundingClientRect()
-          return {
-            top: rect.top - containerRect.top + preview.scrollTop,
-            left: rect.left - containerRect.left + preview.scrollLeft,
-            isActive: mark.classList.contains('preview-search-highlight-active'),
-          }
-        }).sort((a, b) => {
-          const topDiff = a.top - b.top
-          if (Math.abs(topDiff) > SORT_LINE_EPSILON_PX) return topDiff
-          return a.left - b.left
-        })
+        // Use the cached match snapshot produced when the query was last
+        // applied. This keeps the hook O(1) even with hundreds of matches —
+        // the old implementation forced 1 + N layout reads via
+        // getBoundingClientRect on every call, which dominated the
+        // preview-search autotest runtime at large match counts.
+        const handle = previewSearchRef.current
+        const cached = handle?.getCachedMatchPositions?.() ?? []
+        if (cached.length > 0) {
+          const activeIndex = handle?.getCurrentIndex?.() ?? -1
+          return cached.map((pos, idx) => ({
+            top: pos.top,
+            left: pos.left,
+            isActive: idx === activeIndex,
+          }))
+        }
+        // Fallback: search UI hasn't run yet (or cache was cleared). Return
+        // an empty list rather than paying the O(N) DOM-walk cost — callers
+        // that actually need positions can reopen search to refresh the
+        // cache.
+        return []
       },
       getPreviewSearchActiveCenter: () => {
         const preview = previewRef.current

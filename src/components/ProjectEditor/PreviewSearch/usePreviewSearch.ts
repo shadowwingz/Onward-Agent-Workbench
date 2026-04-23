@@ -19,6 +19,17 @@ interface UsePreviewSearchOptions {
   renderedHtml: string
 }
 
+/**
+ * Document-absolute position snapshot of one highlight mark, captured when the
+ * mark set was last built. Positions do not change while the query is stable,
+ * so callers that need positions many times in a row (tests, debug tooling)
+ * can reuse this snapshot without re-running getBoundingClientRect().
+ */
+export interface PreviewSearchMatchPosition {
+  top: number
+  left: number
+}
+
 interface UsePreviewSearchResult {
   query: string
   setQuery: (query: string) => void
@@ -26,6 +37,13 @@ interface UsePreviewSearchResult {
   currentIndex: number
   goToNext: () => void
   goToPrevious: () => void
+  /**
+   * Returns the cached per-mark positions snapshotted when the current match
+   * set was built. Read-only; does not force layout. Length matches
+   * `matchCount`, and indices align with navigation order (0 is the first
+   * visual match, `matchCount - 1` is the last).
+   */
+  getCachedMatchPositions: () => PreviewSearchMatchPosition[]
 }
 
 function clearHighlights(container: HTMLElement): void {
@@ -38,7 +56,11 @@ function clearHighlights(container: HTMLElement): void {
   })
 }
 
-function applyHighlights(container: HTMLElement, query: string): HTMLElement[] {
+function applyHighlights(
+  container: HTMLElement,
+  query: string,
+  positionSink?: PreviewSearchMatchPosition[]
+): HTMLElement[] {
   if (!query) return []
 
   const lowerQuery = query.toLowerCase()
@@ -80,14 +102,35 @@ function applyHighlights(container: HTMLElement, query: string): HTMLElement[] {
   }
 
   // Sort by visual position to guarantee top-to-bottom, left-to-right navigation order
-  // regardless of DOM order or layout shifts caused by surroundContents
+  // regardless of DOM order or layout shifts caused by surroundContents. We
+  // measure each mark once, cache the document-absolute rect into a map, and
+  // reuse that map both to sort and to populate `positionSink` — callers that
+  // just want positions then get them without a second DOM pass.
+  const containerRect = container.getBoundingClientRect()
+  const containerScrollTop = container.scrollTop
+  const containerScrollLeft = container.scrollLeft
+  const rectByMark = new WeakMap<HTMLElement, { top: number; left: number }>()
+  for (const mark of marks) {
+    const rect = mark.getBoundingClientRect()
+    rectByMark.set(mark, {
+      top: rect.top - containerRect.top + containerScrollTop,
+      left: rect.left - containerRect.left + containerScrollLeft,
+    })
+  }
   marks.sort((a, b) => {
-    const rectA = a.getBoundingClientRect()
-    const rectB = b.getBoundingClientRect()
+    const rectA = rectByMark.get(a)!
+    const rectB = rectByMark.get(b)!
     const topDiff = rectA.top - rectB.top
     if (Math.abs(topDiff) > SORT_LINE_EPSILON_PX) return topDiff
     return rectA.left - rectB.left
   })
+  if (positionSink) {
+    positionSink.length = 0
+    for (const mark of marks) {
+      const pos = rectByMark.get(mark)!
+      positionSink.push({ top: pos.top, left: pos.left })
+    }
+  }
 
   return marks
 }
@@ -123,6 +166,7 @@ export function usePreviewSearch({
   const [matchCount, setMatchCount] = useState(0)
   const [currentIndex, setCurrentIndex] = useState(-1)
   const marksRef = useRef<HTMLElement[]>([])
+  const positionsRef = useRef<PreviewSearchMatchPosition[]>([])
   const debounceTimerRef = useRef<number | null>(null)
   const queryRef = useRef(query)
   queryRef.current = query
@@ -133,14 +177,17 @@ export function usePreviewSearch({
 
     clearHighlights(container)
     marksRef.current = []
+    positionsRef.current = []
     if (!searchQuery) {
       setMatchCount(0)
       setCurrentIndex(-1)
       return
     }
 
-    const marks = applyHighlights(container, searchQuery)
+    const positions: PreviewSearchMatchPosition[] = []
+    const marks = applyHighlights(container, searchQuery, positions)
     marksRef.current = marks
+    positionsRef.current = positions
     setMatchCount(marks.length)
     if (marks.length > 0) {
       setCurrentIndex(0)
@@ -180,6 +227,7 @@ export function usePreviewSearch({
       clearHighlights(container)
     }
     marksRef.current = []
+    positionsRef.current = []
     setQuery('')
     setMatchCount(0)
     setCurrentIndex(-1)
@@ -201,5 +249,9 @@ export function usePreviewSearch({
     setActiveHighlight(marks, nextIndex, previewRef.current)
   }, [currentIndex, previewRef])
 
-  return { query, setQuery, matchCount, currentIndex, goToNext, goToPrevious }
+  const getCachedMatchPositions = useCallback((): PreviewSearchMatchPosition[] => {
+    return positionsRef.current
+  }, [])
+
+  return { query, setQuery, matchCount, currentIndex, goToNext, goToPrevious, getCachedMatchPositions }
 }

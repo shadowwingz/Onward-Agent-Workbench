@@ -38,6 +38,15 @@ $WorkDir = Join-Path $FixtureRoot "workdir"
 $UserDataDir = Join-Path $FixtureRoot "user-data"
 New-Item -ItemType Directory -Force $WorkDir | Out-Null
 
+# Seed the workdir with a placeholder file so the ProjectEditor file tree is
+# non-empty. The autotest useEffect in ProjectEditor.tsx is gated on
+# `tree.length > 0`; an empty workdir would leave the autotest waiting forever
+# and produce a silent 5-minute timeout.
+$SeedPath = Join-Path $WorkDir "seed.md"
+if (-not (Test-Path -LiteralPath $SeedPath)) {
+  Set-Content -LiteralPath $SeedPath -Value "global-search autotest seed file" -NoNewline
+}
+
 $rootFullPath = [System.IO.Path]::GetFullPath($RootDir).TrimEnd('\')
 $userDataFullPath = [System.IO.Path]::GetFullPath($UserDataDir)
 $rootPrefix = "$rootFullPath\"

@@ -334,19 +334,42 @@ export const EpubReader = forwardRef<EpubReaderHandle, EpubReaderProps>(function
       container.addEventListener('scroll', handleScroll, { passive: true })
       // epub.js's DefaultViewManager occasionally stalls its first display()
       // against our sandboxed file:// iframe — the Promise never resolves but
-      // no error is raised either. Retry a few times until we see a real
-      // <iframe>. We gate retries behind book.opened so we don't hit the
+      // no error is raised either. Two observed root causes:
+      //   1. The rendition was mounted before the container had its final
+      //      layout size, so epub.js latched a 0x0 stage and never re-rendered.
+      //   2. The view iframe was created but never flushed (epub.js race on
+      //      addEventListener ordering). Retrying display() forces a new view.
+      // We handle (1) with an explicit `rendition.resize(width, height)` pass
+      // against the current container dimensions, and (2) by re-issuing
+      // display() until we actually see an <iframe> in the container.
+      // Retries are gated behind book.opened so we don't hit the
       // 'book.package' undefined trap inside rendition.start().
       const bookReady = (book?.opened ?? Promise.resolve(null)) as Promise<unknown>
-      const retryIntervals = [1000, 2500, 4500]
+      // Retry cadence up to 12s — in heavier regression scenarios (e.g., the
+      // `pdf-epub-full` suite where EPUB opens after a PDF preview teardown)
+      // DefaultViewManager can take longer than the first 4 nudges to actually
+      // materialize the iframe. Later retries are cheap noops once an iframe
+      // is present, so the worst case is a few extra display() calls.
+      const retryIntervals = [600, 1400, 2600, 4000, 6000, 8500, 11500]
       void bookReady.then(() => {
         for (const delay of retryIntervals) {
           window.setTimeout(() => {
-            if (disposed || resolved) return
+            if (disposed) return
             const iframeNow = container && container.querySelector('iframe')
             if (iframeNow) return
             const r = renditionRef.current
             if (!r) return
+            // Nudge the stage with the current container size before retrying
+            // display — epub.js latches the initial 0x0 size on first render
+            // if the container wasn't laid out yet.
+            try {
+              const w = container.offsetWidth
+              const h = container.offsetHeight
+              if (w > 0 && h > 0) {
+                const resize = (r as unknown as { resize?: (w?: number, h?: number) => void }).resize
+                if (typeof resize === 'function') resize.call(r, w, h)
+              }
+            } catch { /* ignore */ }
             try { void r.display(initialTarget) } catch { /* ignore */ }
           }, delay)
         }

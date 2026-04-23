@@ -18,6 +18,16 @@ if [[ -z "$APP_BIN" || ! -x "$APP_BIN" ]]; then
 fi
 
 mkdir -p "$WORK_DIR"
+# Seed the workdir with a placeholder file so the ProjectEditor file tree is
+# non-empty. The autotest useEffect in ProjectEditor.tsx is gated on
+# `tree.length > 0`; an empty workdir would leave the autotest waiting forever
+# and produce a silent 5-minute timeout. The seed file is unrelated to the
+# search query (`ONWARD_GS_MARKER_*`) so it does not pollute assertions, and
+# the runner re-creates it each invocation because `test/fixtures/*/workdir/`
+# is gitignored as an ephemeral directory.
+if [[ ! -f "$WORK_DIR/seed.md" ]]; then
+  printf 'global-search autotest seed file\n' > "$WORK_DIR/seed.md"
+fi
 case "$USER_DATA_DIR" in
   "$ROOT_DIR"/test/fixtures/global-search/user-data)
     rm -rf "$USER_DATA_DIR"

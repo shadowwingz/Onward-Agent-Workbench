@@ -5,7 +5,7 @@
 
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef } from 'react'
 import { useI18n } from '../../../i18n/useI18n'
-import { usePreviewSearch } from './usePreviewSearch'
+import { usePreviewSearch, type PreviewSearchMatchPosition } from './usePreviewSearch'
 import './PreviewSearchBar.css'
 
 export interface PreviewSearchHandle {
@@ -14,6 +14,13 @@ export interface PreviewSearchHandle {
   goToPrevious: () => void
   getMatchCount: () => number
   getCurrentIndex: () => number
+  /**
+   * Returns the cached mark positions for the current query. Read-only and
+   * does not force layout — intended for the autotest debug hook so that
+   * repeated calls during navigation stress tests stay O(1) instead of
+   * O(match count) per call.
+   */
+  getCachedMatchPositions: () => PreviewSearchMatchPosition[]
 }
 
 interface PreviewSearchBarProps {
@@ -26,7 +33,7 @@ interface PreviewSearchBarProps {
 export const PreviewSearchBar = forwardRef<PreviewSearchHandle, PreviewSearchBarProps>(function PreviewSearchBar({ previewRef, isOpen, onClose, renderedHtml }, ref) {
   const { t } = useI18n()
   const inputRef = useRef<HTMLInputElement>(null)
-  const { query, setQuery, matchCount, currentIndex, goToNext, goToPrevious } = usePreviewSearch({
+  const { query, setQuery, matchCount, currentIndex, goToNext, goToPrevious, getCachedMatchPositions } = usePreviewSearch({
     previewRef,
     isOpen,
     renderedHtml,
@@ -38,7 +45,8 @@ export const PreviewSearchBar = forwardRef<PreviewSearchHandle, PreviewSearchBar
     goToPrevious,
     getMatchCount: () => matchCount,
     getCurrentIndex: () => currentIndex,
-  }), [setQuery, goToNext, goToPrevious, matchCount, currentIndex])
+    getCachedMatchPositions,
+  }), [setQuery, goToNext, goToPrevious, matchCount, currentIndex, getCachedMatchPositions])
 
   useEffect(() => {
     if (!isOpen) return
