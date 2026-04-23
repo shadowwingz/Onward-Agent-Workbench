@@ -125,7 +125,7 @@ The app supports two update channels with different tag formats and auto-update 
 
 ## Full Regression Testing
 
-When the user asks for a full regression test (全量回归测试), refer to `test/full-regression-checklist.md` for the standard checklist, coverage scope, and validation steps.
+When the user asks for a full regression test, refer to `test/full-regression-checklist.md` for the standard checklist, coverage scope, and validation steps.
 
 ## Lessons Learned
 

@@ -5,36 +5,118 @@ SPDX-License-Identifier: Apache-2.0
 
 # Full Regression Checklist
 
-This checklist documents the full macOS regression pass used after fixing the subpage restore and typecheck gate work. Keep this file updated when the regression scope changes.
+> **Version:** v0.2
+> **Date:** 2026-04-23
+> **Previous version:** v0.1 (2026-04-22, embedded in this file prior to this rewrite)
 
-## Scope
+## Changelog vs. v0.1
+
+- **Added to mandatory pass (4 scripts):**
+  `run-prompt-input-latency-autotest.sh`,
+  `run-prompt-input-longtail-autotest.sh`,
+  `run-terminal-architecture-baseline-autotest.sh`,
+  `run-working-directory-copy-autotest.sh`.
+  All four had runners but were absent from v0.1's SCRIPTS array; the Agent
+  Team audit flagged them as "orphan runners".
+- **Scheduled for removal (harnesses under review):**
+  `test-regression.ts`, `test-stress.ts`, `test-per-agent-font.ts`,
+  `test-preview-position-restore.ts`, `test-sidebar-autoscroll.ts`,
+  `test-terminal-state-persistence.ts`, `test-feedback.ts`,
+  `test-prompt-cleanup.ts` (kept only if a runner is added).
+  Rationale per case is in §9 below.
+- **Feature inventory introduced (§6):** every runner now maps to one or more
+  user-visible features, the user entry point, and the expected observable
+  output. Derived from six parallel feature-domain audits.
+- **Known failure classification (§8):** 13 morning-run failures split into
+  "app regression — keep red tests" vs. "test design flaw — rewrite or
+  delete" to stop the conversation between "is it the test?" and "is it
+  the app?".
+- **Runner runtime cap added (§3):** each script must complete inside a
+  5-minute wall-clock budget. Hard-timed-out scripts count as FAIL.
+- **Inter-test gap bumped to 2 s** to let Electron helpers tear down
+  between scripts (fixes the flaky back-to-back launch residue seen at
+  end of v0.1).
+
+## Table of contents
+
+1. Scope & goals
+2. Quality bar for test cases
+3. Prerequisites and runtime policy
+4. Build and static checks
+5. Startup smoke test
+6. Feature inventory & runner mapping
+7. Full macOS regression command
+8. Known failing tests (as of 2026-04-23)
+9. Tests scheduled for removal
+10. Coverage gaps (new tests needed)
+11. Focused rerun commands
+12. Windows-only follow-up
+
+---
+
+## 1. Scope & goals
 
 Run this checklist after changes that affect:
 
-- Project Editor launch, markdown preview, file memory, or session restore
-- Git Diff, Git History, repo filtering, or submodule handling
-- Editor / Diff / History subpage switching
-- terminal focus, prompt sending, terminal performance, or terminal stress behavior
-- packaging, release workflow, or TypeScript/static-check coverage
-- shared Electron main/preload APIs touched by renderer code
+- Project Editor launch, file tree, markdown preview, outline panel, file
+  memory, or session restore
+- Git Diff, Git History, repo filtering, submodule handling, Git watch
+- Editor / Diff / History subpage switching and working-directory copy
+- Terminal focus, prompt sender, prompt list, prompt integrity, prompt
+  input latency
+- Binary readers: PDF, EPUB, image preview, SQLite viewer
+- Telemetry, feedback, change log, schedule
+- Packaging, release workflow, TypeScript / static-check coverage
+- Shared Electron main / preload APIs touched by renderer code
 
-## Prerequisites
+## 2. Quality bar for test cases (v0.2 addition)
+
+Every test kept in the checklist must answer **yes** to all three questions:
+
+1. **Is the assertion about something the user can observe?** DOM text,
+   DOM structure, clipboard, file-system, a rendered preview — yes. An
+   internal `ref.current` value, a private React state name, or an IPC
+   call count — no.
+2. **Does the user care if this breaks?** If nobody would notice, nobody
+   should gate the release on it.
+3. **Is the result determined solely by the feature being tested?**
+   Assertions that depend on system time, network, specific user paths,
+   or on the render order of unrelated code do not belong here.
+
+Tests that fail all three questions are **candidates for deletion** per
+§9. Tests that catch a real regression but fail for reasons 1 or 3 need
+to be rewritten to target stable user-observable contracts.
+
+## 3. Prerequisites and runtime policy
 
 - Run from the repository root.
-- Use the development package unless a production build is explicitly required.
-- On macOS, the dev package name is `Under Development <version>-<branch>`, for example `Under Development 2.0.1-master`.
-- Always kill the app by exact process name before launching or before each test script. Do not use wildcard or substring process matching.
-- This checklist documents the macOS regression pass. `test/run-auto-update-windows-e2e.sh` is Windows-only and must be run separately on Windows with PowerShell and Windows build tooling.
+- Use the development package unless a production build is explicitly
+  required (see §4). On macOS the dev binary is
+  `release/mac-arm64/Under Development <version>-<branch>.app`.
+- Always kill the app by **exact** process name before launching or
+  before each test script. No wildcards, no substring matches.
+- **Per-script timeout:** 5 minutes hard wall-clock. The v0.2 harness in
+  `test/run-full-regression.sh` wraps each runner with
+  `node test/run-with-timeout.mjs 300 bash <runner> …`, sending SIGTERM
+  at 300 s and SIGKILL 10 s later. A timeout is reported as FAIL.
+- **Inter-script gap:** 2 seconds after `pkill -x` before starting the
+  next runner, to let Electron helper processes exit.
+- **Per-runner scratch location:** each runner writes its Electron
+  `ONWARD_USER_DATA_DIR` under `mktemp -d`. No run touches the real
+  user-data directory. (See the
+  "Automated-test scratch locations and cleanup" rule in `CLAUDE.md`.)
+- **Consent dialog suppression:** `ONWARD_AUTOTEST=1` now implies the
+  renderer reports "consent = declined" when nothing is stored. No
+  explicit `ONWARD_AUTOTEST_SKIP_CONSENT=1` is required, although
+  runners may set it for clarity.
 
-## Build And Static Checks
-
-Use a clean development build. Keep `rm -rf out release` and `pnpm dist:dev` in the same command so stale packaged files cannot be reused.
+## 4. Build and static checks
 
 ```bash
 rm -rf out release && ONWARD_DIST_DEV_OPEN=0 pnpm dist:dev
 ```
 
-The development build runs these checks before packaging:
+`pnpm dist:dev` runs, in order:
 
 - `node scripts/check-chinese-comments.js`
 - `node scripts/compile-changelog.js`
@@ -43,19 +125,17 @@ The development build runs these checks before packaging:
 - `electron-vite build`
 - `electron-builder --dir`
 
-If only the static check needs to be rerun:
+Static check only:
 
 ```bash
 pnpm typecheck
 ```
 
-## Startup Smoke Test
-
-After the build succeeds, launch the packaged app once and confirm the main process starts. Use exact name matching.
+## 5. Startup smoke test
 
 ```bash
 APP_NAME="Under Development 2.0.1-master"
-APP_PATH="/Users/yingyun/Projects/Onward-Agent-Workbench/release/mac/Under Development 2.0.1-master.app"
+APP_PATH="/Users/yingyun/Projects/Onward-Github/release/mac-arm64/Under Development 2.0.1-master.app"
 
 pgrep -lx "$APP_NAME" || true
 pkill -x "$APP_NAME" 2>/dev/null || true
@@ -63,88 +143,102 @@ sleep 0.5
 open "$APP_PATH"
 sleep 4
 pgrep -lx "$APP_NAME"
+pkill -x "$APP_NAME" 2>/dev/null || true
 ```
 
-Expected result:
+Expected: `pgrep` prints one main-process line, the packaged app reached
+the main UI, no crash dialog.
 
-- `pgrep` prints one main app process.
-- The packaged app reaches the main UI.
+## 6. Feature inventory & runner mapping
 
-After the smoke test, close the app by exact process name:
+Grouped by functional domain. One row per runner. "Key features covered"
+is a short list of user-observable contracts the runner asserts on.
 
-```bash
-pkill -x "Under Development 2.0.1-master" 2>/dev/null || true
-```
+### 6.1 Project Editor core
 
-## Logs And Temporary Files
+| Runner | Key features covered |
+|---|---|
+| `run-project-editor-restore-autotest.sh` | File tree, open file, Monaco editor wiring, per-tab scope, session restore of open file + cursor |
+| `run-project-editor-restore-unit-autotest.sh` | Pure unit coverage of `projectEditorRestoreUtils` key helpers |
+| `run-project-editor-file-memory-autotest.sh` | Per-file scroll + cursor + preview-scroll-anchor memory, pagehide flush, outline-scroll memory restore on file switch / editor reopen |
+| `run-project-editor-markdown-navigation-autotest.sh` | Markdown outline / heading navigation, outline scroll restore on toggle and reopen |
+| `run-project-editor-markdown-session-restore-autotest.sh` | Markdown preview scroll anchor + heading restore across session restart |
+| `run-project-editor-multi-terminal-scope-autotest.sh` | Independent Project Editor state per terminal scope |
+| `run-project-editor-open-position-autotest.sh` | Initial cursor + scroll position when re-opening a file from restored state |
+| `run-project-editor-sqlite-autotest.sh` | SQLite viewer: table list, row pagination, edit/save/delete/insert, SQL console |
+| `run-markdown-latex-preview-autotest.sh` | KaTeX math rendering inline + block, preview pane activation |
+| `run-mermaid-panzoom-autotest.sh` | Mermaid rendering across 6 fixtures, pan/zoom toolbar actions, fullscreen toggle |
+| `run-preview-search-autotest.sh` | Markdown preview in-document search: match count, ordering, centering, forward/back navigation, wrap-around |
+| `run-global-search-autotest.sh` | Ripgrep-backed cross-file search, result grouping by file+line, jump-to-match opens the file |
 
-Use one aggregate log for the whole run:
+### 6.2 Git integration
 
-```bash
-FULL_LOG="/tmp/onward-full-regression-$(date +%Y%m%d%H%M%S).log"
-```
+| Runner | Key features covered |
+|---|---|
+| `run-git-cross-platform-autotest.sh` | IPC contract for `getDiff` / `getHistory`, path normalization, split-view ratio set + persist + restore |
+| `run-git-diff-subdir-autotest.sh` | Diff works when cwd is inside a repo subdirectory |
+| `run-git-diff-submodules-autotest.sh` | Regular (non-recursive) submodule discovery, outline-before-full-load |
+| `run-git-diff-recursive-submodules-autotest.sh` | Recursive (≥ 2-level) submodule discovery and nested loading status |
+| `run-git-nested-submodules-autotest.sh` | History + Diff file filtering across deeply nested submodules |
+| `run-git-history-multi-terminal-scope-autotest.sh` | History view scoping to each terminal's repo |
+| `run-image-diff-autotest.sh` | Image diff in Diff, History, and ProjectEditor: swipe / onion / SVG text mode |
+| `run-pdf-epub-diff-autotest.sh` | Git compare view for PDF and EPUB files (side-by-side, chapter-level diff) |
 
-Most test scripts also write their own fixed log files under `/tmp`, for example:
+### 6.3 Binary readers
 
-- `/tmp/onward-change-log-autotest.log`
-- `/tmp/onward-feedback-autotest.log`
-- `/tmp/onward-feedback-persistence-seed.log`
-- `/tmp/onward-feedback-persistence-verify.log`
-- `/tmp/onward-file-index-cache-ui-autotest.log`
-- `/tmp/onward-file-watch-autotest.log`
-- `/tmp/onward-git-cross-platform-autotest.log`
-- `/tmp/onward-git-diff-recursive-submodules-autotest.log`
-- `/tmp/onward-git-diff-subdir-autotest.log`
-- `/tmp/onward-git-diff-submodules-autotest.log`
-- `/tmp/onward-git-history-multi-terminal-scope-autotest.log`
-- `/tmp/onward-git-nested-submodules-autotest.log`
-- `/tmp/onward-global-search-autotest.log`
-- `/tmp/onward-image-diff-autotest.log`
-- `/tmp/onward-markdown-latex-preview-autotest.log`
-- `/tmp/onward-mermaid-panzoom-autotest.log`
-- `/tmp/onward-pdf-epub-autotest.log`
-- `/tmp/onward-pdf-epub-diff-autotest.log`
-- `/tmp/onward-pdf-epub-full-autotest.log`
-- `/tmp/onward-preview-search-autotest.log`
-- `/tmp/onward-project-editor-file-memory-autotest.log`
-- `/tmp/onward-project-editor-markdown-navigation-autotest.log`
-- `/tmp/onward-project-editor-markdown-session-restore-autotest.log`
-- `/tmp/onward-project-editor-multi-terminal-scope-autotest.log`
-- `/tmp/onward-project-editor-open-position-autotest.log`
-- `/tmp/onward-project-editor-restore-autotest.log`
-- `/tmp/onward-project-editor-restore-unit-autotest.log`
-- `/tmp/onward-project-editor-sqlite-autotest.log`
-- `/tmp/onward-prompt-integrity-autotest.log`
-- `/tmp/onward-prompt-list-autotest.log`
-- `/tmp/onward-prompt-sender-autotest.log`
-- `/tmp/onward-schedule-autotest.log`
-- `/tmp/onward-settings-update-autotest.log`
-- `/tmp/onward-subpage-navigation-autotest.log`
-- `/tmp/onward-subpage-viewstate-restore-autotest.log`
-- `/tmp/onward-telemetry-autotest.log`
-- `/tmp/onward-terminal-autofollow-autotest.log`
-- `/tmp/onward-terminal-focus-activation-autotest-*.log`
-- `/tmp/onward-terminal-perf-autotest.log`
-- `/tmp/onward-terminal-stress-autotest.log`
+| Runner | Key features covered |
+|---|---|
+| `run-pdf-epub-preview-autotest.sh` | PDF viewer: file-url correctness, ready postMessage, switch + reopen clears state; EPUB viewer: TOC, chapter render, outline panel, font-size bump + location preservation, search, outlined PDF + outline panel integration, per-file view-state memory |
+| `run-pdf-epub-full-autotest.sh` | Above plus Git compare suites in one session |
 
-The scripts create temporary working directories. These are expected:
+### 6.4 Terminal & Prompt
 
-- Per-script user-data directories under `${TMPDIR:-/tmp}/onward-regression-userdata.*`
-- Feedback user-data directories under `${TMPDIR:-/tmp}/onward-feedback-*`
-- PDF/EPUB user-data directories under `${TMPDIR:-/tmp}/onward-pdf-epub-*`
-- Git recursive submodule fixtures under `${TMPDIR:-/tmp}/onward-git-recursive-submodules-*`
-- Subpage navigation fixtures under `/Users/yingyun/Projects/onward-autotest-subpage-navigation-*` when run from the same local environment
-- Committed reusable fixtures under `test/fixtures/**`
+| Runner | Key features covered |
+|---|---|
+| `run-terminal-autofollow-autotest.sh` | Terminal cwd change propagates to Project Editor cwd when autofollow is enabled |
+| `run-terminal-focus-activation-autotest.sh` | Focus activation across grid cells (pointer + keyboard), visible selection indicator |
+| `run-terminal-perf-autotest.sh` | PTY output throughput + IPC batching under single-terminal load |
+| `run-terminal-stress-autotest.sh` | Multi-terminal grid under concurrent heavy output, hidden-terminal optimization |
+| `run-terminal-architecture-baseline-autotest.sh` *(new)* | Captures renderer scheduler + Prompt-input-priority baseline per docs/Off-Renderer Threaded Design — Electron Refactor.md |
+| `run-prompt-input-latency-autotest.sh` *(new)* | Prompt input keystroke latency (p50 / p95 / p99) under concurrent terminal load |
+| `run-prompt-input-longtail-autotest.sh` *(new)* | Long-tail input latency detection across extended typing + multi-terminal output |
+| `run-prompt-integrity-autotest.sh` | Multi-line send + OSC marker + hex-identical payload |
+| `run-prompt-list-autotest.sh` | Prompt cards grid, edit mode, save-as-new button label contract |
+| `run-prompt-sender-autotest.sh` | Terminal selection grid, send vs. send-and-execute dispatch |
+| `run-schedule-autotest.sh` | Schedule create / pause / resume / delete lifecycle against stored state |
 
-## Full macOS Regression Command
+### 6.5 Subpage navigation & platform
 
-This command reproduces the full macOS pass. It runs every shell regression script except the Windows-only auto-update E2E script, and it supplies the required explicit fixture argument for `test/run-git-diff-submodules-autotest.sh`.
+| Runner | Key features covered |
+|---|---|
+| `run-subpage-navigation-autotest.sh` | Editor / Diff / History switch, shared shell reuse, deleted-file handling on return-to-editor |
+| `run-subpage-viewstate-restore-autotest.sh` | Editor view-state (cursor + first-visible-line) survives round-trip through Diff |
+| `run-working-directory-copy-autotest.sh` *(new)* | Subpage shell cwd label → clipboard, copy-feedback toast |
+| `run-settings-update-autotest.sh` | Settings panel UI, font / theme preview, update controls mock |
+| `run-telemetry-autotest.sh` | Telemetry event / heartbeat logging, consent gating, daily aggregation |
+| `run-feedback-autotest.sh` | Feedback modal open / close, submit to GitHub draft URL |
+| `run-feedback-persistence-autotest.sh` | Consent toggle + submitted records persist across restart |
+| `run-change-log-autotest.sh` | Change Log modal open, markdown + mermaid content render, close paths |
+
+### 6.6 File index & watching
+
+| Runner | Key features covered |
+|---|---|
+| `run-file-index-cache-ui-autotest.sh` | Quick-open filename search, index reuse on create / delete / rename |
+| `run-file-watch-autotest.sh` | External file change auto-refresh in editor + tree |
+
+**Total canonical runners in v0.2: 43** (+1 skipped on macOS →
+`run-auto-update-windows-e2e.sh`, covered in §12).
+
+## 7. Full macOS regression command
 
 ```bash
 APP_NAME="Under Development 2.0.1-master"
-APP_BIN="/Users/yingyun/Projects/Onward-Agent-Workbench/release/mac/Under Development 2.0.1-master.app/Contents/MacOS/Under Development 2.0.1-master"
+APP_BIN="/Users/yingyun/Projects/Onward-Github/release/mac-arm64/Under Development 2.0.1-master.app/Contents/MacOS/Under Development 2.0.1-master"
 FULL_LOG="/tmp/onward-full-regression-$(date +%Y%m%d%H%M%S).log"
 
+# Shared fixture for the git-diff-submodules autotest. Other runners build
+# their own fixtures.
 RSM_JSON="$(node test/create-recursive-git-submodule-fixture.mjs)"
 DSM_REPO="$(node -e 'const data = JSON.parse(process.argv[1]); process.stdout.write(data.repoRoot)' "$RSM_JSON")"
 
@@ -181,6 +275,8 @@ SCRIPTS=(
   test/run-project-editor-restore-autotest.sh
   test/run-project-editor-restore-unit-autotest.sh
   test/run-project-editor-sqlite-autotest.sh
+  test/run-prompt-input-latency-autotest.sh
+  test/run-prompt-input-longtail-autotest.sh
   test/run-prompt-integrity-autotest.sh
   test/run-prompt-list-autotest.sh
   test/run-prompt-sender-autotest.sh
@@ -189,10 +285,12 @@ SCRIPTS=(
   test/run-subpage-navigation-autotest.sh
   test/run-subpage-viewstate-restore-autotest.sh
   test/run-telemetry-autotest.sh
+  test/run-terminal-architecture-baseline-autotest.sh
   test/run-terminal-autofollow-autotest.sh
   test/run-terminal-focus-activation-autotest.sh
   test/run-terminal-perf-autotest.sh
   test/run-terminal-stress-autotest.sh
+  test/run-working-directory-copy-autotest.sh
 )
 
 printf 'Full regression log: %s\n' "$FULL_LOG" | tee -a "$FULL_LOG"
@@ -204,37 +302,44 @@ SKIPPED=$((SKIPPED + 1))
 for script in "${SCRIPTS[@]}"; do
   printf '\n=== RUN %s ===\n' "$script" | tee -a "$FULL_LOG"
   pkill -x "$APP_NAME" 2>/dev/null || true
-  sleep 0.5
+  sleep 2
 
   USER_DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/onward-regression-userdata.XXXXXX")"
+  SCRIPT_START=$(date +%s)
 
   if [[ "$script" == "test/run-git-diff-submodules-autotest.sh" ]]; then
-    if ONWARD_USER_DATA_DIR="$USER_DATA_DIR" bash "$script" "$APP_BIN" "/tmp/onward-git-diff-submodules-autotest.log" "$DSM_REPO" 2>&1 | tee -a "$FULL_LOG"; then
-      printf 'PASS %s\n' "$script" | tee -a "$FULL_LOG"
-      PASSED=$((PASSED + 1))
-    else
-      printf 'FAIL %s\n' "$script" | tee -a "$FULL_LOG"
-      FAILED=$((FAILED + 1))
-      FAILED_LIST+=("$script")
-    fi
+    ONWARD_USER_DATA_DIR="$USER_DATA_DIR" \
+      node test/run-with-timeout.mjs 300 \
+        bash "$script" "$APP_BIN" "/tmp/onward-git-diff-submodules-autotest.log" "$DSM_REPO" 2>&1 | tee -a "$FULL_LOG"
+    RC=${PIPESTATUS[0]}
   else
-    if ONWARD_USER_DATA_DIR="$USER_DATA_DIR" bash "$script" "$APP_BIN" 2>&1 | tee -a "$FULL_LOG"; then
-      printf 'PASS %s\n' "$script" | tee -a "$FULL_LOG"
-      PASSED=$((PASSED + 1))
-    else
-      printf 'FAIL %s\n' "$script" | tee -a "$FULL_LOG"
-      FAILED=$((FAILED + 1))
-      FAILED_LIST+=("$script")
-    fi
+    ONWARD_USER_DATA_DIR="$USER_DATA_DIR" \
+      node test/run-with-timeout.mjs 300 \
+        bash "$script" "$APP_BIN" 2>&1 | tee -a "$FULL_LOG"
+    RC=${PIPESTATUS[0]}
+  fi
+  SCRIPT_ELAPSED=$(( $(date +%s) - SCRIPT_START ))
+
+  if [[ "$RC" == "0" ]]; then
+    printf 'PASS %s (%ds)\n' "$script" "$SCRIPT_ELAPSED" | tee -a "$FULL_LOG"
+    PASSED=$((PASSED + 1))
+  elif [[ "$RC" == "124" || "$RC" == "137" ]]; then
+    printf 'FAIL %s (timeout after %ds)\n' "$script" "$SCRIPT_ELAPSED" | tee -a "$FULL_LOG"
+    FAILED=$((FAILED + 1))
+    FAILED_LIST+=("$script (TIMEOUT)")
+    pkill -x "$APP_NAME" 2>/dev/null || true
+  else
+    printf 'FAIL %s (exit=%s, %ds)\n' "$script" "$RC" "$SCRIPT_ELAPSED" | tee -a "$FULL_LOG"
+    FAILED=$((FAILED + 1))
+    FAILED_LIST+=("$script (exit=$RC)")
   fi
 
   pkill -x "$APP_NAME" 2>/dev/null || true
-  sleep 0.5
+  sleep 2
 done
 
 printf '\n=== FULL REGRESSION SUMMARY ===\n' | tee -a "$FULL_LOG"
 printf 'Passed: %d\nFailed: %d\nSkipped: %d\n' "$PASSED" "$FAILED" "$SKIPPED" | tee -a "$FULL_LOG"
-
 if (( FAILED > 0 )); then
   printf 'Failed scripts:\n' | tee -a "$FULL_LOG"
   printf '  %s\n' "${FAILED_LIST[@]}" | tee -a "$FULL_LOG"
@@ -242,92 +347,133 @@ if (( FAILED > 0 )); then
 fi
 ```
 
-Expected summary for the macOS pass:
+`test/run-with-timeout.mjs` is a small Node wrapper (no `gtimeout`
+dependency on macOS); it spawns the runner with `stdio: inherit`, sends
+SIGTERM at the budget, upgrades to SIGKILL 10 s later, and exits with
+124 on timeout.
+
+Baseline clean-run target for v0.2:
 
 ```text
-Passed: 39
+Passed: 43
 Failed: 0
 Skipped: 1
 ```
 
-## Test Content By Area
+## 8. Known failing tests (as of 2026-04-23)
 
-The full pass covers these areas:
+These reflect the state on master after commits `7fd26ee` and `8a45088`.
+Each row is classified so the next repair pass knows whether to touch
+the test or the app.
 
-- Static/package gate: `pnpm typecheck` through `pnpm dist:dev`
-- Startup smoke: packaged app launch to the main UI
-- Change Log generation and UI
-- Feedback UI and feedback persistence
-- File index cache UI and file watch behavior
-- Git cross-platform IPC behavior
-- Git Diff subdirectory handling
-- Git Diff submodule and recursive submodule handling
-- Git History multi-terminal scope
-- Nested Git submodule History/Diff filtering
-- Global Search
-- Image Diff in Diff, History, and Project Editor
-- Markdown LaTeX preview
-- Mermaid pan/zoom
-- PDF/EPUB preview, Diff, and History
-- Preview Search ordering and active match centering
-- Project Editor file memory
-- Project Editor markdown navigation
-- Project Editor markdown session restore
-- Project Editor multi-terminal isolation
-- Project Editor open-position restore
-- Project Editor restore unit and integration coverage
-- Project Editor SQLite viewer
-- Prompt Integrity
-- Prompt List
-- Prompt Sender
-- Schedule lifecycle behavior
-- Settings update UI
-- Subpage navigation across Editor, Diff, and History
-- Subpage editor view-state restore
-- Telemetry
-- Terminal autofollow
-- Terminal focus activation
-- Terminal performance
-- Terminal stress
+| Test id | Script | Classification | Action |
+|---|---|---|---|
+| `PFM-42-outline-scroll-restored-on-switch` | `run-project-editor-file-memory-autotest.sh` | **App regression.** Outline scroll ref is clobbered by the post-mount scroll=0 event racing against `applyInitialScroll`. Triggered/exposed by `4e32ea5` (off-renderer refactor). | Keep test red. Fix app: debounce `onScrollCapture` during pending restore OR re-run restore when `outlineScrollTopRef` is populated after mount. |
+| `PFM-47-outline-scroll-restored-after-reopen` | same | Same root cause. | Same. |
+| `PMN-16-markdown-outline-restores-after-toggle` | `run-project-editor-markdown-navigation-autotest.sh` | Same class. | Same. |
+| `PMN-43-outline-restores-after-project-editor-reopen` | same | Same class. | Same. |
+| `SN-14-diff-deleted-file-does-not-override-editor` | `run-subpage-navigation-autotest.sh` | **App regression.** `handleOpenGitDiff` calls `resetActiveFileState()` which nulls `activeFilePath`; no restore on subpage-return because scope didn't change. | Keep test red. Fix app: on subpage-return, re-open last `activeFilePath` from persisted scope state, guarded so it does not clobber Diff's own captured view. |
+| `SVR-06-editor-restored-from-diff` | `run-subpage-viewstate-restore-autotest.sh` | Same class as SN-14. | Same. |
+| `SN-13-history-deleted-file-does-not-override-editor` | `run-subpage-navigation-autotest.sh` | **App regression (separate).** History panel cannot select a deleted file (`selectedDeletedHistoryFile=false`). Unrelated to activeFilePath. | Keep test red. Fix app: History file list should include files that appeared in any commit in range, not just files present in working tree. |
+| `XP-09b-diff-split-ratio-applies` | `run-git-cross-platform-autotest.sh` | **App regression — trivial.** `dragDiffSplitRatio` debug helper at `GitDiffViewer.tsx:1141-1226` forgets to call `persistDiffSplitRatio` after a successful drag. | Keep test red. Fix app: one-line addition. |
+| `RSM-03-nested-outline-visible-before-full-load` | `run-git-diff-recursive-submodules-autotest.sh` | **Product decision needed.** The test asserts an "optimistic UX" (outline visible while submodules still load). Current app gates the whole render on `files.length > 0`. | Decide: is optimistic outline a product requirement? If yes, keep test and fix render gate. If no, delete the test. |
+| `DSM-03-outline-visible-before-full-load` | `run-git-diff-submodules-autotest.sh` | Same as RSM-03. | Same. |
+| `PL-11-save-as-new-button-label` | `run-prompt-list-autotest.sh` | **Test design flaw / ambiguous.** Selector hits `[data-prompt-editing="true"]`; result is `buttonLabels: []`. Either the attribute isn't set to the literal `"true"` at query time (timing race), or the button moved. | Investigate: add a pre-check `waitFor` for `[data-prompt-editing="true"]`. If still empty, the feature changed — update selector or rewrite against the observable contract. |
 
-## Focused Rerun Commands
+## 9. Tests scheduled for removal
 
-When diagnosing failures, rerun only the affected area first:
+The Agent Team audit found the following harnesses have no runner AND
+their coverage is either dead, stale, or subsumed by newer granular
+tests. Action proposed; final removal waits for explicit user approval.
+
+| Harness | Reason | Action |
+|---|---|---|
+| `src/autotest/test-regression.ts` (19 KB, 21 assertions) | Phase-5 monolithic regression predating the per-feature runners. Every assertion it makes is now made by a dedicated runner. | **Delete.** |
+| `src/autotest/test-stress.ts` (6 KB, 7 assertions) | Phase-6 "rapid toggle" CPU stress. Superseded by `run-terminal-stress-autotest.sh`. | **Delete.** |
+| `src/autotest/test-per-agent-font.ts` | Deprecated feature (per-agent font for Git Diff); never had a runner; no product owner for the feature. | **Delete.** |
+| `src/autotest/test-preview-position-restore.ts` | Orphan harness, no runner, assertions overlap with `test-project-editor-markdown-session-restore`. | **Delete.** |
+| `src/autotest/test-sidebar-autoscroll.ts` | Orphan harness, no runner. Behavior worth testing but the current file reads private refs on sidebar internals — violates §2 rule 1. | **Delete**, then **rewrite from scratch** against `OutlinePanel` DOM queries only (no debug API). |
+| `src/autotest/test-terminal-state-persistence.ts` | Orphan, subsumed by `test-project-editor-restore` + `test-terminal-architecture-baseline`. | **Delete.** |
+| `src/autotest/test-feedback.ts` | Superseded by `test-feedback-ui.ts` (which is invoked by `run-feedback-autotest.sh`). | **Delete.** |
+| `src/autotest/test-prompt-cleanup.ts` | Orphan but functionally non-obsolete (prompt cleanup cascade). No runner means it never ran in full regression — unreliable. | Either **add a runner** or **delete**. |
+| `src/autotest/test-quick-file-unit.ts` | Pure unit tests for `buildQuickFileLabels` / `normalizeQuickFilePaths`. Does NOT need an E2E runner. | **Keep.** Consider moving to a Jest-style harness if one is introduced. |
+
+## 10. Coverage gaps (new tests needed)
+
+These are features found in the code that have no test or only
+incidental coverage. Ordered by user impact.
+
+### High impact
+
+- **Editor / preview split ratio drag + persist** (ProjectEditor).
+  Code at `STORAGE_KEY_MARKDOWN_PREVIEW_RATIO` persists the ratio, but
+  no test drives the drag or verifies restore.
+- **PDF diff and EPUB diff rendering in Git Diff** (status = added /
+  deleted / modified). Components exist (`GitPdfCompare`,
+  `GitEpubCompare`) but the PDF / EPUB diff paths are not covered by
+  `run-pdf-epub-diff-autotest.sh` assertions.
+- **Deleted-file diff visual confirmation**: Diff's "file was deleted"
+  state is rendered but not asserted.
+- **History can select deleted files** (see SN-13 above): related
+  coverage should add "select a file that was deleted in commit X, see
+  its previous content".
+- **Change Log auto-open on version bump**: tests only cover the modal
+  opened by explicit user click.
+- **Theme switching (light / dark) persistence**: Settings exposes the
+  selector, nothing verifies storage or render.
+- **Keyboard shortcut activation across the 20+ documented keybindings**:
+  only the settings UI is tested.
+- **Tab context menu (close other, rename)**: not covered.
+
+### Medium impact
+
+- **File create / delete / rename from context menu** (file tree ops).
+- **Path copy actions** (usePathCopy) from both file tree and diff.
+- **EPUB theme sync on OS dark / light toggle** while reading.
+- **EPUB error handling** (corrupt / empty .epub).
+- **SQLite blob column edit prevention + size hint**.
+- **SQLite concurrent external write handling**.
+- **File watcher under rapid change bursts** (current test does 3
+  sequential writes).
+- **Settings persistence across app restart** (current test only runs
+  within one launch).
+- **Update-service channel switching** (daily ↔ dev).
+- **Auto-update download-progress UI rendering**.
+
+### Low impact / nice-to-have
+
+- Tray icon, Dock icon smoke tests.
+- Prompt pinning drag-drop UX beyond API calls.
+- Schedule actually firing on cron time (not just stored state).
+- xterm addon integration (search, ligatures, links).
+
+## 11. Focused rerun commands
+
+When diagnosing a single failure, rerun that runner only:
 
 ```bash
 APP_NAME="Under Development 2.0.1-master"
-APP_BIN="/Users/yingyun/Projects/Onward-Agent-Workbench/release/mac/Under Development 2.0.1-master.app/Contents/MacOS/Under Development 2.0.1-master"
-
+APP_BIN="/Users/yingyun/Projects/Onward-Github/release/mac-arm64/Under Development 2.0.1-master.app/Contents/MacOS/Under Development 2.0.1-master"
 pkill -x "$APP_NAME" 2>/dev/null || true
-sleep 0.5
-bash test/run-subpage-navigation-autotest.sh "$APP_BIN"
+sleep 2
+ONWARD_USER_DATA_DIR="$(mktemp -d)" \
+  node test/run-with-timeout.mjs 300 \
+  bash test/run-subpage-navigation-autotest.sh "$APP_BIN"
 pkill -x "$APP_NAME" 2>/dev/null || true
 ```
 
-Use the same pattern for:
-
-- `test/run-subpage-viewstate-restore-autotest.sh`
-- `test/run-git-diff-subdir-autotest.sh`
-- `test/run-preview-search-autotest.sh`
-- `test/run-project-editor-markdown-session-restore-autotest.sh`
-- `test/run-prompt-integrity-autotest.sh`
-- `test/run-prompt-sender-autotest.sh`
-
-For Git Diff multi-submodule focused reruns:
+For the git-diff multi-submodule runner, pass the fixture path as the
+third arg:
 
 ```bash
-APP_NAME="Under Development 2.0.1-master"
-APP_BIN="/Users/yingyun/Projects/Onward-Agent-Workbench/release/mac/Under Development 2.0.1-master.app/Contents/MacOS/Under Development 2.0.1-master"
 RSM_JSON="$(node test/create-recursive-git-submodule-fixture.mjs)"
-DSM_REPO="$(node -e 'const data = JSON.parse(process.argv[1]); process.stdout.write(data.repoRoot)' "$RSM_JSON")"
-
-pkill -x "$APP_NAME" 2>/dev/null || true
-sleep 0.5
-bash test/run-git-diff-submodules-autotest.sh "$APP_BIN" "/tmp/onward-git-diff-submodules-autotest.log" "$DSM_REPO"
-pkill -x "$APP_NAME" 2>/dev/null || true
+DSM_REPO="$(node -e 'const d=JSON.parse(process.argv[1]); process.stdout.write(d.repoRoot)' "$RSM_JSON")"
+ONWARD_USER_DATA_DIR="$(mktemp -d)" \
+  node test/run-with-timeout.mjs 300 \
+  bash test/run-git-diff-submodules-autotest.sh "$APP_BIN" /tmp/onward-git-diff-submodules-autotest.log "$DSM_REPO"
 ```
 
-## Windows-Only Follow-Up
+## 12. Windows-only follow-up
 
 Run this separately on Windows:
 
@@ -335,4 +481,49 @@ Run this separately on Windows:
 bash test/run-auto-update-windows-e2e.sh
 ```
 
-This script validates Windows pending-update recovery and update restart behavior. It is intentionally excluded from the macOS full pass.
+Validates Windows pending-update recovery and update restart behavior.
+Intentionally excluded from the macOS full pass.
+
+---
+
+## Appendix A: Runner runtime wrapper
+
+Fresh macOS installs do not ship `gtimeout`. The runner wrapper is kept
+in the repo so the command in §7 is reproducible on any dev machine:
+
+```javascript
+// test/run-with-timeout.mjs
+import { spawn } from 'node:child_process'
+
+const timeoutSec = Number(process.argv[2])
+const cmd = process.argv[3]
+const args = process.argv.slice(4)
+if (!Number.isFinite(timeoutSec) || timeoutSec <= 0) {
+  console.error('usage: node run-with-timeout.mjs <seconds> <cmd> [args...]')
+  process.exit(2)
+}
+
+const child = spawn(cmd, args, { stdio: 'inherit' })
+let timedOut = false
+const killTimer = setTimeout(() => {
+  timedOut = true
+  try { child.kill('SIGTERM') } catch {}
+  setTimeout(() => { try { child.kill('SIGKILL') } catch {} }, 10_000).unref()
+}, timeoutSec * 1000)
+
+child.on('exit', (code, signal) => {
+  clearTimeout(killTimer)
+  if (timedOut) process.exit(124)
+  if (typeof code === 'number') process.exit(code)
+  if (signal) process.exit(128 + (signal === 'SIGKILL' ? 9 : 15))
+  process.exit(1)
+})
+child.on('error', (err) => {
+  clearTimeout(killTimer)
+  console.error(err)
+  process.exit(127)
+})
+```
+
+Commit this wrapper alongside v0.2 so the full-pass is reproducible
+from a fresh clone.
