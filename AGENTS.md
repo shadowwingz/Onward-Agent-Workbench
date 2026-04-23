@@ -122,9 +122,9 @@ The app supports two update channels with different tag formats and auto-update 
 - Dev channel users see "Manual check required" in Settings and must click Check → Download → Restart manually.
 - Daily channel users receive automatic background checks and downloads.
 
-## Performance Regression Testing
+## Full Regression Testing
 
-When designing or running performance-related test cases, refer to `test/performance-regression-guide.md` for standard procedures, expected baselines, and the regression checklist.
+When the user asks for a full regression test (全量回归测试), refer to `test/full-regression-checklist.md` for the standard checklist, coverage scope, and validation steps.
 
 ## Lessons Learned
 
