@@ -55,6 +55,7 @@ set ONWARD_TELEMETRY_RESET_CONSENT=1
 | Variable | Value | Effect |
 |----------|-------|--------|
 | `ONWARD_DEBUG` | `1` | Enable verbose console logging in main process, IPC, and git-watch |
+| `ONWARD_PERF_TRACE` | `1` | Write low-overhead JSONL performance trace logs for manual lag reproduction; captures main/renderer stalls, Prompt input paint latency, terminal IPC summaries, GitWatch/Git runtime summaries, and Prompt context-menu lifecycle |
 | `ONWARD_DEBUG_CAPTURE` | `1` | Auto-capture renderer screenshots to temp dir after load |
 | `ONWARD_DISABLE_GPU` | `1` | Disable hardware acceleration and GPU compositing |
 | `ONWARD_USER_DATA_DIR` | path | Override the userData directory (settings, state, telemetry) |

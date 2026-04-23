@@ -6,16 +6,13 @@ param(
   [string]$LogFile = ""
 )
 
-$RootDir = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
-$AppDir = Join-Path $RootDir "release\win-unpacked"
+$ErrorActionPreference = "Stop"
+
+$RootDir = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
+. (Join-Path $RootDir "test\Resolve-DevAppBin.ps1")
 
 if (-not $AppBin) {
-  $Candidates = Get-ChildItem -Path $AppDir -Filter "*.exe" -ErrorAction SilentlyContinue | Sort-Object Name
-  if (-not $Candidates -or $Candidates.Count -eq 0) {
-    Write-Error "No packaged .exe was found. Run: rm -rf out release && pnpm dist:dev"
-    exit 1
-  }
-  $AppBin = $Candidates[0].FullName
+  $AppBin = Resolve-DevAppBin -RootDir $RootDir
 }
 
 if (-not $LogFile) {
@@ -23,25 +20,69 @@ if (-not $LogFile) {
 }
 
 if (-not (Test-Path $AppBin)) {
-  Write-Error "App binary not found: $AppBin"
+  Write-Error "App binary not found: $AppBin`nRun a development build first: rm -rf out release && pnpm dist:dev"
   exit 1
 }
 
 if (Test-Path $LogFile) {
-  Remove-Item $LogFile -Force
+  try {
+    Remove-Item -LiteralPath $LogFile -Force -ErrorAction Stop
+  } catch {
+    $fallbackStamp = Get-Date -Format "yyyyMMdd-HHmmss"
+    $LogFile = Join-Path $env:TEMP "onward-global-search-autotest-$fallbackStamp.log"
+  }
 }
 
+$FixtureRoot = Join-Path $RootDir "test\fixtures\global-search"
+$WorkDir = Join-Path $FixtureRoot "workdir"
+$UserDataDir = Join-Path $FixtureRoot "user-data"
+New-Item -ItemType Directory -Force $WorkDir | Out-Null
+
+$rootFullPath = [System.IO.Path]::GetFullPath($RootDir).TrimEnd('\')
+$userDataFullPath = [System.IO.Path]::GetFullPath($UserDataDir)
+$rootPrefix = "$rootFullPath\"
+if (-not $userDataFullPath.StartsWith($rootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+  throw "Refusing to delete userData outside repo: $userDataFullPath"
+}
+if (Test-Path -LiteralPath $userDataFullPath) {
+  Remove-Item -LiteralPath $userDataFullPath -Recurse -Force
+}
+New-Item -ItemType Directory -Force $userDataFullPath | Out-Null
+$UserDataDir = $userDataFullPath
+
 Write-Host "Starting global search autotest..."
+Write-Host "  Binary:   $AppBin"
+Write-Host "  CWD:      $WorkDir"
+Write-Host "  UserData: $UserDataDir"
+Write-Host "  Log:      $LogFile"
+
+$ProcessName = [System.IO.Path]::GetFileNameWithoutExtension($AppBin)
+$existing = Get-Process | Where-Object { $_.ProcessName -eq $ProcessName }
+if ($existing) {
+  $existing | Stop-Process -Force
+  Start-Sleep -Milliseconds 500
+}
 
 $env:ONWARD_DEBUG = "1"
 $env:ONWARD_AUTOTEST = "1"
 $env:ONWARD_AUTOTEST_SUITE = "global-search"
-$env:ONWARD_AUTOTEST_CWD = $RootDir
+$env:ONWARD_AUTOTEST_CWD = $WorkDir
 $env:ONWARD_AUTOTEST_EXIT = "1"
+$env:ONWARD_USER_DATA_DIR = $UserDataDir
 
 try {
-  & $AppBin *> $LogFile
-} catch {
+  $proc = Start-Process -FilePath $AppBin -PassThru -RedirectStandardOutput $LogFile -RedirectStandardError "$LogFile.err" -NoNewWindow -Wait
+  if (Test-Path "$LogFile.err") {
+    Get-Content "$LogFile.err" | Add-Content $LogFile
+    Remove-Item "$LogFile.err" -Force -ErrorAction SilentlyContinue
+  }
+} finally {
+  Remove-Item Env:\ONWARD_DEBUG -ErrorAction SilentlyContinue
+  Remove-Item Env:\ONWARD_AUTOTEST -ErrorAction SilentlyContinue
+  Remove-Item Env:\ONWARD_AUTOTEST_SUITE -ErrorAction SilentlyContinue
+  Remove-Item Env:\ONWARD_AUTOTEST_CWD -ErrorAction SilentlyContinue
+  Remove-Item Env:\ONWARD_AUTOTEST_EXIT -ErrorAction SilentlyContinue
+  Remove-Item Env:\ONWARD_USER_DATA_DIR -ErrorAction SilentlyContinue
 }
 
 if (Select-String -Path $LogFile -Pattern "\[AutoTest\] FAIL" -Quiet) {

@@ -10,6 +10,7 @@ import type { PromptSchedule } from '../../types/tab.d.ts'
 import { formatShortTime } from '../../utils/schedule'
 import { useI18n } from '../../i18n/useI18n'
 import { PROMPT_COLORS } from './prompt-colors'
+import { perfTrace } from '../../utils/perf-trace'
 
 type PromptColorFilter = 'red' | 'yellow' | 'green' | null
 
@@ -306,6 +307,10 @@ export const PromptList = memo(function PromptList({
   const dragListenersRef = useRef<{ move: (event: PointerEvent) => void; up: (event: PointerEvent) => void } | null>(null)
   const suppressClickRef = useRef(false)
   const lastReorderRef = useRef<{ id: string; position: 'before' | 'after' } | null>(null)
+  const renderCountRef = useRef(0)
+  const contextMenuRef = useRef<typeof contextMenu>(null)
+  const lastContextMenuRenderTraceAtRef = useRef(0)
+  renderCountRef.current += 1
 
   // Sorting: scheduled(nextExecutionAt ascending order) → pinned in global order → unpinned(updatedAt descending order)
   const sortedPrompts = useMemo(() => {
@@ -433,11 +438,20 @@ export const PromptList = memo(function PromptList({
     }
   }, [])
 
-  const closeContextMenu = useCallback(() => {
+  const closeContextMenu = useCallback((reason = 'unknown') => {
     clearSubmenuCloseTimer()
     setSubmenuOpen(null)
     setSubmenuFlipped(false)
-    setContextMenu(null)
+    setContextMenu(prev => {
+      if (prev) {
+        perfTrace('renderer:prompt-context-menu-close', {
+          reason,
+          promptId: prev.id,
+          renderCount: renderCountRef.current
+        })
+      }
+      return null
+    })
   }, [clearSubmenuCloseTimer])
 
   const openSendToTaskSubmenu = useCallback(() => {
@@ -473,7 +487,14 @@ export const PromptList = memo(function PromptList({
       x: event.clientX,
       y: event.clientY
     })
-  }, [onSelect, clearSubmenuCloseTimer])
+    perfTrace('renderer:prompt-context-menu-open', {
+      promptId: prompt.id,
+      promptCount: prompts.length,
+      x: event.clientX,
+      y: event.clientY,
+      renderCount: renderCountRef.current
+    })
+  }, [onSelect, clearSubmenuCloseTimer, prompts.length])
 
   const handlePointerDown = useCallback((event: React.PointerEvent<HTMLDivElement>, prompt: Prompt, isPinned: boolean) => {
     if (!onReorderPinned || !isPinned) return
@@ -564,9 +585,43 @@ export const PromptList = memo(function PromptList({
 
   useEffect(() => {
     if (contextMenu && !contextPrompt) {
+      perfTrace('renderer:prompt-context-menu-close', {
+        reason: 'prompt-missing',
+        promptId: contextMenu.id,
+        promptCount: prompts.length,
+        renderCount: renderCountRef.current
+      })
       setContextMenu(null)
     }
-  }, [contextMenu, contextPrompt])
+  }, [contextMenu, contextPrompt, prompts.length])
+
+  useEffect(() => {
+    contextMenuRef.current = contextMenu
+  }, [contextMenu])
+
+  useEffect(() => {
+    return () => {
+      const menu = contextMenuRef.current
+      if (menu) {
+        perfTrace('renderer:prompt-context-menu-unmount', {
+          promptId: menu.id,
+          renderCount: renderCountRef.current
+        })
+      }
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!contextMenu) return
+    const now = performance.now()
+    if (now - lastContextMenuRenderTraceAtRef.current < 500) return
+    lastContextMenuRenderTraceAtRef.current = now
+    perfTrace('renderer:prompt-context-menu-render', {
+      promptId: contextMenu.id,
+      promptCount: prompts.length,
+      renderCount: renderCountRef.current
+    })
+  })
 
   useEffect(() => {
     if (!contextMenu) return
@@ -580,17 +635,17 @@ export const PromptList = memo(function PromptList({
 
     const handleMouseDown = (event: MouseEvent) => {
       if (!isInsideMenu(event.target as Node)) {
-        closeContextMenu()
+        closeContextMenu('outside-mousedown')
       }
     }
 
     const dismissOnOwnScroll = () => {
-      closeContextMenu()
+      closeContextMenu('prompt-list-scroll-or-resize')
     }
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
-        closeContextMenu()
+        closeContextMenu('escape')
       }
     }
 

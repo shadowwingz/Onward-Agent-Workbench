@@ -13,6 +13,8 @@ import type { TerminalStyleConfig } from '../types/settings.d.ts'
 import type { TerminalBufferOptions, TerminalBufferResult } from '../types/electron.d.ts'
 import { requestOpenExternalHttpLink } from '../utils/externalLink'
 import { perfMonitor } from '../utils/perf-monitor'
+import { inputPriorityLane } from './input-priority-lane'
+import { TerminalOutputScheduler } from './terminal-output-scheduler'
 
 export type TerminalSessionStatus = 'idle' | 'initializing' | 'ready' | 'error' | 'disposed'
 
@@ -72,6 +74,7 @@ export interface TerminalSessionDebugState {
   status: TerminalSessionStatus
   open: boolean
   visible: boolean
+  outputVisible: boolean
   pendingDataChunks: number
   pendingDataBytes: number
 }
@@ -96,6 +99,7 @@ interface TerminalSession {
   pendingGeometryRefreshAnimationFrame: number | null
   // Visibility-based rendering optimization
   visible: boolean
+  outputVisible: boolean
   pendingData: string[]
   pendingDataBytes: number
   interactiveBoostUntil: number
@@ -106,7 +110,6 @@ interface TerminalSession {
 // unbounded memory growth for long-running hidden sessions.
 const PENDING_DATA_MAX_BYTES = 512 * 1024
 const VISIBLE_PENDING_DATA_MAX_BYTES = 8 * 1024 * 1024
-const VISIBLE_WRITE_MAX_CHUNK_BYTES = 256 * 1024
 
 // Throttle interval for visible terminal writes.  Instead of calling
 // terminal.write() on every IPC message (which can reach 18,000/s across
@@ -114,7 +117,7 @@ const VISIBLE_WRITE_MAX_CHUNK_BYTES = 256 * 1024
 // and flush once per interval via requestAnimationFrame.  50 ms ≈ 20 fps
 // for terminal updates — visually smooth while leaving ~70% of each frame
 // budget free for user input, React renders, and other UI work.
-const VISIBLE_WRITE_THROTTLE_MS = 50
+const VISIBLE_WRITE_THROTTLE_MS = 20
 const INTERACTIVE_BOOST_WINDOW_MS = 250
 
 const DEFAULT_COLS = 80
@@ -154,16 +157,14 @@ function buildTheme(options: TerminalSessionOptions) {
 
 export class TerminalSessionManager {
   private sessions: Map<string, TerminalSession> = new Map()
+  private outputVisibilityState: Map<string, boolean> = new Map()
   private bufferRequestUnsubscribe: (() => void) | null = null
   // Centralized IPC listeners: single global listener dispatches by terminal ID via Map lookup
   private globalDataUnsubscribe: (() => void) | null = null
   private globalExitUnsubscribe: (() => void) | null = null
-  // Visible-write throttle: sessions that have pending visible data to flush
-  private dirtyVisibleSessions: Set<string> = new Set()
-  private visibleFlushScheduled = false
-  private lastVisibleFlushTime = 0
-  private visibleFlushTimeoutId: number | null = null
-  private visibleFlushAnimationFrameId: number | null = null
+  private readonly outputScheduler = new TerminalOutputScheduler({
+    batchIntervalMs: VISIBLE_WRITE_THROTTLE_MS
+  })
   private activeInteractiveTerminalId: string | null = null
 
   constructor() {
@@ -190,6 +191,7 @@ export class TerminalSessionManager {
       perfMonitor.recordIpcData(data.length)
 
       const interactiveBoostActive = this.shouldUseInteractiveBoost(session)
+      const outputActive = this.isOutputActive(session)
 
       // Fast path: for visible terminals with no pending data, write small
       // interactive data (keystroke echoes) directly to xterm, bypassing
@@ -197,7 +199,7 @@ export class TerminalSessionManager {
       // latency for interactive typing while preserving viewport intent
       // (autofollow / manual scroll restoration).
       if (
-        session.visible &&
+        outputActive &&
         session.terminal &&
         (
           interactiveBoostActive ||
@@ -207,8 +209,25 @@ export class TerminalSessionManager {
           )
         )
       ) {
+        if (interactiveBoostActive && session.pendingDataBytes > 512 * 1024) {
+          session.pendingData.push(data)
+          session.pendingDataBytes += data.length
+          this.trimPendingData(session, VISIBLE_PENDING_DATA_MAX_BYTES)
+          this.outputScheduler.markDirty(termId, true)
+          return
+        }
+
         if (interactiveBoostActive && session.pendingDataBytes > 0) {
-          this.flushPendingData(session)
+          session.pendingData.push(data)
+          session.pendingDataBytes += data.length
+          this.trimPendingData(session, VISIBLE_PENDING_DATA_MAX_BYTES)
+          this.outputScheduler.markDirty(termId, true)
+          const ksTs = (session as any)._lastKeystrokeTs as number | undefined
+          if (ksTs && data.length <= 16) {
+            perfMonitor.recordInputLatency(performance.now() - ksTs)
+            ;(session as any)._lastKeystrokeTs = undefined
+          }
+          return
         }
         this.writeTerminalData(session, data)
 
@@ -227,7 +246,7 @@ export class TerminalSessionManager {
       session.pendingData.push(data)
       session.pendingDataBytes += data.length
 
-      if (!session.visible) {
+      if (!outputActive) {
         this.trimPendingData(session, PENDING_DATA_MAX_BYTES)
         perfMonitor.recordHiddenTermWrite(data.length)
         return
@@ -235,9 +254,7 @@ export class TerminalSessionManager {
 
       this.trimPendingData(session, VISIBLE_PENDING_DATA_MAX_BYTES)
 
-      // Visible: mark dirty and schedule a throttled flush
-      this.dirtyVisibleSessions.add(termId)
-      this.scheduleVisibleFlush()
+      this.outputScheduler.markDirty(termId, interactiveBoostActive)
 
       // Input latency: time from keystroke to echo arrival
       const ksTs = (session as any)._lastKeystrokeTs as number | undefined
@@ -246,78 +263,6 @@ export class TerminalSessionManager {
         ;(session as any)._lastKeystrokeTs = undefined
       }
     })
-  }
-
-  /**
-   * Schedule a batched flush of all dirty visible sessions.
-   * Uses requestAnimationFrame gated by a minimum interval so that:
-   *  - Writes are aligned with the browser's paint cycle
-   *  - The main thread is free between flushes for input events & React
-   *  - At most ~20 flush cycles per second (50 ms apart)
-   */
-  private scheduleVisibleFlush(): void {
-    if (this.visibleFlushScheduled) return
-    this.visibleFlushScheduled = true
-
-    const elapsed = performance.now() - this.lastVisibleFlushTime
-    const delay = Math.max(0, VISIBLE_WRITE_THROTTLE_MS - elapsed)
-    const scheduleFlush = () => {
-      // Prefer rAF for normal paint-aligned updates, but keep a timeout
-      // fallback so visible PTY data still flushes when the window is
-      // backgrounded or frame scheduling is throttled.
-      this.visibleFlushAnimationFrameId = requestAnimationFrame(() => {
-        this.visibleFlushAnimationFrameId = null
-        this.flushVisibleSessions()
-      })
-      this.visibleFlushTimeoutId = window.setTimeout(() => {
-        this.visibleFlushTimeoutId = null
-        this.flushVisibleSessions()
-      }, 32)
-    }
-
-    if (delay <= 0) {
-      scheduleFlush()
-      return
-    }
-
-    this.visibleFlushTimeoutId = window.setTimeout(() => {
-      this.visibleFlushTimeoutId = null
-      scheduleFlush()
-    }, delay)
-  }
-
-  private flushVisibleSessions(): void {
-    if (!this.visibleFlushScheduled) return
-    this.visibleFlushScheduled = false
-    if (this.visibleFlushTimeoutId !== null) {
-      window.clearTimeout(this.visibleFlushTimeoutId)
-      this.visibleFlushTimeoutId = null
-    }
-    if (this.visibleFlushAnimationFrameId !== null) {
-      cancelAnimationFrame(this.visibleFlushAnimationFrameId)
-      this.visibleFlushAnimationFrameId = null
-    }
-    this.lastVisibleFlushTime = performance.now()
-    const requeue: string[] = []
-
-    for (const termId of this.dirtyVisibleSessions) {
-      const session = this.sessions.get(termId)
-      if (!session || session.pendingData.length === 0) continue
-
-      const merged = this.consumePendingDataChunk(session, VISIBLE_WRITE_MAX_CHUNK_BYTES)
-      if (!merged) continue
-
-      this.writeTerminalData(session, merged)
-
-      if (session.pendingData.length > 0) {
-        requeue.push(termId)
-      }
-    }
-    this.dirtyVisibleSessions.clear()
-    requeue.forEach((termId) => this.dirtyVisibleSessions.add(termId))
-    if (this.dirtyVisibleSessions.size > 0) {
-      this.scheduleVisibleFlush()
-    }
   }
 
   /**
@@ -599,6 +544,16 @@ export class TerminalSessionManager {
     }
   }
 
+  private isOutputActive(session: TerminalSession): boolean {
+    return session.visible && session.outputVisible
+  }
+
+  private syncMainOutputVisibility(session: TerminalSession): void {
+    const outputActive = this.isOutputActive(session)
+    window.electronAPI.terminal.setBufferFastPath(session.id, outputActive)
+    window.electronAPI.terminal.setOutputVisibility(session.id, outputActive)
+  }
+
   getSessionDebugState(id: string): TerminalSessionDebugState | null {
     const session = this.sessions.get(id)
     if (!session) return null
@@ -607,6 +562,7 @@ export class TerminalSessionManager {
       status: session.status,
       open: session.open,
       visible: session.visible,
+      outputVisible: session.outputVisible,
       pendingDataChunks: session.pendingData.length,
       pendingDataBytes: session.pendingDataBytes
     }
@@ -735,12 +691,22 @@ export class TerminalSessionManager {
       pendingRestoreAnimationFrame: null,
       pendingGeometryRefreshAnimationFrame: null,
       visible: true,
+      outputVisible: this.outputVisibilityState.get(id) ?? true,
       pendingData: [],
       pendingDataBytes: 0,
       interactiveBoostUntil: 0
     }
 
     this.sessions.set(id, session)
+    this.outputScheduler.registerTarget({
+      id,
+      hasPendingData: () => session.pendingData.length > 0,
+      isOutputActive: () => this.isOutputActive(session),
+      isInteractive: () => this.shouldUseInteractiveBoost(session),
+      consumeChunk: (maxBytes) => this.consumePendingDataChunk(session, maxBytes),
+      writeData: (data) => this.writeTerminalData(session, data)
+    })
+    this.syncMainOutputVisibility(session)
     return session
   }
 
@@ -818,15 +784,10 @@ export class TerminalSessionManager {
     if (!session || session.visible === visible) return
 
     session.visible = visible
-
-    // Sync the main-process IPC data buffer: enable fast-path for visible
-    // terminals (low-latency keystroke echoes), disable for hidden ones
-    // (avoid high-rate unbatched IPC traffic with no user-visible benefit).
-    window.electronAPI.terminal.setBufferFastPath(id, visible)
+    this.syncMainOutputVisibility(session)
 
     if (visible) {
-      // Flush buffered data that accumulated while hidden
-      this.flushPendingData(session)
+      this.outputScheduler.markDirty(id, this.shouldUseInteractiveBoost(session))
       // Only touch WebGL/fit for fully initialized terminals
       if (session.open && session.status === 'ready') {
         this.ensureWebglAddon(session)
@@ -839,6 +800,33 @@ export class TerminalSessionManager {
       if (session.open) {
         this.releaseWebglAddon(session)
       }
+      this.outputScheduler.removeDirty(id)
+    }
+  }
+
+  setOutputVisibility(id: string, visible: boolean): void {
+    this.outputVisibilityState.set(id, visible)
+    const session = this.sessions.get(id)
+    if (!session) {
+      window.electronAPI.terminal.setOutputVisibility(id, visible)
+      if (!visible) {
+        window.electronAPI.terminal.setBufferFastPath(id, false)
+      }
+      return
+    }
+
+    if (session.outputVisible === visible) {
+      this.syncMainOutputVisibility(session)
+      return
+    }
+
+    session.outputVisible = visible
+    this.syncMainOutputVisibility(session)
+
+    if (this.isOutputActive(session)) {
+      this.outputScheduler.markDirty(id, this.shouldUseInteractiveBoost(session))
+    } else {
+      this.outputScheduler.removeDirty(id)
     }
   }
 
@@ -1205,7 +1193,8 @@ export class TerminalSessionManager {
     session.readyPromise = null
     session.pendingData = []
     session.pendingDataBytes = 0
-    this.dirtyVisibleSessions.delete(id)
+    this.outputScheduler.unregisterTarget(id)
+    this.outputVisibilityState.delete(id)
     this.clearPendingRestoreAnimationFrame(session)
     this.clearPendingGeometryRefreshAnimationFrame(session)
 
@@ -1238,12 +1227,14 @@ export class TerminalSessionManager {
     if (!session) return
     session.interactiveBoostUntil = performance.now() + INTERACTIVE_BOOST_WINDOW_MS
     this.activeInteractiveTerminalId = id
+    inputPriorityLane.noteFocusedTaskInput(80)
+    this.outputScheduler.markDirty(id, true)
     window.electronAPI.terminal.notifyInteractiveInput(id)
   }
 
   private shouldUseInteractiveBoost(session: TerminalSession): boolean {
     return (
-      session.visible &&
+      this.isOutputActive(session) &&
       this.activeInteractiveTerminalId === session.id &&
       performance.now() < session.interactiveBoostUntil
     )

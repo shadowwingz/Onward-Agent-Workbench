@@ -43,9 +43,13 @@ export function initializeFileIndexCacheBridge(): void {
       // a null-filename fs.watch event). Drop the entry so the next search
       // rebuilds from disk, rather than leaving removed paths stale.
       invalidate(event.cwd)
+      void api.invalidateFileIndex?.(event.cwd)
       return
     }
     applyFsEvent(event.cwd, { added, removed })
+    if (added.length > 0 || removed.length > 0) {
+      void api.invalidateFileIndex?.(event.cwd)
+    }
   })
 
   debugLog('initialized')

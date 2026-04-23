@@ -3,10 +3,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { spawn, type ChildProcess } from 'child_process'
+import { join } from 'path'
+import { existsSync } from 'fs'
+import { Worker } from 'worker_threads'
 import { BrowserWindow, app } from 'electron'
+import { mainWorkScheduler } from './main-work-scheduler'
+import { perfTraceLogger } from './perf-trace-logger'
 
 export interface RipgrepSearchOptions {
+  searchId?: string
   rootPath: string
   query: string
   isRegex: boolean
@@ -33,90 +38,123 @@ export interface RipgrepSearchStats {
   cancelled: boolean
 }
 
+type WorkerMethod = 'start' | 'cancel'
+
+type WorkerRequest = {
+  id: number
+  method: WorkerMethod
+  payload: Record<string, unknown>
+}
+
+type WorkerResponse = {
+  id: number
+  ok: boolean
+  result?: unknown
+  error?: string
+}
+
+type WorkerEvent =
+  | { event: 'result'; searchId: string; matches: RipgrepMatch[] }
+  | { event: 'done'; stats: RipgrepSearchStats }
+
+type PendingRequest = {
+  resolve: (value: unknown) => void
+  reject: (error: Error) => void
+  timer: ReturnType<typeof setTimeout>
+  method: WorkerMethod
+  startedAt: number
+}
+
+const WORKER_REQUEST_TIMEOUT_MS = 10000
+
 function resolveRipgrepPath(): string {
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { rgPath } = require('@vscode/ripgrep')
-    return app.isPackaged ? rgPath.replace('app.asar', 'app.asar.unpacked') : rgPath
+    const unpackedPath = app.isPackaged ? rgPath.replace('app.asar', 'app.asar.unpacked') : rgPath
+    if (existsSync(unpackedPath)) return unpackedPath
+    if (existsSync(rgPath)) return rgPath
+    perfTraceLogger.record('main:ripgrep-binary-missing', {
+      rgPath,
+      unpackedPath,
+      fallback: 'rg'
+    })
+    return 'rg'
   } catch {
     return 'rg'
-  }
-}
-
-function buildRipgrepArgs(options: RipgrepSearchOptions): string[] {
-  const args = [
-    '--json',
-    '--no-heading',
-    '--color', 'never',
-    '--max-columns', '500',
-    '--max-columns-preview'
-  ]
-
-  if (!options.isCaseSensitive) args.push('-i')
-  if (options.isWholeWord) args.push('-w')
-
-  if (options.isRegex) {
-    args.push('-e', options.query)
-  } else {
-    args.push('-F', '-e', options.query)
-  }
-
-  if (options.includeGlob) {
-    for (const glob of options.includeGlob.split(',')) {
-      const trimmed = glob.trim()
-      if (trimmed) args.push('--glob', trimmed)
-    }
-  }
-
-  if (options.excludeGlob) {
-    for (const glob of options.excludeGlob.split(',')) {
-      const trimmed = glob.trim()
-      if (trimmed) args.push('--glob', `!${trimmed}`)
-    }
-  }
-
-  args.push('--max-count', '200')
-  args.push('.')
-  return args
-}
-
-function parseRipgrepLine(line: string): RipgrepMatch | null {
-  try {
-    const payload = JSON.parse(line) as {
-      type?: string
-      data?: {
-        path?: { text?: string }
-        line_number?: number
-        lines?: { text?: string }
-        submatches?: Array<{ start: number; end: number }>
-      }
-    }
-    if (payload.type !== 'match' || !payload.data?.path?.text) return null
-
-    let file = payload.data.path.text
-    if (file.startsWith('./')) {
-      file = file.slice(2)
-    }
-
-    const submatch = payload.data.submatches?.[0]
-    return {
-      file,
-      line: payload.data.line_number ?? 1,
-      column: submatch ? submatch.start + 1 : 1,
-      matchLength: submatch ? submatch.end - submatch.start : 0,
-      lineContent: (payload.data.lines?.text ?? '').replace(/\n$/, '')
-    }
-  } catch {
-    return null
   }
 }
 
 let searchCounter = 0
 
 export class RipgrepSearchManager {
-  private activeProcess: ChildProcess | null = null
+  private worker: Worker | null = null
+  private nextRequestId = 1
+  private pending = new Map<number, PendingRequest>()
   private activeSearchId: string | null = null
   private rgPath: string | null = null
+  private mainWindow: BrowserWindow | null = null
+
+  start(mainWindow: BrowserWindow, options: RipgrepSearchOptions): string {
+    this.cancel()
+    this.mainWindow = mainWindow
+    const searchId = typeof options.searchId === 'string' && options.searchId.trim()
+      ? options.searchId.trim()
+      : `search-${++searchCounter}-${Date.now()}`
+    this.activeSearchId = searchId
+    const rgPath = this.getRipgrepPath()
+
+    setImmediate(() => {
+      if (this.activeSearchId !== searchId || mainWindow.isDestroyed()) return
+      void mainWorkScheduler.enqueue(
+        {
+          lane: 'background-index',
+          key: `project-search:start:${searchId}`,
+          ownerId: 'project-search',
+          label: 'project content search start',
+          timeoutMs: WORKER_REQUEST_TIMEOUT_MS,
+          concurrencyKey: 'project-search',
+          concurrencyLimit: 1
+        },
+        () => this.request('start', { searchId, rgPath, options })
+      ).catch((error) => {
+        if (this.activeSearchId !== searchId || mainWindow.isDestroyed()) return
+        perfTraceLogger.record('main:ripgrep-worker-start-error', {
+          searchId,
+          error: String(error)
+        })
+        mainWindow.webContents.send('project:search-done', {
+          searchId,
+          matchCount: 0,
+          fileCount: 0,
+          durationMs: 0,
+          cancelled: false
+        } satisfies RipgrepSearchStats)
+      })
+    })
+
+    return searchId
+  }
+
+  cancel(): void {
+    const searchId = this.activeSearchId
+    this.activeSearchId = null
+    if (!this.worker) return
+    void this.request('cancel', { searchId }).catch(() => {})
+  }
+
+  dispose(): void {
+    this.cancel()
+    for (const [id, pending] of this.pending) {
+      clearTimeout(pending.timer)
+      pending.reject(new Error('Ripgrep search worker disposed'))
+      this.pending.delete(id)
+    }
+    if (this.worker) {
+      this.worker.terminate().catch(() => {})
+      this.worker = null
+    }
+  }
 
   private getRipgrepPath(): string {
     if (!this.rgPath) {
@@ -125,132 +163,103 @@ export class RipgrepSearchManager {
     return this.rgPath
   }
 
-  start(mainWindow: BrowserWindow, options: RipgrepSearchOptions): string {
-    this.cancel()
+  private ensureWorker(): Worker {
+    if (this.worker) return this.worker
 
-    const searchId = `search-${++searchCounter}-${Date.now()}`
-    this.activeSearchId = searchId
-    const startTime = Date.now()
-    const maxResults = options.maxResults ?? 5000
-
-    let process: ChildProcess
-    try {
-      process = spawn(this.getRipgrepPath(), buildRipgrepArgs(options), {
-        cwd: options.rootPath,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        windowsHide: true
+    const workerPath = join(__dirname, 'ripgrep-search-worker-entry.js')
+    this.worker = new Worker(workerPath)
+    this.worker.on('message', (message: WorkerResponse | WorkerEvent) => {
+      if ('event' in message) {
+        this.handleWorkerEvent(message)
+      } else {
+        this.handleResponse(message)
+      }
+    })
+    this.worker.on('error', (error) => {
+      perfTraceLogger.record('main:ripgrep-worker-error', { error: String(error) })
+    })
+    this.worker.on('exit', (code) => {
+      perfTraceLogger.record('main:ripgrep-worker-exit', {
+        code,
+        pending: this.pending.size
       })
-    } catch {
-      mainWindow.webContents.send('project:search-done', {
-        searchId,
-        matchCount: 0,
-        fileCount: 0,
-        durationMs: 0,
-        cancelled: false
-      } satisfies RipgrepSearchStats)
-      return searchId
-    }
-
-    this.activeProcess = process
-
-    let matchCount = 0
-    let lineBuffer = ''
-    let limitReached = false
-    const files = new Set<string>()
-    let batch: RipgrepMatch[] = []
-    let batchTimer: ReturnType<typeof setTimeout> | null = null
-
-    const flushBatch = () => {
-      if (batchTimer) {
-        clearTimeout(batchTimer)
-        batchTimer = null
-      }
-      if (batch.length > 0 && this.activeSearchId === searchId) {
-        mainWindow.webContents.send('project:search-result', searchId, batch)
-        batch = []
-      }
-    }
-
-    const scheduleBatch = () => {
-      if (!batchTimer) {
-        batchTimer = setTimeout(flushBatch, 50)
-      }
-    }
-
-    process.stdout?.on('data', (chunk: Buffer) => {
-      if (limitReached) return
-      lineBuffer += chunk.toString('utf-8')
-      const lines = lineBuffer.split('\n')
-      lineBuffer = lines.pop() ?? ''
-
-      for (const line of lines) {
-        if (!line.trim()) continue
-        const match = parseRipgrepLine(line)
-        if (!match) continue
-
-        matchCount += 1
-        files.add(match.file)
-        batch.push(match)
-
-        if (matchCount >= maxResults) {
-          limitReached = true
-          process.kill('SIGTERM')
-          break
-        }
-
-        if (batch.length >= 30) {
-          flushBatch()
-        } else {
-          scheduleBatch()
-        }
-      }
+      this.rejectAllPending(new Error(`Ripgrep worker exited with code ${code}`))
+      this.worker = null
+      this.activeSearchId = null
     })
-
-    process.stderr?.on('data', () => {
-      // Ignore ripgrep warnings.
-    })
-
-    const finish = () => {
-      if (lineBuffer.trim() && !limitReached) {
-        const match = parseRipgrepLine(lineBuffer)
-        if (match) {
-          matchCount += 1
-          files.add(match.file)
-          batch.push(match)
-        }
-      }
-      flushBatch()
-      if (this.activeSearchId !== searchId) return
-      mainWindow.webContents.send('project:search-done', {
-        searchId,
-        matchCount,
-        fileCount: files.size,
-        durationMs: Date.now() - startTime,
-        cancelled: limitReached
-      } satisfies RipgrepSearchStats)
-      if (this.activeProcess === process) {
-        this.activeProcess = null
-      }
-    }
-
-    process.on('close', finish)
-    process.on('error', finish)
-    return searchId
+    return this.worker
   }
 
-  cancel(): void {
-    if (this.activeProcess) {
-      try {
-        this.activeProcess.kill('SIGTERM')
-      } catch {
-        // Ignore.
-      }
-      this.activeProcess = null
+  private request<T = unknown>(method: WorkerMethod, payload: Record<string, unknown>): Promise<T> {
+    const worker = this.ensureWorker()
+    const id = this.nextRequestId++
+    const startedAt = Date.now()
+
+    return new Promise<T>((resolveTask, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id)
+        perfTraceLogger.record('main:ripgrep-worker-timeout', {
+          id,
+          method,
+          elapsedMs: Date.now() - startedAt
+        })
+        reject(new Error(`Ripgrep worker request timed out: ${method}`))
+      }, WORKER_REQUEST_TIMEOUT_MS)
+
+      this.pending.set(id, {
+        resolve: resolveTask as (value: unknown) => void,
+        reject,
+        timer,
+        method,
+        startedAt
+      })
+
+      worker.postMessage({ id, method, payload } satisfies WorkerRequest)
+    })
+  }
+
+  private handleWorkerEvent(message: WorkerEvent): void {
+    const mainWindow = this.mainWindow
+    if (!mainWindow || mainWindow.isDestroyed()) return
+
+    if (message.event === 'result') {
+      if (this.activeSearchId !== message.searchId) return
+      mainWindow.webContents.send('project:search-result', message.searchId, message.matches)
+      return
     }
+
+    if (this.activeSearchId !== message.stats.searchId) return
+    mainWindow.webContents.send('project:search-done', message.stats)
     this.activeSearchId = null
   }
 
-  dispose(): void {
-    this.cancel()
+  private handleResponse(message: WorkerResponse): void {
+    const pending = this.pending.get(message.id)
+    if (!pending) return
+    clearTimeout(pending.timer)
+    this.pending.delete(message.id)
+
+    const elapsedMs = Date.now() - pending.startedAt
+    if (elapsedMs > 250) {
+      perfTraceLogger.record('main:ripgrep-worker-latency', {
+        id: message.id,
+        method: pending.method,
+        elapsedMs
+      })
+    }
+
+    if (message.ok) {
+      pending.resolve(message.result)
+    } else {
+      pending.reject(new Error(message.error || `Ripgrep worker failed: ${pending.method}`))
+    }
+  }
+
+  private rejectAllPending(error: Error): void {
+    for (const [id, pending] of this.pending) {
+      clearTimeout(pending.timer)
+      pending.reject(error)
+      this.pending.delete(id)
+    }
   }
 }

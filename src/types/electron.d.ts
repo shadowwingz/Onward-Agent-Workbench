@@ -83,6 +83,7 @@ export interface TerminalAPI {
   ) => Promise<{ ok: boolean; phase?: 'content' | 'enter'; error?: string }>
   getInputCapabilities: (id: string) => Promise<TerminalInputCapabilities>
   setBufferFastPath: (id: string, enabled: boolean) => void
+  setOutputVisibility: (id: string, visible: boolean) => void
   notifyInteractiveInput: (id: string) => void
   dispose: (id: string) => Promise<boolean>
   onData: (callback: (id: string, data: string) => void) => () => void
@@ -188,6 +189,8 @@ import type {
 export interface AppStateAPI {
   load: () => Promise<AppState>
   save: (state: AppState) => Promise<boolean>
+  savePatch: (patch: Partial<AppState>) => Promise<boolean>
+  flush: () => Promise<boolean>
   onFlushPendingState: (callback: () => void | Promise<void>) => void
 }
 
@@ -490,6 +493,7 @@ export interface ProjectSqliteExecuteResult {
 }
 
 export interface ProjectSearchOptions {
+  searchId?: string
   rootPath: string
   query: string
   isRegex: boolean
@@ -545,6 +549,9 @@ export interface GitAPI {
 // Project Editor API
 export interface ProjectAPI {
   listDirectory: (root: string, path: string) => Promise<ProjectListResult>
+  buildFileIndex: (root: string) => Promise<string[]>
+  searchFilenames: (root: string, query: string, limit?: number) => Promise<string[]>
+  invalidateFileIndex: (root: string) => Promise<{ success: boolean }>
   readFile: (root: string, path: string) => Promise<ProjectReadResult>
   saveFile: (root: string, path: string, content: string) => Promise<ProjectSaveResult>
   createFile: (root: string, path: string, content?: string) => Promise<ProjectActionResult>
@@ -715,8 +722,31 @@ export interface GitRuntimeMetrics {
   updatedAt: number
 }
 
+export interface EventLoopStallMetrics {
+  resetAt: number
+  totalSamples: number
+  stallCount: number
+  maxDriftMs: number
+  over100Ms: number
+  over250Ms: number
+  over500Ms: number
+  over1000Ms: number
+  over3000Ms: number
+  over6000Ms: number
+  lastStallAt: number | null
+  recentStalls: Array<{ ts: number; driftMs: number }>
+}
+
+export interface PerfTraceInfo {
+  enabled: boolean
+  logPath: string | null
+  latestPointerPath: string
+  eventLoop: EventLoopStallMetrics
+}
+
 export interface DebugAPI {
   enabled: boolean
+  perfTraceEnabled: boolean
   profile: boolean
   profileCwd: string | null
   autotest: boolean
@@ -727,6 +757,10 @@ export interface DebugAPI {
   focusWindow: () => Promise<boolean>
   getAppMetrics: () => Promise<Record<string, unknown>[]>
   getGitRuntimeMetrics: () => Promise<GitRuntimeMetrics>
+  getMainWorkMetrics: () => Promise<Record<string, unknown>>
+  getPerfTraceInfo: () => Promise<PerfTraceInfo>
+  resetPerfTraceMetrics: () => Promise<EventLoopStallMetrics>
+  perfTrace: (event: string, data?: Record<string, unknown>) => void
   feedbackReset: () => Promise<void>
   feedbackSetMockIssues: (issues: FeedbackDebugRemoteIssue[]) => Promise<void>
   feedbackGetLastOpenedUrl: () => Promise<string | null>

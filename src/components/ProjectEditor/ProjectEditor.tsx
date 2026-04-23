@@ -3762,6 +3762,7 @@ export function ProjectEditor({
     const root = rootRef.current
     if (!root) return
     fileIndexInvalidate(root)
+    void window.electronAPI.project.invalidateFileIndex(root)
   }, [])
 
   const getFileIndex = useCallback(() => {
@@ -3784,26 +3785,7 @@ export function ProjectEditor({
     setIsIndexing(true)
     try {
       const result = await fileIndexEnsure(root, async (cwd) => {
-        const collected: string[] = []
-        const queue: string[] = ['']
-        while (queue.length > 0) {
-          const current = queue.shift() ?? ''
-          const res = await window.electronAPI.project.listDirectory(cwd, current)
-          if (!res.success) {
-            if (DEBUG_PROJECT_EDITOR) {
-              debugLog('index:build:entry-error', { root: cwd, path: current, error: res.error })
-            }
-            continue
-          }
-          for (const entry of res.entries) {
-            if (entry.type === 'dir') {
-              queue.push(entry.path)
-            } else {
-              collected.push(entry.path)
-            }
-          }
-        }
-        return collected
+        return await window.electronAPI.project.buildFileIndex(cwd)
       })
       if (DEBUG_PROJECT_EDITOR) {
         debugLog('index:build:done', {
@@ -3827,7 +3809,7 @@ export function ProjectEditor({
     if (index.length === 0) {
       index = await buildFileIndex()
     }
-    setSearchResults(buildFuzzyResults('', index))
+    setSearchResults(root ? await window.electronAPI.project.searchFilenames(root, '', 50) : buildFuzzyResults('', index))
     setTimeout(() => searchInputRef.current?.focus(), 0)
   }, [buildFileIndex])
 
@@ -4099,10 +4081,29 @@ export function ProjectEditor({
   useEffect(() => {
     if (!searchOpen || isIndexing) return
     const root = rootRef.current
-    const files = root ? fileIndexSnapshot(root).files : []
-    const results = buildFuzzyResults(searchQuery, files)
-    setSearchResults(results)
-    setSearchActiveIndex(0)
+    if (!root) {
+      setSearchResults([])
+      setSearchActiveIndex(0)
+      return
+    }
+    let cancelled = false
+    window.electronAPI.project.searchFilenames(root, searchQuery, 50)
+      .then((results) => {
+        if (cancelled) return
+        setSearchResults(results)
+        setSearchActiveIndex(0)
+      })
+      .catch((error) => {
+        if (cancelled) return
+        if (DEBUG_PROJECT_EDITOR) {
+          debugLog('index:search:error', { root, query: searchQuery, error: String(error) })
+        }
+        setSearchResults([])
+        setSearchActiveIndex(0)
+      })
+    return () => {
+      cancelled = true
+    }
   }, [searchOpen, searchQuery, isIndexing, fileIndexVersion])
 
   useEffect(() => {
@@ -6407,6 +6408,7 @@ export function ProjectEditor({
 
     await refreshDirectory(baseDir)
     fileIndexAddFile(root, targetPath)
+    void window.electronAPI.project.invalidateFileIndex(root)
     await openFile(targetPath, 'user', { trackRecent: true })
     showStatus('success', t('projectEditor.fileCreated'))
   }, [openFile, refreshDirectory, requestPrompt, selectedPath, showStatus, t, tree])
@@ -6441,6 +6443,7 @@ export function ProjectEditor({
     }
 
     await refreshDirectory(baseDir)
+    void window.electronAPI.project.invalidateFileIndex(root)
     showStatus('success', t('projectEditor.folderCreated'))
   }, [refreshDirectory, requestPrompt, selectedPath, showStatus, t, tree])
 
@@ -6491,6 +6494,7 @@ export function ProjectEditor({
 
     await refreshDirectory(parentPath)
     fileIndexRenameFile(root, sourcePath, nextPath)
+    void window.electronAPI.project.invalidateFileIndex(root)
     showStatus('success', t('projectEditor.renameSuccess'))
   }, [activeFilePath, refreshDirectory, replaceQuickFileEntries, requestPrompt, selectedPath, showStatus, t, tree])
 
@@ -6544,6 +6548,7 @@ export function ProjectEditor({
     setSelectedPath(null)
     await refreshDirectory(parentPath)
     fileIndexRemoveFile(root, targetPath)
+    void window.electronAPI.project.invalidateFileIndex(root)
     showStatus('success', t('projectEditor.deleteSuccess'))
   }, [activeFilePath, refreshDirectory, removeQuickFileEntries, requestConfirm, selectedPath, showStatus, t, tree])
 

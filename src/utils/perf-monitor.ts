@@ -6,10 +6,11 @@
 /**
  * Lightweight renderer-side performance monitor.
  *
- * Activated when ONWARD_DEBUG=1.  Collects counters at 1-second granularity
- * and prints a structured log line.  Also exposed as window.__perfMonitor
- * so autotest / DevTools can query snapshots programmatically.
+ * Activated when ONWARD_DEBUG=1 or ONWARD_PERF_TRACE=1.  Collects counters
+ * at 1-second granularity and emits structured diagnostics.
  */
+
+import { perfTrace } from './perf-trace'
 
 export interface PerfSnapshot {
   ts: number
@@ -195,16 +196,19 @@ class PerfMonitor {
       inputLatencyMaxMs: +inputMax.toFixed(1)
     }
 
-    // Log to console
-    const ipcMB = (snap.ipcDataBytes / (1024 * 1024)).toFixed(2)
-    console.log(
-      `[PerfMon] fps=${snap.fps} drops=${snap.frameDrops} longest=${snap.longestFrameMs}ms` +
-      ` writes=${snap.xtermWriteCount} writeMax=${snap.xtermWriteMaxMs}ms` +
-      ` ipc=${snap.ipcDataMsgCount} ipcMB=${ipcMB}` +
-      ` hidden=${snap.hiddenTermWriteCount}` +
-      ` webgl=${snap.webglContextCount} renders=${snap.reactRenderCount}` +
-      (inputCount > 0 ? ` inputAvg=${snap.inputLatencyAvgMs}ms inputMax=${snap.inputLatencyMaxMs}ms` : '')
-    )
+    if (window.electronAPI?.debug?.enabled) {
+      const ipcMB = (snap.ipcDataBytes / (1024 * 1024)).toFixed(2)
+      console.log(
+        `[PerfMon] fps=${snap.fps} drops=${snap.frameDrops} longest=${snap.longestFrameMs}ms` +
+        ` writes=${snap.xtermWriteCount} writeMax=${snap.xtermWriteMaxMs}ms` +
+        ` ipc=${snap.ipcDataMsgCount} ipcMB=${ipcMB}` +
+        ` hidden=${snap.hiddenTermWriteCount}` +
+        ` webgl=${snap.webglContextCount} renders=${snap.reactRenderCount}` +
+        (inputCount > 0 ? ` inputAvg=${snap.inputLatencyAvgMs}ms inputMax=${snap.inputLatencyMaxMs}ms` : '')
+      )
+    }
+
+    perfTrace('renderer:perf-snapshot', snap as unknown as Record<string, unknown>)
 
     // Store in history
     this.history.push(snap)
@@ -239,8 +243,8 @@ export const perfMonitor = new PerfMonitor()
 // Auto-start when debug mode is enabled
 if (typeof window !== 'undefined') {
   try {
-    const debugEnabled = (window as any).electronAPI?.debug?.enabled
-    if (debugEnabled) {
+    const debugAPI = (window as any).electronAPI?.debug
+    if (debugAPI?.enabled || debugAPI?.perfTraceEnabled) {
       perfMonitor.start()
     }
   } catch {

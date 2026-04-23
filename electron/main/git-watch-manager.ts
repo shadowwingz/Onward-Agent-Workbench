@@ -3,15 +3,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { basename } from 'path'
+import { basename, resolve } from 'path'
 import {
   getTerminalCwd,
-  getGitRepoMeta,
-  getGitRepoFingerprint,
-  getGitBranchAndStatus,
+  type GitBranchAndStatus,
   type TerminalGitInfo
 } from './git-utils'
 import { gitRuntimeManager } from './git-runtime-manager'
+import { perfTraceLogger } from './perf-trace-logger'
+import { gitStatusWorkerClient } from './git-status-worker-client'
 
 type TerminalInfoEmitter = (terminalId: string, info: TerminalGitInfo) => void
 
@@ -37,6 +37,17 @@ type RepoBoostState = {
   boostedUntil: number
 }
 
+type RepoFingerprintCacheEntry = {
+  value: string
+  at: number
+}
+
+type RepoStatusCacheEntry = {
+  fingerprint: string
+  value: GitBranchAndStatus
+  at: number
+}
+
 const ENABLE_ADAPTIVE_POLLING = process.env.ONWARD_GIT_POLLING !== '0'
 const GIT_WATCH_DEBUG = process.env.ONWARD_DEBUG === '1' || process.env.ELECTRON_ENABLE_LOGGING === '1'
 
@@ -53,10 +64,16 @@ const STATUS_REFRESH_QUIET_MS = 7000
 
 const ACTIVITY_TRIGGER_MS = 120
 const MANUAL_TRIGGER_MS = 80
+const REPO_FINGERPRINT_CACHE_MS = 500
+const REPO_STATUS_BURST_CACHE_MS = 1000
 
 export class GitWatchManager {
   private entries = new Map<string, WatchEntry>()
   private repoBoostMap = new Map<string, RepoBoostState>()
+  private repoFingerprintCache = new Map<string, RepoFingerprintCacheEntry>()
+  private repoFingerprintInFlight = new Map<string, Promise<string>>()
+  private repoStatusCache = new Map<string, RepoStatusCacheEntry>()
+  private repoStatusInFlight = new Map<string, Promise<GitBranchAndStatus>>()
   private focusedTerminalId: string | null = null
 
   // Diagnostic counters (1-second granularity)
@@ -65,10 +82,17 @@ export class GitWatchManager {
   private diagTimer: ReturnType<typeof setInterval> | null = null
 
   constructor(private emit: TerminalInfoEmitter) {
-    if (GIT_WATCH_DEBUG) {
+    if (GIT_WATCH_DEBUG || perfTraceLogger.isEnabled()) {
       this.diagTimer = setInterval(() => {
         if (this.diagActivityCalls > 0 || this.diagPollRuns > 0) {
-          console.log(`[PerfDiag] GitWatch activityCalls/s=${this.diagActivityCalls} pollRuns/s=${this.diagPollRuns}`)
+          if (GIT_WATCH_DEBUG) {
+            console.log(`[PerfDiag] GitWatch activityCalls/s=${this.diagActivityCalls} pollRuns/s=${this.diagPollRuns}`)
+          }
+          perfTraceLogger.record('main:gitwatch-summary', {
+            activityCallsPerSecond: this.diagActivityCalls,
+            pollRunsPerSecond: this.diagPollRuns,
+            watchedTerminals: this.entries.size
+          })
           this.diagActivityCalls = 0
           this.diagPollRuns = 0
         }
@@ -125,24 +149,32 @@ export class GitWatchManager {
     })
     this.entries.clear()
     this.repoBoostMap.clear()
+    this.repoFingerprintCache.clear()
+    this.repoFingerprintInFlight.clear()
+    this.repoStatusCache.clear()
+    this.repoStatusInFlight.clear()
     this.focusedTerminalId = null
+    gitStatusWorkerClient.dispose()
   }
 
   notifyTerminalActivity(terminalId: string): void {
     const entry = this.entries.get(terminalId)
     if (!entry) return
 
-    if (GIT_WATCH_DEBUG) this.diagActivityCalls += 1
-    entry.lastActivityAt = Date.now()
-    if (entry.repoRoot && this.focusedTerminalId === terminalId) {
-      this.boostRepo(entry.repoRoot)
-    }
+    if (GIT_WATCH_DEBUG || perfTraceLogger.isEnabled()) this.diagActivityCalls += 1
+    const hasFocusedBoost = Boolean(entry.repoRoot && this.focusedTerminalId === terminalId && this.isRepoBoosted(entry.repoRoot))
     if (entry.inFlight) {
-      entry.pendingPoll = true
+      if (hasFocusedBoost) {
+        entry.pendingPoll = true
+      }
       return
     }
 
-    this.schedulePoll(entry, ACTIVITY_TRIGGER_MS)
+    if (hasFocusedBoost) {
+      this.schedulePoll(entry, ACTIVITY_TRIGGER_MS)
+    } else if (!entry.pollTimer) {
+      this.schedulePoll(entry, this.getPollInterval(entry))
+    }
   }
 
   notifyTerminalGitUpdate(terminalId: string): void {
@@ -226,7 +258,7 @@ export class GitWatchManager {
 
     entry.inFlight = true
     entry.lastPollAt = Date.now()
-    if (GIT_WATCH_DEBUG) this.diagPollRuns += 1
+    if (GIT_WATCH_DEBUG || perfTraceLogger.isEnabled()) this.diagPollRuns += 1
 
     try {
       await this.refreshInfo(entry, reason)
@@ -305,7 +337,12 @@ export class GitWatchManager {
       return
     }
 
-    const meta = await getGitRepoMeta(cwd)
+    const meta = await gitStatusWorkerClient.getRepoMeta(cwd, {
+      priority: 'high',
+      repoKey: cwd,
+      dedupeKey: `gitwatch:repo-meta:${resolve(cwd)}`,
+      label: 'gitwatch worker repo meta'
+    })
     if (!meta.isRepo || !meta.repoRoot) {
       entry.repoRoot = null
       entry.gitDir = null
@@ -329,19 +366,25 @@ export class GitWatchManager {
       this.boostRepo(entry.repoRoot, !this.isRepoBoosted(entry.repoRoot))
     }
 
-    const fingerprint = await getGitRepoFingerprint(meta.gitDir, meta.repoRoot)
+    const fingerprint = await this.getRepoFingerprint(meta.gitDir, meta.repoRoot)
     const fingerprintChanged = fingerprint !== entry.lastFingerprint
     entry.lastFingerprint = fingerprint
 
     const now = Date.now()
-    const statusStale = now - entry.lastStatusAt >= this.getStatusRefreshInterval(entry)
+    const statusRefreshInterval = this.getStatusRefreshInterval(entry)
+    const statusStale = now - entry.lastStatusAt >= statusRefreshInterval
     const shouldRefresh = cwdChanged || repoChanged || fingerprintChanged || entry.manualRefreshPending || !entry.lastInfo || statusStale
     if (!shouldRefresh) {
       return
     }
 
     const refreshStartedAt = Date.now()
-    const snapshot = await getGitBranchAndStatus(meta.repoRoot)
+    const snapshot = await this.getRepoStatusSnapshot(
+      meta.repoRoot,
+      fingerprint,
+      statusRefreshInterval,
+      cwdChanged || repoChanged || fingerprintChanged || entry.manualRefreshPending || !entry.lastInfo
+    )
     const repoName = basename(meta.repoRoot.replace(/[\\/]+$/, '')) || null
 
     this.emitInfo(entry, {
@@ -355,6 +398,91 @@ export class GitWatchManager {
     entry.manualRefreshPending = false
 
     gitRuntimeManager.recordTitleRefreshLatency(Date.now() - refreshStartedAt)
+  }
+
+  private getRepoCacheKey(repoRoot: string): string {
+    const normalized = resolve(repoRoot)
+    return process.platform === 'win32' ? normalized.toLowerCase() : normalized
+  }
+
+  private getFingerprintCacheKey(gitDir: string | null, repoRoot: string): string {
+    const rootKey = this.getRepoCacheKey(repoRoot)
+    const gitKey = gitDir ? this.getRepoCacheKey(gitDir) : '<default>'
+    return `${rootKey}|${gitKey}`
+  }
+
+  private async getRepoFingerprint(gitDir: string | null, repoRoot: string): Promise<string> {
+    const key = this.getFingerprintCacheKey(gitDir, repoRoot)
+    const now = Date.now()
+    const cached = this.repoFingerprintCache.get(key)
+    if (cached && now - cached.at < REPO_FINGERPRINT_CACHE_MS) {
+      return cached.value
+    }
+
+    const inFlight = this.repoFingerprintInFlight.get(key)
+    if (inFlight) {
+      return inFlight
+    }
+
+    const task = gitStatusWorkerClient.getRepoFingerprint(gitDir, repoRoot, {
+      priority: 'low',
+      repoKey: repoRoot,
+      dedupeKey: `gitwatch:repo-fingerprint:${key}`,
+      label: 'gitwatch worker repo fingerprint'
+    })
+      .then((value) => {
+        this.repoFingerprintCache.set(key, { value, at: Date.now() })
+        return value
+      })
+      .finally(() => {
+        this.repoFingerprintInFlight.delete(key)
+      })
+
+    this.repoFingerprintInFlight.set(key, task)
+    return task
+  }
+
+  private async getRepoStatusSnapshot(
+    repoRoot: string,
+    fingerprint: string,
+    refreshIntervalMs: number,
+    forceRefresh: boolean
+  ): Promise<GitBranchAndStatus> {
+    const key = this.getRepoCacheKey(repoRoot)
+    const now = Date.now()
+    const cached = this.repoStatusCache.get(key)
+    const burstCacheMs = Math.min(REPO_STATUS_BURST_CACHE_MS, Math.max(100, refreshIntervalMs))
+    if (cached && cached.fingerprint === fingerprint) {
+      const ageMs = now - cached.at
+      if (ageMs < burstCacheMs || (!forceRefresh && ageMs < refreshIntervalMs)) {
+        return cached.value
+      }
+    }
+
+    const inFlight = this.repoStatusInFlight.get(key)
+    if (inFlight) {
+      return inFlight
+    }
+
+    const priority = this.isRepoBoosted(repoRoot) ? 'normal' : 'low'
+    const task = gitStatusWorkerClient.getBranchAndStatus(repoRoot, {
+      priority,
+      repoKey: repoRoot,
+      repoConcurrencyLimit: 1,
+      includeUntracked: false,
+      dedupeKey: `gitwatch:branch-status:${key}`,
+      label: 'gitwatch worker branch status'
+    })
+      .then((value) => {
+        this.repoStatusCache.set(key, { fingerprint, value, at: Date.now() })
+        return value
+      })
+      .finally(() => {
+        this.repoStatusInFlight.delete(key)
+      })
+
+    this.repoStatusInFlight.set(key, task)
+    return task
   }
 
   private emitInfo(entry: WatchEntry, info: TerminalGitInfo): void {
