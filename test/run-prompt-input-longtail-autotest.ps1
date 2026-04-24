@@ -94,7 +94,9 @@ $ResultDir = Join-Path $RootDir "test\results\prompt-input-longtail"
 New-Item -ItemType Directory -Force $ResultDir | Out-Null
 
 if (-not $LogFile) {
-  $LogFile = Join-Path $env:TEMP "onward-prompt-input-longtail-autotest.log"
+  $RepoRoot = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
+$LogFile = Join-Path $RepoRoot "traces/test-logs/onward-prompt-input-longtail-autotest.log"
+New-Item -ItemType Directory -Force (Split-Path -Parent $LogFile) | Out-Null
 }
 
 if (-not $ResultFile) {

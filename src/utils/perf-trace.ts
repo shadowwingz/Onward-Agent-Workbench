@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { PERF_TRACE_EVENT } from './perf-trace-names'
+
 const INPUT_TRACE_RATE_LIMIT_PER_SECOND = 60
 
 let installed = false
@@ -72,7 +74,7 @@ function installPromptInputTrace(): void {
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         const paintedAt = performance.now()
-        perfTrace('renderer:prompt-input-paint', {
+        perfTrace(PERF_TRACE_EVENT.RENDERER_PROMPT_INPUT_PAINT, {
           targetKind,
           valueLength,
           selectionStart,
@@ -96,7 +98,7 @@ function installRendererStallTrace(): void {
     const driftMs = now - expectedAt
     expectedAt = now + intervalMs
     if (driftMs >= stallThresholdMs) {
-      perfTrace('renderer:event-loop-stall', {
+      perfTrace(PERF_TRACE_EVENT.RENDERER_EVENT_LOOP_STALL, {
         driftMs: +driftMs.toFixed(1),
         intervalMs,
         hasPromptFocus: Boolean(document.activeElement?.classList.contains('prompt-editor-content')),
@@ -112,7 +114,7 @@ function installRendererStallTrace(): void {
     const deltaMs = now - lastFrameAt
     lastFrameAt = now
     if (deltaMs >= frameThresholdMs) {
-      perfTrace('renderer:frame-stall', {
+      perfTrace(PERF_TRACE_EVENT.RENDERER_FRAME_STALL, {
         frameDeltaMs: +deltaMs.toFixed(1),
         hasPromptFocus: Boolean(document.activeElement?.classList.contains('prompt-editor-content')),
         hasContextMenu: Boolean(document.querySelector('.prompt-context-menu'))
@@ -131,7 +133,7 @@ function installLongTaskTrace(): void {
   try {
     const observer = new PerformanceObserver((list) => {
       for (const entry of list.getEntries()) {
-        perfTrace('renderer:longtask', {
+        perfTrace(PERF_TRACE_EVENT.RENDERER_LONGTASK, {
           name: entry.name,
           startTimeMs: +entry.startTime.toFixed(1),
           durationMs: +entry.duration.toFixed(1),
@@ -149,7 +151,7 @@ function installLongTaskTrace(): void {
 export function installRendererPerfTrace(): void {
   if (installed || !isPerfTraceEnabled()) return
   installed = true
-  perfTrace('renderer:trace-start', {
+  perfTrace(PERF_TRACE_EVENT.RENDERER_TRACE_START, {
     userAgent: navigator.userAgent,
     url: window.location.href
   })

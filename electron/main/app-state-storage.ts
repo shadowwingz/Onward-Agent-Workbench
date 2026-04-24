@@ -8,6 +8,7 @@ import { join } from 'path'
 import { readFileSync, existsSync, renameSync } from 'fs'
 import { appStateWorkerClient } from './app-state-worker-client'
 import { perfTraceLogger } from './perf-trace-logger'
+import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 
 /**
  * Prompt data structure
@@ -786,7 +787,7 @@ class AppStateStorage {
     const snapshot = this.state
     const promise = appStateWorkerClient.saveSnapshot(this.storagePath, snapshot)
       .then((result) => {
-        perfTraceLogger.record('main:app-state-save', {
+        perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_APP_STATE_SAVE, {
           version,
           bytes: result.bytes,
           workerDurationMs: result.durationMs,
@@ -796,7 +797,7 @@ class AppStateStorage {
       })
       .catch((error) => {
         console.error('Failed to save app state:', error)
-        perfTraceLogger.record('main:app-state-save-error', {
+        perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_APP_STATE_SAVE_ERROR, {
           version,
           elapsedMs: Date.now() - startedAt,
           error: String(error)

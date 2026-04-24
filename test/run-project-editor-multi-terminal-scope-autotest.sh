@@ -4,11 +4,12 @@
 
 set -euo pipefail
 
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT_DIR/test/resolve-dev-app-bin.sh"
 APP_BIN="${1:-$(resolve_dev_app_bin "$ROOT_DIR" || true)}"
-LOG_FILE="${2:-/tmp/onward-project-editor-multi-terminal-scope-autotest.log}"
-
+LOG_FILE="${2:-$REPO_ROOT/traces/test-logs/project-editor-multi-terminal-scope-autotest.log}"
+mkdir -p "$(dirname "$LOG_FILE")"
 if [[ -z "$APP_BIN" || ! -x "$APP_BIN" ]]; then
   echo "ERROR: app binary not found or not executable: ${APP_BIN:-<empty>}" >&2
   echo "Run a development build first: rm -rf out release && pnpm dist:dev" >&2

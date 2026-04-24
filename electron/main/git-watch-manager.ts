@@ -12,6 +12,7 @@ import {
 import { gitRuntimeManager } from './git-runtime-manager'
 import { perfTraceLogger } from './perf-trace-logger'
 import { gitStatusWorkerClient } from './git-status-worker-client'
+import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 
 type TerminalInfoEmitter = (terminalId: string, info: TerminalGitInfo) => void
 
@@ -88,7 +89,7 @@ export class GitWatchManager {
           if (GIT_WATCH_DEBUG) {
             console.log(`[PerfDiag] GitWatch activityCalls/s=${this.diagActivityCalls} pollRuns/s=${this.diagPollRuns}`)
           }
-          perfTraceLogger.record('main:gitwatch-summary', {
+          perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_GITWATCH_SUMMARY, {
             activityCallsPerSecond: this.diagActivityCalls,
             pollRunsPerSecond: this.diagPollRuns,
             watchedTerminals: this.entries.size

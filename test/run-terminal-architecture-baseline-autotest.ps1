@@ -25,7 +25,9 @@ $ResultDir = Join-Path $RootDir "test\results\terminal-architecture-baseline"
 New-Item -ItemType Directory -Force $ResultDir | Out-Null
 
 if (-not $LogFile) {
-  $LogFile = Join-Path $env:TEMP "onward-terminal-architecture-baseline-autotest.log"
+  $RepoRoot = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
+$LogFile = Join-Path $RepoRoot "traces/test-logs/onward-terminal-architecture-baseline-autotest.log"
+New-Item -ItemType Directory -Force (Split-Path -Parent $LogFile) | Out-Null
 }
 
 if (-not $ResultFile) {

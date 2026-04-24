@@ -8,9 +8,11 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+REPO_ROOT="${REPO_ROOT:-$ROOT_DIR}"
 source "$ROOT_DIR/test/resolve-dev-app-bin.sh"
 APP_BIN="${1:-$(resolve_dev_app_bin "$ROOT_DIR" || true)}"
-LOG_FILE="${2:-/tmp/onward-terminal-focus-activation-autotest-$(date +%Y%m%d-%H%M%S).log}"
+LOG_FILE="${2:-$REPO_ROOT/traces/test-logs/terminal-focus-activation-autotest-$(date +%Y%m%d-%H%M%S).log}"
+mkdir -p "$(dirname "$LOG_FILE")"
 
 if [[ -z "$APP_BIN" || ! -x "$APP_BIN" ]]; then
   echo "ERROR: app binary not found or not executable: ${APP_BIN:-<empty>}" >&2

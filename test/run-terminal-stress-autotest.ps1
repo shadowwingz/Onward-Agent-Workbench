@@ -19,7 +19,9 @@ if (-not $AppBin) {
 }
 
 if (-not $LogFile) {
-  $LogFile = Join-Path $env:TEMP "onward-terminal-stress-autotest.log"
+  $RepoRoot = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
+$LogFile = Join-Path $RepoRoot "traces/test-logs/onward-terminal-stress-autotest.log"
+New-Item -ItemType Directory -Force (Split-Path -Parent $LogFile) | Out-Null
 }
 
 if (-not $AppBin -or -not (Test-Path $AppBin)) {

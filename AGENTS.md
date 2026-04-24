@@ -57,7 +57,17 @@ For platform-related commands, always consider these three platforms:
     - Before adding a new production dependency, verify its license is Apache-2.0 compatible (MIT, BSD, ISC, Apache-2.0 are safe; MPL-2.0 requires review; GPL/LGPL/AGPL are forbidden).
     - Every new source file must include the standard SPDX header: `SPDX-FileCopyrightText: 2026 OPPO` and `SPDX-License-Identifier: Apache-2.0`.
     - After adding new dependencies, run `pnpm generate-notices` to regenerate `ThirdPartyNotices.txt` and verify no incompatible licenses were introduced.
+- Hard rule — Trace artefact location: every runtime trace / profile / screenshot / coverage report / dev-mode log this repo produces must land under `<repoRoot>/traces/` (the directory is gitignored; `traces/.gitkeep` keeps the path on fresh clones). Production builds fall back to `userData/debug/` because end-users have no checkout; dev and autotest always resolve `traces/` in the repo (`ONWARD_REPO_ROOT` override for packaged autotest runs). Do not write traces to `/tmp/`, the Desktop, the user's Home, or anywhere else.
+- Hard rule — After capturing a perf trace: end the response with a one-liner that opens the trace in Perfetto UI — `bash infra/scripts/open_trace.sh traces/perf/<newest>.json` (the script boots a local `trace_processor_shell --httpd` + a version-pinned `ui.perfetto.dev` URL — zero cloud upload, zero UI/processor build drift). If the user says "open the trace", execute the command, don't just print it.
+- Hard rule — Per-feature perf instrumentation (dynamic): for **every** feature-type piece of work — new feature, bug fix, refactor — you MUST identify which code paths it introduces or touches and add a perf-trace event for each measurable path. Treat this as a dynamic decision per change, not a one-time checklist:
+    1. Enumerate the code paths the change adds or modifies. Classify each as main-thread work, renderer work, Worker / utility-process work, Web / DOM event handler, or user-input handler.
+    2. For every path that is on a hot loop, is latency-sensitive from the user's point of view, or could regress silently under load, register an event name in `src/utils/perf-trace-names.ts` and instrument it (`perfTraceLogger.record(…)` main, `perfTrace(…)` renderer).
+    3. Duration-bearing paths emit `ph='X'` spans (duration in ms in the payload); instantaneous events emit `ph='i'`.
+    4. Update `infra/trace.md` § 2 "Implemented trace events" with the new rows, and move anything you implement off the § 3 "Planned" list.
+    5. Regression coverage: if the event represents a user-visible perf signal, add a matching TXX row in `test/full-regression-checklist.md`.
+  `infra/trace.md` is the authoritative index — consult it before writing any perf-related code, and keep it current. This rule overrides any instinct to "add instrumentation later"; instrumentation is part of the feature's definition of done.
 - Debugging principles (performance / lag issues):
+    - **Data-first**: no performance optimization, lag diagnosis, or "experience" tweak without a trace in hand. When data is missing, report that a capture is needed and take one; do not guess the bottleneck from reading code.
     - Analyze the current code and the user's requirements first, and prioritize a detailed automated test plan. The test plan must include:
         1. Common paths
         2. High-frequency operation paths
@@ -69,6 +79,7 @@ For platform-related commands, always consider these three platforms:
     - Prioritize concurrency and reentrancy checks: determine whether polling, timers, or async tasks are stacking; add throttling / deduplication first.
     - Cleanup must be complete on close / switch: cancel pending worker, timer, idle, and raf tasks to prevent leftover work.
     - Keep the evidence chain closed: profiling, logs, and code must agree, with before / after comparison.
+    - **Event-name registry**: any new trace event must be registered in `src/utils/perf-trace-names.ts` before it is instrumented anywhere. `infra/trace.md` § 2 is the authoritative index; update it whenever an event is added, renamed, or retired.
 - Hard rule — Renderer scheduling and input responsiveness:
     - Before creating features, fixing bugs, or solving performance issues, consult `docs/Off-Renderer Threaded Design - Electron Refactor.md` to decide whether the implementation belongs on the Renderer thread or in an asynchronous Worker / main worker / utility process. This design decision is mandatory for any work that can affect input responsiveness, rendering cadence, AppState, terminal output, Git, search, file indexing, parsing, sanitization, serialization, or large-list processing.
     - The renderer must be treated primarily as the user input loop. Do not run terminal parsing, Git work, project search, DOM sanitization, large diff processing, or other expensive work directly on the renderer thread when it can be moved to the main process, a utility process, or a Worker Thread.
@@ -102,6 +113,12 @@ For platform-related commands, always consider these three platforms:
         3. **File-system operations**: path length limits, case sensitivity, reserved filenames (`CON`, `NUL`, etc. on Windows), symlink behavior, and file-locking semantics.
     - When writing or reviewing platform-related code, always ask: "Will this behave correctly on the other two platforms?" If unsure, add explicit handling or at minimum a `TODO(cross-platform)` comment explaining the risk.
     - Automated tests that touch any of the above areas should include platform-specific assertions or be clearly marked as platform-conditional.
+- Hard rule — New feature / bug-fix 5-step SOP:
+    1. Before writing code, add the FXX / TXX row to `test/full-regression-checklist.md` — even if it's just a `🚧 TODO` placeholder. No test registration, no implementation work.
+    2. Create `test/<suite>/` (for a new runner) or amend the existing suite. Every runner must carry an SPDX header and write its log to `<repoRoot>/traces/test-logs/<suite>.log`.
+    3. Fixtures go under `test/fixtures/<suite>/`. Reusable binaries live as real files, not base64 blobs in TS. Committed fixtures are excluded from the automated-test cleanup rule.
+    4. If the change has a perf dimension, add the new event name to `src/utils/perf-trace-names.ts` first, then instrument, then update `infra/trace.md` § 2.
+    5. Before reporting the task complete, run T01 smoke + T02 trace self-check (`test/run-trace-infra-self-check-autotest.sh`) + this feature's TXX, and confirm all three are green.
 - Every task completion report must include:
     1. What is the task goal of the code, and what solution / design approach was used?
     2. What changes were made to which files?

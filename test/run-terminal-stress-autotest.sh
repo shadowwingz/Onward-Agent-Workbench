@@ -7,6 +7,7 @@
 
 set -euo pipefail
 
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 
@@ -14,8 +15,8 @@ ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 source "$SCRIPT_DIR/resolve-dev-app-bin.sh"
 
 APP_BIN="${1:-}"
-LOG_FILE="${2:-/tmp/onward-terminal-stress-autotest.log}"
-
+LOG_FILE="${2:-$REPO_ROOT/traces/test-logs/terminal-stress-autotest.log}"
+mkdir -p "$(dirname "$LOG_FILE")"
 if [ -z "$APP_BIN" ]; then
   APP_BIN="$(resolve_dev_app_bin "$ROOT_DIR")"
 fi

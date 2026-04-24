@@ -4,9 +4,10 @@
 
 set -euo pipefail
 
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-LOG_FILE="${2:-/tmp/onward-preview-search-autotest.log}"
-
+LOG_FILE="${2:-$REPO_ROOT/traces/test-logs/preview-search-autotest.log}"
+mkdir -p "$(dirname "$LOG_FILE")"
 detect_app_bin() {
   local branch
   branch="$(git -C "$ROOT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo detached)"

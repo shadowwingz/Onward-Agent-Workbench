@@ -4,10 +4,11 @@
 
 set -euo pipefail
 
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_BIN="${1:-}"
-LOG_FILE="${2:-/tmp/onward-settings-update-autotest.log}"
-
+LOG_FILE="${2:-$REPO_ROOT/traces/test-logs/settings-update-autotest.log}"
+mkdir -p "$(dirname "$LOG_FILE")"
 if [[ -z "$APP_BIN" ]]; then
   APP_PATH="$(find "$ROOT_DIR/release" -maxdepth 2 -type d -name '*.app' | sort | head -1)"
   if [[ -z "$APP_PATH" ]]; then

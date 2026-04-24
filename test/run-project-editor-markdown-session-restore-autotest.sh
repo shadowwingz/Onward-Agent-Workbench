@@ -4,10 +4,12 @@
 
 set -euo pipefail
 
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT_DIR/test/resolve-dev-app-bin.sh"
 APP_BIN="${1:-$(resolve_dev_app_bin "$ROOT_DIR" || true)}"
-LOG_FILE="${2:-/tmp/onward-project-editor-markdown-session-restore-autotest.log}"
+LOG_FILE="${2:-$REPO_ROOT/traces/test-logs/project-editor-markdown-session-restore-autotest.log}"
+mkdir -p "$(dirname "$LOG_FILE")"
 FIXTURE_ROOT="${3:-$ROOT_DIR/test/fixtures/project-editor-markdown-session-restore}"
 
 if [[ -z "$APP_BIN" || ! -x "$APP_BIN" ]]; then

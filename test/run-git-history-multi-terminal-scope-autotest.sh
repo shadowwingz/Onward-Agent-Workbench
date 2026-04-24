@@ -4,10 +4,12 @@
 
 set -euo pipefail
 
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT_DIR/test/resolve-dev-app-bin.sh"
 APP_BIN="${1:-$(resolve_dev_app_bin "$ROOT_DIR" || true)}"
-LOG_FILE="${2:-/tmp/onward-git-history-multi-terminal-scope-autotest.log}"
+LOG_FILE="${2:-$REPO_ROOT/traces/test-logs/git-history-multi-terminal-scope-autotest.log}"
+mkdir -p "$(dirname "$LOG_FILE")"
 TARGET_REPO="${3:-${ONWARD_AUTOTEST_TARGET_CWD:-$ROOT_DIR}}"
 
 if [[ -z "$APP_BIN" || ! -x "$APP_BIN" ]]; then

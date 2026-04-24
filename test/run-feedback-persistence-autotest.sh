@@ -4,10 +4,13 @@
 
 set -euo pipefail
 
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_BIN="${1:-}"
-SEED_LOG_FILE="${2:-/tmp/onward-feedback-persistence-seed.log}"
-VERIFY_LOG_FILE="${3:-/tmp/onward-feedback-persistence-verify.log}"
+SEED_LOG_FILE="${2:-$REPO_ROOT/traces/test-logs/feedback-persistence-seed.log}"
+mkdir -p "$(dirname "$SEED_LOG_FILE")"
+VERIFY_LOG_FILE="${3:-$REPO_ROOT/traces/test-logs/feedback-persistence-verify.log}"
+mkdir -p "$(dirname "$VERIFY_LOG_FILE")"
 USER_DATA_DIR="${4:-}"
 
 if [[ -z "$APP_BIN" ]]; then

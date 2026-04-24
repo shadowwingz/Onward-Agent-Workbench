@@ -9,9 +9,11 @@
 
 set -euo pipefail
 
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_BIN="${1:-}"
-LOG_FILE="${2:-/tmp/onward-pdf-epub-diff-autotest.log}"
+LOG_FILE="${2:-$REPO_ROOT/traces/test-logs/pdf-epub-diff-autotest.log}"
+mkdir -p "$(dirname "$LOG_FILE")"
 USER_DATA_DIR="${3:-}"
 
 if [[ -z "$APP_BIN" ]]; then

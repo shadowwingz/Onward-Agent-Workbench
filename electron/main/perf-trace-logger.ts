@@ -5,17 +5,28 @@
 
 import { app } from 'electron'
 import { createWriteStream, mkdirSync, writeFileSync, type WriteStream } from 'fs'
-import { tmpdir } from 'os'
-import { join } from 'path'
+import { dirname, join, resolve } from 'path'
+
+import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 
 export const PERF_TRACE_ENABLED = process.env.ONWARD_PERF_TRACE === '1'
 
 type TracePayload = Record<string, unknown> | undefined
 
+/**
+ * Optional context supplied by IPC bridges forwarding events from
+ * renderer processes. Main-side emitters can ignore this: the default
+ * main-process track (pid=1, tid=1) is used when absent.
+ */
+interface RecordSource {
+  process?: 'main' | 'renderer'
+  tid?: number
+}
+
 interface PerfTraceInfo {
   enabled: boolean
   logPath: string | null
-  latestPointerPath: string
+  latestPointerPath: string | null
   eventLoop: EventLoopStallMetrics
 }
 
@@ -34,12 +45,20 @@ export interface EventLoopStallMetrics {
   recentStalls: Array<{ ts: number; driftMs: number }>
 }
 
-const LATEST_POINTER_PATH = join(tmpdir(), 'onward-perf-trace-latest.txt')
 const MAX_OBJECT_DEPTH = 5
 const MAX_ARRAY_ITEMS = 80
 const MAX_OBJECT_KEYS = 80
 const MAX_STRING_LENGTH = 4000
 const MAX_RECENT_EVENT_LOOP_STALLS = 40
+
+// Chrome Trace Event Format constants.
+//
+// `pid=1` = main process.  `pid=2` = any renderer; the renderer's
+// WebContents id is used as `tid` so each window / utility shows up as
+// its own thread track in the Perfetto / Chrome DevTools UI.
+const MAIN_PID = 1
+const MAIN_TID = 1
+const RENDERER_PID = 2
 
 function createEventLoopStallMetrics(resetAt = Date.now()): EventLoopStallMetrics {
   return {
@@ -96,23 +115,109 @@ function normalizeTraceValue(value: unknown, depth = 0): unknown {
   return String(value)
 }
 
+function safeNormalize(value: unknown): unknown {
+  try {
+    return normalizeTraceValue(value)
+  } catch (error) {
+    return { serializationError: String(error) }
+  }
+}
+
 function safeStringify(value: unknown): string {
   try {
-    return JSON.stringify(normalizeTraceValue(value))
+    return JSON.stringify(value)
   } catch (error) {
-    return JSON.stringify({
-      serializationError: String(error)
-    })
+    return JSON.stringify({ serializationError: String(error) })
   }
+}
+
+/**
+ * Resolve the repository root where `traces/` lives. Order:
+ *   1. `ONWARD_REPO_ROOT` env var — autotest runners set this
+ *      explicitly before launching the packaged app.
+ *   2. `!app.isPackaged` dev mode — `app.getAppPath()` is the project
+ *      root (vite dev) or its `out/main/..` sibling; walk two levels
+ *      up to reach the checkout.
+ *   3. Production packaged build — fall back to
+ *      `userData/debug` because end-users don't have a checkout.
+ */
+function resolveTraceRoot(): { dir: string; kind: 'repo' | 'userdata' } {
+  const envRoot = process.env.ONWARD_REPO_ROOT
+  if (envRoot) {
+    return { dir: join(envRoot, 'traces', 'perf'), kind: 'repo' }
+  }
+  if (!app.isPackaged) {
+    // electron-vite builds put main output at <repoRoot>/out/main/index.js;
+    // `app.getAppPath()` returns <repoRoot>/out/main in that setup. Walk
+    // up twice and land on the repo root regardless.
+    const appPath = app.getAppPath()
+    const candidateRoot = resolve(appPath, '..', '..')
+    return { dir: join(candidateRoot, 'traces', 'perf'), kind: 'repo' }
+  }
+  return { dir: join(app.getPath('userData'), 'debug'), kind: 'userdata' }
+}
+
+/**
+ * Decide the Chrome trace "phase" (`ph`) for an event based on the
+ * event name and payload. Explicit rules only; anything unknown falls
+ * through to a safe `ph:"i"` instant event.
+ */
+function resolvePhase(event: string, data: TracePayload): { ph: 'X' | 'i' | 'M'; dur?: number; scope?: string } {
+  if (event === PERF_TRACE_EVENT.MAIN_TRACE_START) {
+    return { ph: 'i', scope: 'g' }
+  }
+  if (event === PERF_TRACE_EVENT.MAIN_EVENT_LOOP_STALL ||
+      event === PERF_TRACE_EVENT.RENDERER_EVENT_LOOP_STALL ||
+      event === PERF_TRACE_EVENT.RENDERER_FRAME_STALL) {
+    const driftMs = Number((data as Record<string, unknown> | undefined)?.driftMs
+      ?? (data as Record<string, unknown> | undefined)?.frameDeltaMs)
+    if (Number.isFinite(driftMs) && driftMs > 0) {
+      return { ph: 'X', dur: Math.round(driftMs * 1000) }
+    }
+    return { ph: 'i', scope: 't' }
+  }
+  if (event === PERF_TRACE_EVENT.RENDERER_LONGTASK) {
+    const durationMs = Number((data as Record<string, unknown> | undefined)?.durationMs)
+    if (Number.isFinite(durationMs) && durationMs > 0) {
+      return { ph: 'X', dur: Math.round(durationMs * 1000) }
+    }
+    return { ph: 'i', scope: 't' }
+  }
+  if (event === PERF_TRACE_EVENT.RENDERER_PROMPT_INPUT_PAINT) {
+    const totalMs = Number((data as Record<string, unknown> | undefined)?.eventToPaintMs)
+    if (Number.isFinite(totalMs) && totalMs > 0) {
+      return { ph: 'X', dur: Math.round(totalMs * 1000) }
+    }
+    return { ph: 'i', scope: 't' }
+  }
+  // Convention: any event carrying `elapsedMs`, `durationMs`, or
+  // `workerDurationMs` in its payload is a completed span. We route
+  // them to `ph:"X"` so Perfetto SQL's `slice.dur` column is usable
+  // for percentile / aggregate queries (see infra/trace.md §5.4).
+  // This catches the `main:*-worker-latency` family, `main:app-state-
+  // save`, and any future slice-shaped events without requiring each
+  // emitter to think about the Chrome Trace Event Format phases.
+  const d = data as Record<string, unknown> | undefined
+  const inferredMs = Number(
+    d?.elapsedMs ?? d?.durationMs ?? d?.workerDurationMs
+  )
+  if (Number.isFinite(inferredMs) && inferredMs > 0) {
+    return { ph: 'X', dur: Math.round(inferredMs * 1000) }
+  }
+  return { ph: 'i', scope: 't' }
 }
 
 class PerfTraceLogger {
   private stream: WriteStream | null = null
   private logPath: string | null = null
+  private latestPointerPath: string | null = null
+  private traceRootKind: 'repo' | 'userdata' | null = null
   private initialized = false
   private eventLoopTimer: ReturnType<typeof setInterval> | null = null
   private gitRuntimeTimer: ReturnType<typeof setInterval> | null = null
   private eventLoopMetrics: EventLoopStallMetrics = createEventLoopStallMetrics()
+  private startMs: number = 0
+  private rendererThreadNamesEmitted = new Set<number>()
 
   isEnabled(): boolean {
     return PERF_TRACE_ENABLED
@@ -122,18 +227,62 @@ class PerfTraceLogger {
     if (!PERF_TRACE_ENABLED || this.initialized) return
     this.initialized = true
 
-    const logDir = join(app.getPath('userData'), 'debug')
-    mkdirSync(logDir, { recursive: true })
+    const { dir, kind } = resolveTraceRoot()
+    this.traceRootKind = kind
+    mkdirSync(dir, { recursive: true })
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-')
-    this.logPath = join(logDir, `perf-trace-${timestamp}-${process.pid}.jsonl`)
+    // Chrome Trace Event Format — `.json`. Perfetto UI and
+    // trace_processor_shell both accept this natively.
+    this.logPath = join(dir, `perf-trace-${timestamp}-${process.pid}.json`)
+    this.latestPointerPath = join(dir, 'latest.txt')
     this.stream = createWriteStream(this.logPath, { flags: 'a', encoding: 'utf8' })
-    writeFileSync(LATEST_POINTER_PATH, this.logPath, 'utf8')
-    console.log(`[PerfTrace] enabled (ONWARD_PERF_TRACE=1) path=${this.logPath}`)
-    this.record('main:trace-start', {
+    writeFileSync(this.latestPointerPath, this.logPath, 'utf8')
+    // File preamble: open the traceEvents array.
+    this.stream.write('{"traceEvents":[\n')
+    // Metadata packets: give the main process / thread friendly names.
+    this.writeRaw({
+      ph: 'M', name: 'process_name', pid: MAIN_PID, tid: MAIN_TID,
+      args: { name: 'Onward main' }
+    })
+    this.writeRaw({
+      ph: 'M', name: 'process_sort_index', pid: MAIN_PID, tid: MAIN_TID,
+      args: { sort_index: 1 }
+    })
+    this.writeRaw({
+      ph: 'M', name: 'thread_name', pid: MAIN_PID, tid: MAIN_TID,
+      args: { name: 'main' }
+    })
+    this.writeRaw({
+      ph: 'M', name: 'process_name', pid: RENDERER_PID,
+      args: { name: 'Onward renderer' }
+    })
+    this.writeRaw({
+      ph: 'M', name: 'process_sort_index', pid: RENDERER_PID,
+      args: { sort_index: 2 }
+    })
+    console.log(
+      `[PerfTrace] enabled (ONWARD_PERF_TRACE=1) format=chrome-trace-json ` +
+      `path=${this.logPath} (${kind})`
+    )
+    // Register signal handlers so SIGTERM / SIGINT (tests, CI,
+    // Ctrl-C) still flush the Chrome trace array closer. The logger
+    // is a singleton so these handlers attach at most once; Electron
+    // `app.on('will-quit')` still covers graceful menu-quit paths.
+    const shutdown = () => {
+      try { this.stop() } catch { /* already closing */ }
+    }
+    process.once('SIGTERM', shutdown)
+    process.once('SIGINT', shutdown)
+    app.once('will-quit', shutdown)
+    app.once('before-quit', shutdown)
+    // Record the first real event after the metadata.
+    this.startMs = Date.now()
+    this.record(PERF_TRACE_EVENT.MAIN_TRACE_START, {
       logPath: this.logPath,
       pid: process.pid,
       platform: process.platform,
-      appVersion: app.getVersion()
+      appVersion: app.getVersion(),
+      traceRoot: kind
     })
   }
 
@@ -144,14 +293,14 @@ class PerfTraceLogger {
     return {
       enabled: PERF_TRACE_ENABLED,
       logPath: this.logPath,
-      latestPointerPath: LATEST_POINTER_PATH,
+      latestPointerPath: this.latestPointerPath,
       eventLoop: this.getEventLoopMetrics()
     }
   }
 
   resetEventLoopMetrics(): EventLoopStallMetrics {
     this.eventLoopMetrics = createEventLoopStallMetrics()
-    this.record('main:event-loop-metrics-reset', {
+    this.record(PERF_TRACE_EVENT.MAIN_EVENT_LOOP_METRICS_RESET, {
       resetAt: this.eventLoopMetrics.resetAt
     })
     return this.getEventLoopMetrics()
@@ -161,19 +310,50 @@ class PerfTraceLogger {
     return cloneEventLoopStallMetrics(this.eventLoopMetrics)
   }
 
-  record(event: string, data?: TracePayload): void {
+  /**
+   * Record a trace event. Writes a single Chrome-trace-format entry
+   * into the open `.json` file; no buffering beyond the OS page cache.
+   *
+   * `source` lets IPC bridges tag renderer-forwarded events so they
+   * land on a dedicated thread track.
+   */
+  record(event: string, data?: TracePayload, source?: RecordSource): void {
     if (!PERF_TRACE_ENABLED) return
     this.start()
     if (!this.stream || !this.logPath) return
 
-    const line = safeStringify({
-      ts: Date.now(),
-      pid: process.pid,
-      processType: 'main',
-      event,
-      data: data ?? {}
-    })
-    this.stream.write(`${line}\n`)
+    const isRenderer = source?.process === 'renderer'
+    const pid = isRenderer ? RENDERER_PID : MAIN_PID
+    const tid = isRenderer ? (source?.tid ?? 0) : MAIN_TID
+
+    if (isRenderer && tid > 0 && !this.rendererThreadNamesEmitted.has(tid)) {
+      this.rendererThreadNamesEmitted.add(tid)
+      this.writeRaw({
+        ph: 'M', name: 'thread_name', pid, tid,
+        args: { name: `renderer#${tid}` }
+      })
+    }
+
+    const phase = resolvePhase(event, data)
+    const tsUs = Date.now() * 1000
+    const args = safeNormalize(data) as Record<string, unknown> | undefined
+    const entry: Record<string, unknown> = {
+      ph: phase.ph,
+      name: event,
+      ts: tsUs,
+      pid,
+      tid
+    }
+    if (phase.dur !== undefined) entry.dur = phase.dur
+    if (phase.scope) entry.s = phase.scope
+    if (args && Object.keys(args as object).length > 0) entry.args = args
+
+    this.writeRaw(entry)
+  }
+
+  private writeRaw(entry: Record<string, unknown>): void {
+    if (!this.stream) return
+    this.stream.write(`  ${safeStringify(entry)},\n`)
   }
 
   startEventLoopMonitor(): void {
@@ -191,7 +371,7 @@ class PerfTraceLogger {
       this.eventLoopMetrics.totalSamples += 1
       if (driftMs >= stallThresholdMs) {
         this.recordEventLoopStall(now, driftMs)
-        this.record('main:event-loop-stall', {
+        this.record(PERF_TRACE_EVENT.MAIN_EVENT_LOOP_STALL, {
           driftMs,
           intervalMs,
           stallThresholdMs
@@ -227,9 +407,9 @@ class PerfTraceLogger {
 
     this.gitRuntimeTimer = setInterval(() => {
       try {
-        this.record('main:git-runtime-summary', getMetrics() as TracePayload)
+        this.record(PERF_TRACE_EVENT.MAIN_GIT_RUNTIME_SUMMARY, getMetrics() as TracePayload)
       } catch (error) {
-        this.record('main:git-runtime-summary-error', { error: String(error) })
+        this.record(PERF_TRACE_EVENT.MAIN_GIT_RUNTIME_SUMMARY_ERROR, { error: String(error) })
       }
     }, 1000)
     this.gitRuntimeTimer.unref?.()
@@ -245,7 +425,11 @@ class PerfTraceLogger {
       this.gitRuntimeTimer = null
     }
     if (this.stream) {
-      this.record('main:trace-stop')
+      this.record(PERF_TRACE_EVENT.MAIN_TRACE_STOP)
+      // Terminal element: a `{}` entry lets us close the array without
+      // chopping the trailing comma from the last real event. Perfetto
+      // UI / trace_processor ignore empty events.
+      this.stream.write('  {}\n]}\n')
       this.stream.end()
       this.stream = null
     }

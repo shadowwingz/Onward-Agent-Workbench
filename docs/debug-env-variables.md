@@ -55,7 +55,8 @@ set ONWARD_TELEMETRY_RESET_CONSENT=1
 | Variable | Value | Effect |
 |----------|-------|--------|
 | `ONWARD_DEBUG` | `1` | Enable verbose console logging in main process, IPC, and git-watch |
-| `ONWARD_PERF_TRACE` | `1` | Write low-overhead JSONL performance trace logs for manual lag reproduction; captures main/renderer stalls, Prompt input paint latency, terminal IPC summaries, GitWatch/Git runtime summaries, and Prompt context-menu lifecycle |
+| `ONWARD_PERF_TRACE` | `1` | Write low-overhead **Chrome Trace Event Format** (`.json`) performance trace to `<repoRoot>/traces/perf/perf-trace-<ISO>-<pid>.json`. Perfetto UI and `trace_processor_shell` consume the file natively (no conversion). Captures main/renderer event-loop stalls, Prompt input paint latency, terminal IPC summaries, GitWatch/Git runtime summaries, longtask / frame stalls. Event names are defined in `src/utils/perf-trace-names.ts` and indexed in `infra/trace.md` § 2. Open via `bash infra/scripts/open_trace.sh`. |
+| `ONWARD_REPO_ROOT` | path | Repo-root override used by `perf-trace-logger` and autotest runners to resolve where `traces/` lives. Set automatically by the regression harness; only needed manually when launching a packaged build outside the checkout. |
 | `ONWARD_DEBUG_CAPTURE` | `1` | Auto-capture renderer screenshots to temp dir after load |
 | `ONWARD_DISABLE_GPU` | `1` | Disable hardware acceleration and GPU compositing |
 | `ONWARD_USER_DATA_DIR` | path | Override the userData directory (settings, state, telemetry) |

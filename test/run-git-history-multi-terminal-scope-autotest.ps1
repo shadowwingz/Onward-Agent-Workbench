@@ -17,7 +17,9 @@ if (-not $AppBin) {
 }
 
 if (-not $LogFile) {
-  $LogFile = Join-Path $env:TEMP "onward-git-history-multi-terminal-scope-autotest.log"
+  $RepoRoot = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
+$LogFile = Join-Path $RepoRoot "traces/test-logs/onward-git-history-multi-terminal-scope-autotest.log"
+New-Item -ItemType Directory -Force (Split-Path -Parent $LogFile) | Out-Null
 }
 
 if (-not $TargetRepo) {

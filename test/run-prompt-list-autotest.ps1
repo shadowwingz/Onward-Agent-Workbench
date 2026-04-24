@@ -19,7 +19,9 @@ if (-not $AppBin) {
 }
 
 if (-not $LogFile) {
-  $LogFile = Join-Path $env:TEMP "onward-prompt-list-autotest.log"
+  $RepoRoot = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
+$LogFile = Join-Path $RepoRoot "traces/test-logs/onward-prompt-list-autotest.log"
+New-Item -ItemType Directory -Force (Split-Path -Parent $LogFile) | Out-Null
 }
 
 if (-not (Test-Path $AppBin)) {

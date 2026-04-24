@@ -11,6 +11,7 @@
  */
 
 import { perfTrace } from './perf-trace'
+import { PERF_TRACE_EVENT } from './perf-trace-names'
 
 export interface PerfSnapshot {
   ts: number
@@ -208,7 +209,7 @@ class PerfMonitor {
       )
     }
 
-    perfTrace('renderer:perf-snapshot', snap as unknown as Record<string, unknown>)
+    perfTrace(PERF_TRACE_EVENT.RENDERER_PERF_SNAPSHOT, snap as unknown as Record<string, unknown>)
 
     // Store in history
     this.history.push(snap)

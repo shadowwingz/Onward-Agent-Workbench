@@ -4,6 +4,7 @@
 
 set -euo pipefail
 
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 if [[ -d "$ROOT_DIR/release/mac-arm64" ]]; then
@@ -13,8 +14,8 @@ else
 fi
 
 APP_BIN="${1:-$DEFAULT_APP_BIN}"
-LOG_FILE="${2:-/tmp/onward-project-editor-sqlite-autotest.log}"
-
+LOG_FILE="${2:-$REPO_ROOT/traces/test-logs/project-editor-sqlite-autotest.log}"
+mkdir -p "$(dirname "$LOG_FILE")"
 if [[ -z "$APP_BIN" || ! -x "$APP_BIN" ]]; then
   echo "ERROR: app binary not found or not executable: $APP_BIN" >&2
   exit 1

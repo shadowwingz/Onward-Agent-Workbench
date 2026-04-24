@@ -5,9 +5,38 @@ SPDX-License-Identifier: Apache-2.0
 
 # Full Regression Checklist
 
-> **Version:** v0.2
-> **Date:** 2026-04-23
-> **Previous version:** v0.1 (2026-04-22, embedded in this file prior to this rewrite)
+> **Version:** v0.3
+> **Date:** 2026-04-24
+> **Previous version:** v0.2 (2026-04-23)
+
+## Changelog vs. v0.2
+
+- **Added to mandatory pass (1 script):**
+  `run-trace-infra-self-check-autotest.sh` — T02 baseline trace
+  self-check. Launches the app with `ONWARD_PERF_TRACE=1` for 6 s,
+  asserts a Chrome trace JSON lands under `traces/perf/`, is JSON-
+  parseable, and contains at least one `main:*` event. Total
+  canonical runners: **44** (+1 skipped Windows).
+- **`test/run-with-timeout.mjs` committed.** Appendix A's inline
+  source was pseudocode in v0.2 — it now ships as a real file so
+  regression is reproducible from a fresh clone.
+- **All 43 existing runners migrated.** LOG_FILE paths moved from
+  `/tmp/onward-<suite>-autotest.log` to
+  `<repoRoot>/traces/test-logs/<suite>.log`, matching the canonical
+  trace-artefact location. Runners `mkdir -p` their log dir before
+  writing. The migration was done via
+  `scripts/migrate-autotest-log-paths.mjs` (kept in-repo for audit).
+- **New §11 "Trace infrastructure"** documents where traces land,
+  how to open them, and the format (Chrome Trace Event Format
+  consumed natively by Perfetto UI / `trace_processor_shell`).
+- **Underlying app change** (commit landed alongside this bump):
+  `electron/main/perf-trace-logger.ts` now emits Chrome trace JSON
+  directly to `traces/perf/perf-trace-<ISO>-<pid>.json`. No JSONL,
+  no converter, no new npm dep. Event names are registered in
+  `src/utils/perf-trace-names.ts`; dereferencing the registry is
+  enforced by `CLAUDE.md` Hard rule § 3.
+- **§8 known-failure list unchanged** this pass — the 11 assertion
+  failures from 2026-04-23 morning remain open.
 
 ## Changelog vs. v0.1
 
@@ -49,8 +78,9 @@ SPDX-License-Identifier: Apache-2.0
 8. Known failing tests (as of 2026-04-23)
 9. Tests scheduled for removal
 10. Coverage gaps (new tests needed)
-11. Focused rerun commands
-12. Windows-only follow-up
+11. Trace infrastructure (v0.3)
+12. Focused rerun commands
+13. Windows-only follow-up
 
 ---
 
@@ -227,7 +257,13 @@ is a short list of user-observable contracts the runner asserts on.
 | `run-file-index-cache-ui-autotest.sh` | Quick-open filename search, index reuse on create / delete / rename |
 | `run-file-watch-autotest.sh` | External file change auto-refresh in editor + tree |
 
-**Total canonical runners in v0.2: 43** (+1 skipped on macOS →
+### 6.7 Trace infrastructure (v0.3)
+
+| Runner | Key features covered |
+|---|---|
+| `run-trace-infra-self-check-autotest.sh` | T02 baseline. Launches app with `ONWARD_PERF_TRACE=1` for ~6 s, asserts `traces/perf/*.json` is produced, is valid Chrome trace JSON, and carries at least one `main:*` event. Optionally parse-verifies via `trace_processor_shell` when locally installed. |
+
+**Total canonical runners in v0.3: 44** (+1 skipped on macOS →
 `run-auto-update-windows-e2e.sh`, covered in §12).
 
 ## 7. Full macOS regression command
@@ -290,6 +326,7 @@ SCRIPTS=(
   test/run-terminal-focus-activation-autotest.sh
   test/run-terminal-perf-autotest.sh
   test/run-terminal-stress-autotest.sh
+  test/run-trace-infra-self-check-autotest.sh
   test/run-working-directory-copy-autotest.sh
 )
 
@@ -350,12 +387,13 @@ fi
 `test/run-with-timeout.mjs` is a small Node wrapper (no `gtimeout`
 dependency on macOS); it spawns the runner with `stdio: inherit`, sends
 SIGTERM at the budget, upgrades to SIGKILL 10 s later, and exits with
-124 on timeout.
+124 on timeout. The source is checked into the repo — see Appendix A
+for a pointer.
 
-Baseline clean-run target for v0.2:
+Baseline clean-run target for v0.3:
 
 ```text
-Passed: 43
+Passed: 44
 Failed: 0
 Skipped: 1
 ```
@@ -447,7 +485,39 @@ incidental coverage. Ordered by user impact.
 - Schedule actually firing on cron time (not just stored state).
 - xterm addon integration (search, ligatures, links).
 
-## 11. Focused rerun commands
+## 11. Trace infrastructure (v0.3)
+
+Every autotest run that carries `ONWARD_PERF_TRACE=1` emits a Chrome
+Trace Event Format file to `<repoRoot>/traces/perf/`. T02
+(`run-trace-infra-self-check-autotest.sh`) validates the baseline
+plumbing as part of the full pass.
+
+- **Format**: Chrome Trace Event Format — `{"traceEvents":[…]}`.
+  Consumed natively by Perfetto UI and `trace_processor_shell`. No
+  JSONL, no converter, no protobufjs dep. See
+  `infra/trace.md` § 4 for the exact per-event shape.
+- **Output path**: `<repoRoot>/traces/perf/perf-trace-<ISO>-<pid>.json`
+  plus a `latest.txt` pointer. Production builds fall back to
+  `userData/debug/`; autotest runners always resolve the repo path
+  via `ONWARD_REPO_ROOT`.
+- **Event name registry**: `src/utils/perf-trace-names.ts`. Per
+  `CLAUDE.md` Hard rule § 3, new events must be registered there
+  before they are instrumented, and `infra/trace.md` § 2 must be
+  updated.
+- **Open a trace**:
+  ```bash
+  bash infra/scripts/open_trace.sh              # newest traces/perf/*.json
+  bash infra/scripts/open_trace.sh <file.json>
+  ```
+  The script boots a local `trace_processor_shell --httpd` and opens
+  a version-pinned `ui.perfetto.dev/v<ver>-<sha>/#!/?rpc_port=9001`.
+  The trace never leaves localhost.
+- **Test-log location**: every runner writes its stdout / stderr to
+  `<repoRoot>/traces/test-logs/<suite>.log`. If a runner misbehaves
+  the log is the first place to look; all logs are gitignored but
+  trivially diff-friendly because they stay inside the checkout.
+
+## 12. Focused rerun commands
 
 When diagnosing a single failure, rerun that runner only:
 
@@ -473,7 +543,7 @@ ONWARD_USER_DATA_DIR="$(mktemp -d)" \
   bash test/run-git-diff-submodules-autotest.sh "$APP_BIN" /tmp/onward-git-diff-submodules-autotest.log "$DSM_REPO"
 ```
 
-## 12. Windows-only follow-up
+## 13. Windows-only follow-up
 
 Run this separately on Windows:
 
@@ -488,42 +558,15 @@ Intentionally excluded from the macOS full pass.
 
 ## Appendix A: Runner runtime wrapper
 
-Fresh macOS installs do not ship `gtimeout`. The runner wrapper is kept
-in the repo so the command in §7 is reproducible on any dev machine:
+Fresh macOS installs do not ship `gtimeout`. The wrapper ships in the
+repo at **`test/run-with-timeout.mjs`** (committed as part of the v0.3
+cutover). The §7 command invokes it directly; no bootstrap needed on a
+fresh clone.
 
-```javascript
-// test/run-with-timeout.mjs
-import { spawn } from 'node:child_process'
-
-const timeoutSec = Number(process.argv[2])
-const cmd = process.argv[3]
-const args = process.argv.slice(4)
-if (!Number.isFinite(timeoutSec) || timeoutSec <= 0) {
-  console.error('usage: node run-with-timeout.mjs <seconds> <cmd> [args...]')
-  process.exit(2)
-}
-
-const child = spawn(cmd, args, { stdio: 'inherit' })
-let timedOut = false
-const killTimer = setTimeout(() => {
-  timedOut = true
-  try { child.kill('SIGTERM') } catch {}
-  setTimeout(() => { try { child.kill('SIGKILL') } catch {} }, 10_000).unref()
-}, timeoutSec * 1000)
-
-child.on('exit', (code, signal) => {
-  clearTimeout(killTimer)
-  if (timedOut) process.exit(124)
-  if (typeof code === 'number') process.exit(code)
-  if (signal) process.exit(128 + (signal === 'SIGKILL' ? 9 : 15))
-  process.exit(1)
-})
-child.on('error', (err) => {
-  clearTimeout(killTimer)
-  console.error(err)
-  process.exit(127)
-})
+Usage:
+```bash
+node test/run-with-timeout.mjs <seconds> <cmd> [args...]
 ```
-
-Commit this wrapper alongside v0.2 so the full-pass is reproducible
-from a fresh clone.
+Behaviour: spawns with `stdio: inherit`, SIGTERM at the budget, SIGKILL
+10 s later, exits 124 on timeout, 127 on spawn error, otherwise the
+child's exit code.

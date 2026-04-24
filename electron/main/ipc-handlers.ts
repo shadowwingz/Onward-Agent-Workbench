@@ -45,6 +45,7 @@ import { ImageWatchManager } from './image-watch-manager'
 import { ProjectTreeWatchManager } from './project-tree-watch-manager'
 import { getUpdateService } from './update-service'
 import { perfTraceLogger } from './perf-trace-logger'
+import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 import { IPC } from '../shared/ipc-channels'
 
 let gitWatchManager: GitWatchManager | null = null
@@ -390,7 +391,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
           if (shouldLog) {
             console.log(`[PerfDiag] terminal:data tid=${tid} ipc/s=${c.messages} bytes/s=${c.bytes}`)
           }
-          perfTraceLogger.record('main:terminal-data-ipc-summary', {
+          perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_TERMINAL_DATA_IPC_SUMMARY, {
             terminalId: tid,
             messagesPerSecond: c.messages,
             bytesPerSecond: c.bytes
@@ -413,9 +414,18 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   ipcMain.on(IPC.DEBUG_LOG, (_event, payload: { message?: string; data?: unknown }) => {
     log('[RendererDebug]', payload?.message ?? '', payload?.data ?? '')
   })
-  ipcMain.on(IPC.DEBUG_PERF_TRACE, (_event, payload: { event?: string; data?: Record<string, unknown> }) => {
+  ipcMain.on(IPC.DEBUG_PERF_TRACE, (rawEvent, payload: { event?: string; data?: Record<string, unknown> }) => {
     if (!payload?.event) return
-    perfTraceLogger.record(payload.event, payload.data)
+    // Tag the renderer's WebContents id so the logger can map it to a
+    // stable `tid` on the Chrome-trace / Perfetto side. Renderers share
+    // pid=2 with tid = wc.id, so individual windows / utilities land on
+    // their own thread track in the UI.
+    const wc = rawEvent.sender
+    const tid = wc?.id ?? 0
+    perfTraceLogger.record(payload.event, payload.data, {
+      process: 'renderer',
+      tid
+    })
   })
 
   // Listen to buffer responses returned by the renderer process

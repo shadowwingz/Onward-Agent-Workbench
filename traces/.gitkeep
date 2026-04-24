@@ -1,0 +1,2 @@
+# Keep `traces/` discoverable on fresh clones; runtime artefacts land
+# here but are gitignored individually via `traces/` in .gitignore.

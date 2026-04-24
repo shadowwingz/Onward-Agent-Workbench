@@ -4,9 +4,11 @@
 
 set -euo pipefail
 
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_BIN="${1:-}"
-LOG_FILE="${2:-/tmp/onward-change-log-autotest.log}"
+LOG_FILE="${2:-$REPO_ROOT/traces/test-logs/change-log-autotest.log}"
+mkdir -p "$(dirname "$LOG_FILE")"
 TEST_TAG="v9.9.9-daily.20990101.1"
 TEMP_ROOT=""
 TEMP_CHANGELOG=""

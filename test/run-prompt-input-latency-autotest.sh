@@ -7,11 +7,13 @@ set -euo pipefail
 # Prompt input latency autotest runner (macOS/Linux)
 # For Windows, use run-prompt-input-latency-autotest.ps1
 
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 source "$ROOT_DIR/test/resolve-dev-app-bin.sh"
 
 APP_BIN="${1:-$(resolve_dev_app_bin "$ROOT_DIR")}"
-LOG_FILE="${2:-/tmp/onward-prompt-input-latency-autotest.log}"
+LOG_FILE="${2:-$REPO_ROOT/traces/test-logs/prompt-input-latency-autotest.log}"
+mkdir -p "$(dirname "$LOG_FILE")"
 RESULT_DIR="$ROOT_DIR/test/results/prompt-input-latency"
 mkdir -p "$RESULT_DIR"
 RESULT_FILE="${3:-$RESULT_DIR/baseline-$(date +%Y%m%d-%H%M%S).json}"

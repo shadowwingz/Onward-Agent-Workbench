@@ -4,6 +4,7 @@
 
 set -euo pipefail
 
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BRANCH=$(git -C "$ROOT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
 VERSION=$(node -p "require('$ROOT_DIR/package.json').version" 2>/dev/null || echo "0.0.0")
@@ -16,8 +17,8 @@ else
 fi
 
 APP_BIN="${1:-$APP_BIN_DEFAULT}"
-LOG_FILE="${2:-/tmp/onward-file-watch-autotest.log}"
-
+LOG_FILE="${2:-$REPO_ROOT/traces/test-logs/file-watch-autotest.log}"
+mkdir -p "$(dirname "$LOG_FILE")"
 if [[ ! -x "$APP_BIN" ]]; then
   echo "ERROR: App binary does not exist or is not executable: $APP_BIN" >&2
   echo "Build the development package first with: rm -rf out release && pnpm dist:dev" >&2

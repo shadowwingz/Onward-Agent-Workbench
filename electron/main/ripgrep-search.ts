@@ -10,6 +10,7 @@ import { BrowserWindow, app } from 'electron'
 import { mainWorkScheduler } from './main-work-scheduler'
 import { perfTraceLogger } from './perf-trace-logger'
 import { IPC } from '../shared/ipc-channels'
+import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 
 export interface RipgrepSearchOptions {
   searchId?: string
@@ -75,7 +76,7 @@ function resolveRipgrepPath(): string {
     const unpackedPath = app.isPackaged ? rgPath.replace('app.asar', 'app.asar.unpacked') : rgPath
     if (existsSync(unpackedPath)) return unpackedPath
     if (existsSync(rgPath)) return rgPath
-    perfTraceLogger.record('main:ripgrep-binary-missing', {
+    perfTraceLogger.record(PERF_TRACE_EVENT.WORKER_RIPGREP_BINARY_MISSING, {
       rgPath,
       unpackedPath,
       fallback: 'rg'
@@ -120,7 +121,7 @@ export class RipgrepSearchManager {
         () => this.request('start', { searchId, rgPath, options })
       ).catch((error) => {
         if (this.activeSearchId !== searchId || mainWindow.isDestroyed()) return
-        perfTraceLogger.record('main:ripgrep-worker-start-error', {
+        perfTraceLogger.record(PERF_TRACE_EVENT.WORKER_RIPGREP_START_ERROR, {
           searchId,
           error: String(error)
         })
@@ -177,10 +178,10 @@ export class RipgrepSearchManager {
       }
     })
     this.worker.on('error', (error) => {
-      perfTraceLogger.record('main:ripgrep-worker-error', { error: String(error) })
+      perfTraceLogger.record(PERF_TRACE_EVENT.WORKER_RIPGREP_ERROR, { error: String(error) })
     })
     this.worker.on('exit', (code) => {
-      perfTraceLogger.record('main:ripgrep-worker-exit', {
+      perfTraceLogger.record(PERF_TRACE_EVENT.WORKER_RIPGREP_EXIT, {
         code,
         pending: this.pending.size
       })
@@ -199,7 +200,7 @@ export class RipgrepSearchManager {
     return new Promise<T>((resolveTask, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id)
-        perfTraceLogger.record('main:ripgrep-worker-timeout', {
+        perfTraceLogger.record(PERF_TRACE_EVENT.WORKER_RIPGREP_TIMEOUT, {
           id,
           method,
           elapsedMs: Date.now() - startedAt
@@ -242,7 +243,7 @@ export class RipgrepSearchManager {
 
     const elapsedMs = Date.now() - pending.startedAt
     if (elapsedMs > 250) {
-      perfTraceLogger.record('main:ripgrep-worker-latency', {
+      perfTraceLogger.record(PERF_TRACE_EVENT.WORKER_RIPGREP_LATENCY, {
         id: message.id,
         method: pending.method,
         elapsedMs
