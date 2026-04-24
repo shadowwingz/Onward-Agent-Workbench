@@ -4,6 +4,8 @@
  */
 
 import { inputPriorityLane } from './input-priority-lane'
+import { perfTrace, perfTraceTask } from '../utils/perf-trace'
+import { PERF_TRACE_EVENT } from '../utils/perf-trace-names'
 
 export interface TerminalOutputTarget {
   id: string
@@ -263,6 +265,7 @@ export class TerminalOutputScheduler {
     const startedAt = performance.now()
     const frameBudgetMs = this.getFrameBudgetMs()
     let processed = 0
+    const processedByTarget = new Map<string, number>()
 
     for (const lane of QUEUE_ORDER) {
       while (performance.now() - startedAt < frameBudgetMs) {
@@ -273,6 +276,7 @@ export class TerminalOutputScheduler {
         if (chunk) {
           target.writeData(chunk)
           processed++
+          processedByTarget.set(target.id, (processedByTarget.get(target.id) ?? 0) + chunk.length)
         }
 
         this.requeueIfNeeded(target, lane)
@@ -281,6 +285,26 @@ export class TerminalOutputScheduler {
       if (performance.now() - startedAt >= frameBudgetMs) {
         break
       }
+    }
+
+    const elapsedMs = performance.now() - startedAt
+    // Global scheduler heartbeat — aggregate across tasks, lands on the
+    // renderer's main WebContents track so the scheduler's own cost is
+    // visible independent of any one Task's lane.
+    perfTrace(PERF_TRACE_EVENT.RENDERER_TERMINAL_DATA_SCHEDULER_FLUSH, {
+      processed,
+      durationMs: +elapsedMs.toFixed(2),
+      frameBudgetMs: +frameBudgetMs.toFixed(2),
+      targets: processedByTarget.size,
+      budgetHit: elapsedMs >= frameBudgetMs
+    })
+    // Per-Task slice so each Task's row also shows when the scheduler
+    // serviced it — makes end-to-end latency readable without a JOIN.
+    for (const [termId, bytes] of processedByTarget) {
+      perfTraceTask(PERF_TRACE_EVENT.RENDERER_TERMINAL_DATA_SCHEDULER_FLUSH, {
+        bytes,
+        durationMs: +elapsedMs.toFixed(2)
+      }, termId)
     }
 
     if (this.hasQueuedWork()) {

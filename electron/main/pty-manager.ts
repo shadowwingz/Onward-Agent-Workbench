@@ -196,11 +196,25 @@ export class PtyManager {
     if (!record || record.disposed || record.exited) return false
 
     if (data.length <= SMALL_WRITE_THRESHOLD) {
+      const startMs = Date.now()
       try {
         // Short input (keystrokes, short commands): pass through directly
         record.pty.write(data)
+        perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_PTY_WRITE, {
+          path: 'small',
+          bytes: data.length,
+          durationMs: Date.now() - startMs,
+          ok: true
+        }, { terminalId: id })
         return true
       } catch (error) {
+        perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_PTY_WRITE, {
+          path: 'small',
+          bytes: data.length,
+          durationMs: Date.now() - startMs,
+          ok: false,
+          error: String(error)
+        }, { terminalId: id })
         console.warn('[PTY] write failed:', { id, error: String(error) })
         return false
       }
@@ -210,7 +224,16 @@ export class PtyManager {
     // ipcMain.handle() awaits the Promise, so the renderer's
     // `await terminal.write()` won't resolve until all chunks are written.
     // This prevents the follow-up '\r' from arriving mid-content.
-    record.writeQueue = record.writeQueue.then(() => this.writeLargeData(record, data))
+    const largeStartMs = Date.now()
+    record.writeQueue = record.writeQueue.then(async () => {
+      await this.writeLargeData(record, data)
+      perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_PTY_WRITE, {
+        path: 'large',
+        bytes: data.length,
+        durationMs: Date.now() - largeStartMs,
+        ok: true
+      }, { terminalId: id })
+    })
     return record.writeQueue.then(() => true)
   }
 

@@ -26,21 +26,28 @@ const preloadPerfTraceEnabled = process.env.ONWARD_PERF_TRACE === '1'
  * triggered them. Emission path mirrors perfTrace(): ipcRenderer.send to
  * DEBUG_PERF_TRACE; main-side logger tags the event onto the renderer
  * thread track via the forwarding handler in ipc-handlers.ts.
+ *
+ * If `terminalId` is provided in `extra`, the event is routed onto the
+ * per-Task virtual tid on the renderer side instead of the default
+ * WebContents track.
  */
 async function traceIpc<T>(eventName: string, extra: Record<string, unknown>, thunk: () => Promise<T>): Promise<T> {
   if (!preloadPerfTraceEnabled) return thunk()
   const startedAt = performance.now()
+  const { terminalId, ...rest } = extra as Record<string, unknown> & { terminalId?: string }
   try {
     const value = await thunk()
     ipcRenderer.send(IPC.DEBUG_PERF_TRACE, {
       event: eventName,
-      data: { ...extra, ok: true, durationMs: +(performance.now() - startedAt).toFixed(1) }
+      data: { ...rest, ok: true, durationMs: +(performance.now() - startedAt).toFixed(1) },
+      terminalId
     })
     return value
   } catch (error) {
     ipcRenderer.send(IPC.DEBUG_PERF_TRACE, {
       event: eventName,
-      data: { ...extra, ok: false, durationMs: +(performance.now() - startedAt).toFixed(1), error: String(error) }
+      data: { ...rest, ok: false, durationMs: +(performance.now() - startedAt).toFixed(1), error: String(error) },
+      terminalId
     })
     throw error
   }
@@ -903,7 +910,7 @@ export interface DebugAPI {
   getMainWorkMetrics: () => Promise<Record<string, unknown>>
   getPerfTraceInfo: () => Promise<PerfTraceInfo>
   resetPerfTraceMetrics: () => Promise<EventLoopStallMetrics>
-  perfTrace: (event: string, data?: Record<string, unknown>) => void
+  perfTrace: (event: string, data?: Record<string, unknown>, terminalId?: string) => void
   feedbackReset: () => Promise<void>
   feedbackSetMockIssues: (issues: FeedbackDebugRemoteIssue[]) => Promise<void>
   feedbackGetLastOpenedUrl: () => Promise<string | null>
@@ -1632,9 +1639,9 @@ const debugAPI: DebugAPI = {
   resetPerfTraceMetrics: () => {
     return ipcRenderer.invoke(IPC.DEBUG_RESET_PERF_TRACE_METRICS)
   },
-  perfTrace: (event: string, data?: Record<string, unknown>) => {
+  perfTrace: (event: string, data?: Record<string, unknown>, terminalId?: string) => {
     if (!perfTraceEnabled) return
-    ipcRenderer.send(IPC.DEBUG_PERF_TRACE, { event, data })
+    ipcRenderer.send(IPC.DEBUG_PERF_TRACE, { event, data, terminalId })
   },
   feedbackReset: () => {
     return ipcRenderer.invoke(IPC.DEBUG_FEEDBACK_RESET)

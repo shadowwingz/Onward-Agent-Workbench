@@ -17,10 +17,14 @@ type TracePayload = Record<string, unknown> | undefined
  * Optional context supplied by IPC bridges forwarding events from
  * renderer processes. Main-side emitters can ignore this: the default
  * main-process track (pid=1, tid=1) is used when absent.
+ *
+ * Pass `terminalId` to route the event onto the per-Task virtual tid
+ * managed by `assignTaskTid()`. The side is inferred from `process`.
  */
 interface RecordSource {
   process?: 'main' | 'renderer'
   tid?: number
+  terminalId?: string
 }
 
 interface PerfTraceInfo {
@@ -56,9 +60,18 @@ const MAX_RECENT_EVENT_LOOP_STALLS = 40
 // `pid=1` = main process.  `pid=2` = any renderer; the renderer's
 // WebContents id is used as `tid` so each window / utility shows up as
 // its own thread track in the Perfetto / Chrome DevTools UI.
+//
+// Per-Task virtual tids: any event tagged with a `terminalId` lands on
+// its own row (`thread_name='task-<shortId>'`) under the relevant
+// process. Main-side task tids start at `MAIN_TASK_TID_BASE`, renderer
+// at `RENDERER_TASK_TID_BASE`. Real tids (1, WebContents.id) stay
+// untouched, so Perfetto still shows the canonical main/renderer rows
+// alongside the per-task lanes.
 const MAIN_PID = 1
 const MAIN_TID = 1
 const RENDERER_PID = 2
+const MAIN_TASK_TID_BASE = 10000
+const RENDERER_TASK_TID_BASE = 20000
 
 function createEventLoopStallMetrics(resetAt = Date.now()): EventLoopStallMetrics {
   return {
@@ -218,6 +231,11 @@ class PerfTraceLogger {
   private eventLoopMetrics: EventLoopStallMetrics = createEventLoopStallMetrics()
   private startMs: number = 0
   private rendererThreadNamesEmitted = new Set<number>()
+  // Per-Task tid assignment. Key = `${side}:${terminalId}` so main/
+  // renderer lanes have separate auto-incrementing ranges.
+  private taskTids = new Map<string, number>()
+  private nextMainTaskTid = MAIN_TASK_TID_BASE
+  private nextRendererTaskTid = RENDERER_TASK_TID_BASE
 
   isEnabled(): boolean {
     return PERF_TRACE_ENABLED
@@ -316,6 +334,11 @@ class PerfTraceLogger {
    *
    * `source` lets IPC bridges tag renderer-forwarded events so they
    * land on a dedicated thread track.
+   *
+   * If `source.terminalId` is provided, the event is routed to the
+   * per-Task virtual tid managed by `assignTaskTid()` instead of the
+   * real main/renderer thread. A `thread_name` metadata packet is
+   * auto-emitted on first sight so Perfetto UI labels the row.
    */
   record(event: string, data?: TracePayload, source?: RecordSource): void {
     if (!PERF_TRACE_ENABLED) return
@@ -324,14 +347,18 @@ class PerfTraceLogger {
 
     const isRenderer = source?.process === 'renderer'
     const pid = isRenderer ? RENDERER_PID : MAIN_PID
-    const tid = isRenderer ? (source?.tid ?? 0) : MAIN_TID
-
-    if (isRenderer && tid > 0 && !this.rendererThreadNamesEmitted.has(tid)) {
-      this.rendererThreadNamesEmitted.add(tid)
-      this.writeRaw({
-        ph: 'M', name: 'thread_name', pid, tid,
-        args: { name: `renderer#${tid}` }
-      })
+    let tid: number
+    if (source?.terminalId) {
+      tid = this.assignTaskTid(source.terminalId, isRenderer ? 'renderer' : 'main')
+    } else {
+      tid = isRenderer ? (source?.tid ?? 0) : MAIN_TID
+      if (isRenderer && tid > 0 && !this.rendererThreadNamesEmitted.has(tid)) {
+        this.rendererThreadNamesEmitted.add(tid)
+        this.writeRaw({
+          ph: 'M', name: 'thread_name', pid, tid,
+          args: { name: `renderer#${tid}` }
+        })
+      }
     }
 
     const phase = resolvePhase(event, data)
@@ -349,6 +376,36 @@ class PerfTraceLogger {
     if (args && Object.keys(args as object).length > 0) entry.args = args
 
     this.writeRaw(entry)
+  }
+
+  /**
+   * Assign (or look up) the virtual tid for a given terminalId on the
+   * requested side. The first call for a (side, terminalId) pair also
+   * emits a `thread_name` metadata packet so Perfetto UI labels the
+   * row as `task-<shortId>`.
+   *
+   * Stable across the process lifetime: the same terminalId always
+   * maps to the same tid, so spans issued from main/ipc-handlers and
+   * from pty-manager for the same terminal line up on one row.
+   */
+  private assignTaskTid(terminalId: string, side: 'main' | 'renderer'): number {
+    const key = `${side}:${terminalId}`
+    const existing = this.taskTids.get(key)
+    if (existing !== undefined) return existing
+
+    const tid = side === 'main' ? this.nextMainTaskTid++ : this.nextRendererTaskTid++
+    this.taskTids.set(key, tid)
+
+    const pid = side === 'main' ? MAIN_PID : RENDERER_PID
+    // 8-char label keeps Perfetto row headers compact while remaining
+    // unique enough across the small terminal count a single user
+    // keeps open. Full terminalId stays available via event args.
+    const shortId = terminalId.length > 8 ? terminalId.slice(0, 8) : terminalId
+    this.writeRaw({
+      ph: 'M', name: 'thread_name', pid, tid,
+      args: { name: `task-${shortId}${side === 'renderer' ? '-rnd' : ''}` }
+    })
+    return tid
   }
 
   private writeRaw(entry: Record<string, unknown>): void {

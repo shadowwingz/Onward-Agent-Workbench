@@ -86,6 +86,57 @@ Key design decisions:
 | Phase mapping | `resolvePhase()` routes by name: stall / longtask / input-paint default to `X` with auto-derived `dur` | Callers pass `(name, data)` without worrying about Chrome trace protocol details |
 | File closure | Terminal `{}` element + `]}` on graceful quit; `SIGTERM` / `SIGINT` / `will-quit` / `before-quit` all flush | Perfetto UI tolerates truncated arrays on crash; tp_shell is strict, so we also close in the T02 self-check before handing tp_shell the file |
 | UI build pinning | Grep `tp_shell --version` → `ui.perfetto.dev/v<ver>-<sha>/` path | Avoids the "different build" warning banner that fires when the cloud UI leads or lags tp_shell |
+| Per-Task tid lanes | `assignTaskTid(terminalId, side)` — main tids start at 10000, renderer at 20000; thread_name = `task-<shortId>` (main) / `task-<shortId>-rnd` (renderer); auto-emitted on first event | Lets every hop in the PTY data-flow pipeline (onData → buffer → IPC send → renderer recv → scheduler enqueue → scheduler flush → xterm.write) line up on one Perfetto row per Task, on both processes. Real `tid=1` / `tid=WebContents.id` rows retained unchanged for everything not task-scoped. |
+
+### PTY data flow — end-to-end, per Task row
+
+Every hop below is emitted onto the same `task-<shortId>` tid (renderer
+side has `-rnd` suffix; time axis aligned). Reading left-to-right in
+Perfetto UI tells the full story: when the PTY fired, when main
+flushed IPC, when the renderer received it, when the scheduler got to
+it, and when xterm actually wrote. Reverse direction (user input) is
+symmetric.
+
+```
+Task track (per terminalId)                                         Event name
+────────────────────────────────────────────────────────────────    ─────────────────────────────────────
+  (output)  ptyProcess.onData                                        — aggregated in main:terminal-data-ipc-summary
+      │
+      ▼
+  ipc-handlers.ts:635  TerminalDataBuffer.push
+      │ (buffer:  fast≤128B direct / boost flush / batched 100 ms)
+      ▼
+  ipc-handlers.ts:600  webContents.send(TERMINAL_DATA)               main:terminal-data.ipc-send  (X, path=fast|boost|batched, bufferAgeMs, bytes)
+════════════════════════════════════════════════════════════════════════ IPC boundary
+  preload/index.ts:1082   ipcRenderer.on(TERMINAL_DATA)
+      │
+      ▼
+  terminal-session-manager.ts:207  onData listener                   renderer:terminal-data.ipc-recv  (i, bytes)
+      │
+      ├─ fast path (≤128B / boost active, no pending):              renderer:terminal-data.fast-path  (i, bytes, interactiveBoost)
+      │      ─► writeTerminalData                                    renderer:terminal-data.xterm-write (X, bytes, durationMs)
+      │
+      └─ slow path (bufferred):
+             pendingData.push + markDirty                             renderer:terminal-data.scheduler-enqueue  (i, bytes, pendingBytes)
+             OutputScheduler.flush (frame-budget loop)                renderer:terminal-data.scheduler-flush  (X, bytes, durationMs)
+                 ─► target.writeData → session.terminal.write         renderer:terminal-data.xterm-write  (X, bytes, durationMs)
+
+  (input)   xterm onData → electronAPI.terminal.write                renderer:terminal.send-input  (i, kind, bytes)
+      │                                                               renderer:ipc.terminal.write  (X, durationMs)
+      ▼
+  ipc-handlers.ts  ipcMain.handle(TERMINAL_WRITE)                     main:ipc.terminal.write  (X)
+      │
+      ▼
+  pty-manager.ts  ptyManager.write                                     main:pty.write  (X, path=small|large, bytes, durationMs)
+      │
+      ▼
+  record.pty.write(data)
+```
+
+`renderer:terminal-data.scheduler-flush` is **also** emitted on the
+default renderer tid (no terminalId) — the scheduler heartbeat carries
+`processed` count, `durationMs`, `frameBudgetMs` so its cost is
+visible even when no single Task dominates.
 
 ---
 
@@ -159,6 +210,20 @@ Updater emit on spawn + exit/kill.
 | `WORKER_RIPGREP_PROCESS_SPAWN` | `worker.ripgrep:process.spawn` | `X` | `electron/main/ripgrep-search-worker-entry.ts` — forwarded via `parentPort.postMessage({event:'trace', …})` and replayed by `ripgrep-search.ts::handleWorkerEvent` |
 | `WORKER_RIPGREP_PROCESS_EXIT` | `worker.ripgrep:process.exit` | `X` (has `durationMs`) | Same, on ripgrep process `close`/`error` |
 | `MAIN_UPDATER_SPAWN` | `main:updater.spawn` | `i` / `X` | `electron/main/update-service.ts` — one emission per strategy (`wmi` / `batch` / `detached-spawn` on win32, `macos-sh` on darwin) |
+| `MAIN_PTY_WRITE` | `main:pty.write` | `X` (has `durationMs`) | `electron/main/pty-manager.ts::write` — one span per PTY write (`path=small` direct or `large` chunked). Task-scoped tid. |
+
+#### Task-scoped data flow (PTY pipeline)
+
+Routed onto per-Task virtual tid (`task-<shortId>` on main, `-rnd` suffix on renderer). See diagram in § 1.
+
+| Constant | Name | Phase | Call site |
+|---|---|---|---|
+| `MAIN_TERMINAL_DATA_IPC_SEND` | `main:terminal-data.ipc-send` | `X` (has `bufferAgeMs`; dur unused) | `electron/main/ipc-handlers.ts` — every merged send; tagged `path=fast|boost|batched` |
+| `RENDERER_TERMINAL_DATA_IPC_RECV` | `renderer:terminal-data.ipc-recv` | `i` | `src/terminal/terminal-session-manager.ts::registerGlobalDataListener` |
+| `RENDERER_TERMINAL_DATA_FAST_PATH` | `renderer:terminal-data.fast-path` | `i` | Same file, fast-path branch (small chunk or interactive boost) |
+| `RENDERER_TERMINAL_DATA_SCHEDULER_ENQUEUE` | `renderer:terminal-data.scheduler-enqueue` | `i` | Slow-path branch — bytes entered the per-task queue |
+| `RENDERER_TERMINAL_DATA_SCHEDULER_FLUSH` | `renderer:terminal-data.scheduler-flush` | `X` (has `durationMs`) | `src/terminal/terminal-output-scheduler.ts::flush` — aggregate slice (no terminalId) + per-Task slice (with bytes consumed) |
+| `RENDERER_TERMINAL_DATA_XTERM_WRITE` | `renderer:terminal-data.xterm-write` | `X` (has `durationMs`) | `src/terminal/terminal-session-manager.ts::writeTerminalData` — actual `session.terminal.write()` cost |
 
 ### 2.2 Worker threads (pid=1, tid=1 — emitted on main track)
 
@@ -228,29 +293,61 @@ so every call through `window.electronAPI.<domain>.<method>()` gets a
 | `RENDERER_MONACO_VIEWSTATE_RESTORE` | `renderer:monaco.viewstate-restore` | `X` | `ProjectEditor.tsx::editor.restoreViewState` |
 | `RENDERER_XTERM_WEBGL_INIT` | `renderer:xterm.webgl-context-init` | `X` | `src/components/Terminal/Terminal.tsx` WebGL addon attach |
 
+#### User-input hot paths (wired)
+
+| Constant | Name | Phase | Call site |
+|---|---|---|---|
+| `RENDERER_PROMPT_EDITOR_SUBMIT` | `renderer:prompt.editor.submit` | `i` | `PromptEditor.tsx::handleSubmit` |
+| `RENDERER_PROMPT_EDITOR_CANCEL` | `renderer:prompt.editor.cancel-edit` | `i` | `PromptEditor.tsx::handleCancel` |
+| `RENDERER_PROMPT_SENDER_DISPATCH` | `renderer:prompt.sender.dispatch` | `i` | `PromptSender.tsx::handleSend*` + `handleExecute` — tagged `action=send|execute|sendAndExecute|sendAllAndExecute` |
+| `RENDERER_TERMINAL_FOCUS_CHANGE` | `renderer:terminal.focus-change` | `i` | `src/App.tsx::handleTerminalFocus` — Task-scoped tid |
+| `RENDERER_TERMINAL_SEND_INPUT` | `renderer:terminal.send-input` | `i` | `src/App.tsx` sendInputSequence — Task-scoped tid |
+| `RENDERER_PROJECT_FILE_OPEN` | `renderer:project.file-open` | `i` | `ProjectEditor.tsx::openFile` |
+| `RENDERER_PROJECT_SUBPAGE_NAVIGATE` | `renderer:project.subpage-navigate` | `i` | Two sites in `ProjectEditor.tsx` dispatching `subpage:navigate` for diff / history |
+| `RENDERER_PROJECT_SEARCH_GLOBAL` | `renderer:project.search.global` | `i` | `useGlobalSearch.ts::executeSearch` — fires once per debounced query commit |
+
+#### GUI entries (new)
+
+| Constant | Name | Phase | Call site |
+|---|---|---|---|
+| `RENDERER_TAB_CREATE` | `renderer:tab.create` | `i` | `TabBar.tsx` new-tab button |
+| `RENDERER_TAB_SWITCH` | `renderer:tab.switch` | `i` | `TabBar.tsx` tab `onSelect` |
+| `RENDERER_TERMINAL_SPLIT_ADD` | `renderer:terminal.split-add` | `i` | `src/App.tsx` split-layout auto-fill — Task-scoped tid |
+| `RENDERER_GITDIFF_OPEN` | `renderer:gitdiff.open` | `i` | `src/App.tsx` dropdown + shortcut dispatches |
+| `RENDERER_GITHISTORY_OPEN` | `renderer:githistory.open` | `i` | `src/App.tsx` dropdown `terminalGitHistory` branch |
+| `RENDERER_SETTINGS_OPEN` | `renderer:settings.open` | `i` | `src/App.tsx` panel switcher |
+| `RENDERER_CHANGELOG_OPEN` | `renderer:changelog.open` | `i` | `src/App.tsx::handleToggleChangeLog` |
+
+#### Background ops
+
+| Constant | Name | Phase | Call site |
+|---|---|---|---|
+| `MAIN_FILE_INDEX_BUILD` | `main:file-index.build` | `X` (has `durationMs`) | `electron/main/ipc-handlers.ts` `PROJECT_BUILD_FILE_INDEX` handler |
+| `MAIN_FILE_INDEX_UPDATE` | `main:file-index.update` | `i` | Same, `PROJECT_INVALIDATE_FILE_INDEX` handler |
+| `MAIN_PROJECT_TREE_WATCH_EVENT` | `main:project-tree-watch.event` | `i` | `project-tree-watch-manager.ts::scheduleFlush` — one per debounce-window start (not per raw FSEvent) |
+| `MAIN_PROJECT_TREE_WATCH_BATCH` | `main:project-tree-watch.batch` | `i` | Same, `flush()` — coalesced batch shipped to renderer |
+
 ---
 
 ## 3. Planned coverage gaps
 
-Remaining registered-but-unwired constants, in priority order. Each is
-a single `perfTrace(PERF_TRACE_EVENT.X, {...})` / `perfTraceLogger.record
-(...)` away from active.
+Remaining opportunities, in priority order. Not blockers — § 2 now
+covers PTY data flow end-to-end, all user-input hot paths, GUI entries
+and the known background ops.
 
-1. **User-input hot paths** — anchor user-observable events on the
-   timeline so the next SQL query can be "for every submit, what was
-   the timeline until the next event-loop-stall?".
-   - `RENDERER_PROMPT_EDITOR_SUBMIT` — `PromptEditor.tsx` submit handler
-   - `RENDERER_PROMPT_EDITOR_CANCEL` — PromptEditor cancel
-   - `RENDERER_PROMPT_SENDER_DISPATCH` — `PromptSender.tsx` send/execute
-   - `RENDERER_TERMINAL_FOCUS_CHANGE` — `TerminalGrid.tsx` focus activation
-   - `RENDERER_TERMINAL_SEND_INPUT` — `App.tsx` sendInputSequence
-   - `RENDERER_PROJECT_FILE_OPEN` — `ProjectEditor.tsx` openFile
-   - `RENDERER_PROJECT_SUBPAGE_NAVIGATE` — `subpage:navigate` dispatch
-   - `RENDERER_PROJECT_SEARCH_GLOBAL` — `GlobalSearch/SearchPanel.tsx` submit
-2. **Main-side IPC payload enrichment** — `MAIN_IPC_*` slices exist but
-   could carry richer payloads (file size, repo key) so the
-   renderer-side `RENDERER_IPC_*` spans can be joined against
-   main-side execution time in SQL.
+1. **Main-side IPC payload enrichment** — `MAIN_IPC_*` slices exist and
+   fire, but carry minimal payload. Adding file size / repo key /
+   result row count would let SQL queries join renderer-side
+   `RENDERER_IPC_*` spans against main-side execution time for
+   bandwidth analysis.
+2. **Raw FSEvent sampling** — `MAIN_PROJECT_TREE_WATCH_EVENT` emits at
+   debounce-window start (good signal-to-noise). If a deeper analysis
+   of FSEvent storms is ever needed, add a separate `.raw-event` span
+   inside `handleRawEvent` with a 1/N sampler to keep volume bounded.
+3. **Monaco dispose / mount** — restoreViewState is covered; the heavy
+   Monaco model attach/detach around subpage navigation is not. Adding
+   a span around `editor.dispose()` + `createEditor()` would close the
+   gap on "why did this tab switch stutter?".
 
 When moving an event from this list to § 2, add the file:line to the
 corresponding `PERF_TRACE_EVENT` block comment in `perf-trace-names.ts`

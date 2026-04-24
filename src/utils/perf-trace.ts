@@ -26,6 +26,23 @@ export function perfTrace(event: string, data?: TracePayload): void {
   }
 }
 
+/**
+ * Record a trace event on the per-Task virtual tid. Use this for every
+ * hop in the PTY input/output data flow so the same `terminalId` lines
+ * up on one Perfetto row across scheduler, xterm, and xterm-write
+ * events. Main-side peers (pty-manager, ipc-handlers) emit onto the
+ * mirror `tid` on pid=1, so a Task's lifetime is readable end-to-end
+ * without cross-referencing.
+ */
+export function perfTraceTask(event: string, data: TracePayload | undefined, terminalId: string): void {
+  if (!isPerfTraceEnabled()) return
+  try {
+    window.electronAPI.debug.perfTrace(event, data, terminalId)
+  } catch {
+    // ignore
+  }
+}
+
 function canTraceInput(now: number): boolean {
   if (now - inputTraceWindowStart >= 1000) {
     inputTraceWindowStart = now

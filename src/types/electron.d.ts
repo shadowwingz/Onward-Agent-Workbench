@@ -760,7 +760,7 @@ export interface DebugAPI {
   getMainWorkMetrics: () => Promise<Record<string, unknown>>
   getPerfTraceInfo: () => Promise<PerfTraceInfo>
   resetPerfTraceMetrics: () => Promise<EventLoopStallMetrics>
-  perfTrace: (event: string, data?: Record<string, unknown>) => void
+  perfTrace: (event: string, data?: Record<string, unknown>, terminalId?: string) => void
   feedbackReset: () => Promise<void>
   feedbackSetMockIssues: (issues: FeedbackDebugRemoteIssue[]) => Promise<void>
   feedbackGetLastOpenedUrl: () => Promise<string | null>

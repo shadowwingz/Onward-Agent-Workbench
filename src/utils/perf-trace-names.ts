@@ -95,6 +95,36 @@ export const PERF_TRACE_EVENT = {
   // returns; carries the worker-measured parse+highlight+katex duration.
   WORKER_MARKDOWN_RENDER_COMPLETE: 'worker.markdown:render-complete',
 
+  // ───────── PTY data flow — per-Task tid lane ─────────
+  // Every event in this block is emitted on the per-terminal virtual
+  // tid managed by `perf-trace-logger::assignTaskTid`. Main-side task
+  // lanes are `pid=1 tid>=10000`; renderer-side are `pid=2 tid>=20000`.
+  // The first emission for a terminalId auto-writes a thread_name
+  // metadata packet `task-<shortId>` so Perfetto UI shows each Task
+  // as its own row.
+  MAIN_TERMINAL_DATA_IPC_SEND: 'main:terminal-data.ipc-send',
+  MAIN_PTY_WRITE: 'main:pty.write',
+  RENDERER_TERMINAL_DATA_IPC_RECV: 'renderer:terminal-data.ipc-recv',
+  RENDERER_TERMINAL_DATA_FAST_PATH: 'renderer:terminal-data.fast-path',
+  RENDERER_TERMINAL_DATA_SCHEDULER_ENQUEUE: 'renderer:terminal-data.scheduler-enqueue',
+  RENDERER_TERMINAL_DATA_SCHEDULER_FLUSH: 'renderer:terminal-data.scheduler-flush',
+  RENDERER_TERMINAL_DATA_XTERM_WRITE: 'renderer:terminal-data.xterm-write',
+
+  // ───────── GUI entries (new) ─────────
+  RENDERER_TAB_CREATE: 'renderer:tab.create',
+  RENDERER_TAB_SWITCH: 'renderer:tab.switch',
+  RENDERER_TERMINAL_SPLIT_ADD: 'renderer:terminal.split-add',
+  RENDERER_GITDIFF_OPEN: 'renderer:gitdiff.open',
+  RENDERER_GITHISTORY_OPEN: 'renderer:githistory.open',
+  RENDERER_SETTINGS_OPEN: 'renderer:settings.open',
+  RENDERER_CHANGELOG_OPEN: 'renderer:changelog.open',
+
+  // ───────── Background — project file index + tree watch ─────────
+  MAIN_FILE_INDEX_BUILD: 'main:file-index.build',
+  MAIN_FILE_INDEX_UPDATE: 'main:file-index.update',
+  MAIN_PROJECT_TREE_WATCH_EVENT: 'main:project-tree-watch.event',
+  MAIN_PROJECT_TREE_WATCH_BATCH: 'main:project-tree-watch.batch',
+
   // ───────── Workers — app-state ─────────
   WORKER_APP_STATE_LATENCY: 'main:app-state-worker-latency',
   WORKER_APP_STATE_TIMEOUT: 'main:app-state-worker-timeout',

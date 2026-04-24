@@ -6,6 +6,8 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
 import { Prompt } from '../../types/electron'
 import { useI18n } from '../../i18n/useI18n'
+import { perfTrace } from '../../utils/perf-trace'
+import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
 
 interface PromptEditorProps {
   onSubmit: (title: string, content: string) => void
@@ -62,17 +64,25 @@ export function PromptEditor({ onSubmit, editingPrompt, onCancelEdit }: PromptEd
   const handleSubmit = useCallback(() => {
     if (!content.trim()) return
 
+    perfTrace(PERF_TRACE_EVENT.RENDERER_PROMPT_EDITOR_SUBMIT, {
+      titleLen: title.trim().length,
+      contentLen: content.trim().length,
+      isEdit: Boolean(editingPrompt)
+    })
     onSubmit(title.trim(), content.trim())
     setTitle('')
     setContent('')
-  }, [title, content, onSubmit])
+  }, [title, content, onSubmit, editingPrompt])
 
   // Cancel edit
   const handleCancel = useCallback(() => {
+    perfTrace(PERF_TRACE_EVENT.RENDERER_PROMPT_EDITOR_CANCEL, {
+      isEdit: Boolean(editingPrompt)
+    })
     setTitle('')
     setContent('')
     onCancelEdit()
-  }, [onCancelEdit])
+  }, [onCancelEdit, editingPrompt])
 
   // Shortcut support
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {

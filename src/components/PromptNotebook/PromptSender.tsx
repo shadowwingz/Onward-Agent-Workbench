@@ -7,6 +7,8 @@ import { useState, useEffect, useRef, memo } from 'react'
 import type { CSSProperties, KeyboardEvent, MouseEvent } from 'react'
 import type { TerminalBatchResult, TerminalInfo } from '../../types/prompt'
 import { useI18n } from '../../i18n/useI18n'
+import { perfTrace } from '../../utils/perf-trace'
+import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
 
 interface PromptSenderProps {
   terminals: TerminalInfo[]
@@ -203,18 +205,27 @@ export const PromptSender = memo(function PromptSender({
   const handleSendToSelected = async () => {
     if (selectedTerminals.size === 0) return
     const terminalIds = Array.from(selectedTerminals)
+    perfTrace(PERF_TRACE_EVENT.RENDERER_PROMPT_SENDER_DISPATCH, {
+      action: 'send', targets: terminalIds.length, contentLen: promptContent.length
+    })
     await runTerminalAction('promptSender.action.send', () => onSend(terminalIds, promptContent))
   }
 
   const handleSendAllAndExecute = async () => {
     if (terminals.length === 0 || !promptContent) return
     const terminalIds = terminals.map(t => t.id)
+    perfTrace(PERF_TRACE_EVENT.RENDERER_PROMPT_SENDER_DISPATCH, {
+      action: 'sendAllAndExecute', targets: terminalIds.length, contentLen: promptContent.length
+    })
     await runTerminalAction('promptSender.action.sendAndExecute', () => onSendAndExecute(terminalIds, promptContent))
   }
 
   const handleExecute = async () => {
     if (selectedTerminals.size === 0) return
     const terminalIds = Array.from(selectedTerminals)
+    perfTrace(PERF_TRACE_EVENT.RENDERER_PROMPT_SENDER_DISPATCH, {
+      action: 'execute', targets: terminalIds.length, contentLen: 0
+    })
     await runTerminalAction('promptSender.action.execute', () => onExecute(terminalIds))
   }
 
@@ -224,6 +235,9 @@ export const PromptSender = memo(function PromptSender({
       return
     }
     const terminalIds = Array.from(selectedTerminals)
+    perfTrace(PERF_TRACE_EVENT.RENDERER_PROMPT_SENDER_DISPATCH, {
+      action: 'sendAndExecute', targets: terminalIds.length, contentLen: promptContent.length
+    })
     await runTerminalAction('promptSender.action.sendAndExecute', () => onSendAndExecute(terminalIds, promptContent))
   }
 

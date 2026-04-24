@@ -5,6 +5,8 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { rendererWorkScheduler } from '../../../utils/renderer-work-scheduler'
+import { perfTrace } from '../../../utils/perf-trace'
+import { PERF_TRACE_EVENT } from '../../../utils/perf-trace-names'
 
 export interface SearchMatch {
   file: string
@@ -91,6 +93,14 @@ export function useGlobalSearch({ rootPath, isActive }: UseGlobalSearchParams) {
     setIsSearching(true)
     const searchId = `search-client-${Date.now()}-${Math.random().toString(36).slice(2)}`
     activeSearchIdRef.current = searchId
+    perfTrace(PERF_TRACE_EVENT.RENDERER_PROJECT_SEARCH_GLOBAL, {
+      queryLen: searchQuery.trim().length,
+      isRegex: searchOptions.isRegex,
+      isCaseSensitive: searchOptions.isCaseSensitive,
+      isWholeWord: searchOptions.isWholeWord,
+      hasIncludeGlob: Boolean(searchOptions.includeGlob),
+      hasExcludeGlob: Boolean(searchOptions.excludeGlob)
+    })
 
     try {
       const result = await window.electronAPI.project.searchStart({

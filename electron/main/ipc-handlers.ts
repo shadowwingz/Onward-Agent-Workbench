@@ -94,6 +94,9 @@ function updateBracketedPasteMode(current: boolean, data: string): boolean {
  * Instead of sending one IPC message per onData callback (which can be
  * 400-1000/s across 4 terminals), data is buffered and flushed at ~60fps.
  */
+type TerminalDataSendPath = 'fast' | 'boost' | 'batched'
+type TerminalDataSend = (id: string, data: string, meta: { path: TerminalDataSendPath; bufferAgeMs: number }) => void
+
 class TerminalDataBuffer {
   private chunks: string[] = []
   private totalBytes = 0
@@ -101,6 +104,7 @@ class TerminalDataBuffer {
   private disposed = false
   private interactiveBoostUntil = 0
   private visible = true
+  private firstPushAt = 0
 
   // IPC flush interval.  The previous value of 16 ms (~60 fps) sent up to
   // 360 IPC messages/s across 6 terminals, saturating the renderer's main
@@ -116,7 +120,7 @@ class TerminalDataBuffer {
 
   constructor(
     private readonly terminalId: string,
-    private readonly send: (id: string, data: string) => void
+    private readonly send: TerminalDataSend
   ) {}
 
   // Small data threshold for the fast path.  Keystroke echoes from the PTY
@@ -173,7 +177,7 @@ class TerminalDataBuffer {
     }
 
     if (interactiveBoostActive) {
-      this.send(this.terminalId, data)
+      this.send(this.terminalId, data, { path: 'boost', bufferAgeMs: 0 })
       return
     }
 
@@ -187,10 +191,13 @@ class TerminalDataBuffer {
       data.length <= TerminalDataBuffer.FAST_PATH_THRESHOLD &&
       this.chunks.length === 0
     ) {
-      this.send(this.terminalId, data)
+      this.send(this.terminalId, data, { path: 'fast', bufferAgeMs: 0 })
       return
     }
 
+    if (this.chunks.length === 0) {
+      this.firstPushAt = Date.now()
+    }
     this.chunks.push(data)
     this.totalBytes += data.length
 
@@ -214,9 +221,11 @@ class TerminalDataBuffer {
     }
     if (this.chunks.length === 0) return
     const merged = this.chunks.length === 1 ? this.chunks[0] : this.chunks.join('')
+    const bufferAgeMs = this.firstPushAt > 0 ? Date.now() - this.firstPushAt : 0
     this.chunks = []
     this.totalBytes = 0
-    this.send(this.terminalId, merged)
+    this.firstPushAt = 0
+    this.send(this.terminalId, merged, { path: 'batched', bufferAgeMs })
   }
 
   private trimToMaxBytes(maxBytes: number): void {
@@ -414,17 +423,21 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   ipcMain.on(IPC.DEBUG_LOG, (_event, payload: { message?: string; data?: unknown }) => {
     log('[RendererDebug]', payload?.message ?? '', payload?.data ?? '')
   })
-  ipcMain.on(IPC.DEBUG_PERF_TRACE, (rawEvent, payload: { event?: string; data?: Record<string, unknown> }) => {
+  ipcMain.on(IPC.DEBUG_PERF_TRACE, (rawEvent, payload: { event?: string; data?: Record<string, unknown>; terminalId?: string }) => {
     if (!payload?.event) return
     // Tag the renderer's WebContents id so the logger can map it to a
     // stable `tid` on the Chrome-trace / Perfetto side. Renderers share
     // pid=2 with tid = wc.id, so individual windows / utilities land on
     // their own thread track in the UI.
+    // If `terminalId` is present, the logger routes the event onto the
+    // per-Task virtual tid (so every hop for that task lines up on one
+    // Perfetto row under the renderer process).
     const wc = rawEvent.sender
     const tid = wc?.id ?? 0
     perfTraceLogger.record(payload.event, payload.data, {
       process: 'renderer',
-      tid
+      tid,
+      terminalId: payload.terminalId
     })
   })
 
@@ -593,9 +606,14 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
       }
 
       // IPC data buffer: merge high-frequency PTY output into batched sends
-      const dataBuffer = new TerminalDataBuffer(id, (tid, mergedData) => {
+      const dataBuffer = new TerminalDataBuffer(id, (tid, mergedData, meta) => {
         if (!mainWindow.isDestroyed()) {
           mainWindow.webContents.send(IPC.TERMINAL_DATA, tid, mergedData)
+          perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_TERMINAL_DATA_IPC_SEND, {
+            path: meta.path,
+            bytes: mergedData.length,
+            bufferAgeMs: meta.bufferAgeMs
+          }, { terminalId: tid })
         }
         // Diagnostic counter
         if (shouldLog) {
@@ -1331,15 +1349,22 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   })
 
   ipcMain.handle(IPC.PROJECT_BUILD_FILE_INDEX, async (_, root: string) => {
-    return await projectFsWorkerClient.buildFileIndex(root)
+    const startMs = Date.now()
+    const result = await projectFsWorkerClient.buildFileIndex(root)
+    perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_FILE_INDEX_BUILD, {
+      fileCount: Array.isArray(result) ? result.length : 0,
+      durationMs: Date.now() - startMs
+    })
+    return result
+  })
+
+  ipcMain.handle(IPC.PROJECT_INVALIDATE_FILE_INDEX, async (_, root: string) => {
+    perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_FILE_INDEX_UPDATE, { reason: 'invalidate' })
+    return await projectFsWorkerClient.invalidateFileIndex(root)
   })
 
   ipcMain.handle(IPC.PROJECT_SEARCH_FILENAMES, async (_, root: string, query: string, limit?: number) => {
     return await projectFsWorkerClient.searchFilenames(root, query, limit ?? 80)
-  })
-
-  ipcMain.handle(IPC.PROJECT_INVALIDATE_FILE_INDEX, async (_, root: string) => {
-    return await projectFsWorkerClient.invalidateFileIndex(root)
   })
 
   ipcMain.handle(IPC.PROJECT_READ_FILE, async (_, root: string, path: string) => {

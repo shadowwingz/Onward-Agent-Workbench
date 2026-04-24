@@ -12,6 +12,8 @@ import type { TerminalStyleConfig } from '../types/settings.d.ts'
 import type { TerminalBufferOptions, TerminalBufferResult } from '../types/electron.d.ts'
 import { requestOpenExternalHttpLink } from '../utils/externalLink'
 import { perfMonitor } from '../utils/perf-monitor'
+import { perfTraceTask } from '../utils/perf-trace'
+import { PERF_TRACE_EVENT } from '../utils/perf-trace-names'
 import { inputPriorityLane } from './input-priority-lane'
 import { TerminalOutputScheduler } from './terminal-output-scheduler'
 import {
@@ -209,6 +211,9 @@ export class TerminalSessionManager {
       if (!session) return
 
       perfMonitor.recordIpcData(data.length)
+      perfTraceTask(PERF_TRACE_EVENT.RENDERER_TERMINAL_DATA_IPC_RECV, {
+        bytes: data.length
+      }, termId)
 
       const interactiveBoostActive = this.shouldUseInteractiveBoost(session)
       const outputActive = this.isOutputActive(session)
@@ -249,6 +254,10 @@ export class TerminalSessionManager {
           }
           return
         }
+        perfTraceTask(PERF_TRACE_EVENT.RENDERER_TERMINAL_DATA_FAST_PATH, {
+          bytes: data.length,
+          interactiveBoost: interactiveBoostActive
+        }, termId)
         this.writeTerminalData(session, data)
 
         // Still record input latency for the perf monitor
@@ -275,6 +284,11 @@ export class TerminalSessionManager {
       this.trimPendingData(session, VISIBLE_PENDING_DATA_MAX_BYTES)
 
       this.outputScheduler.markDirty(termId, interactiveBoostActive)
+      perfTraceTask(PERF_TRACE_EVENT.RENDERER_TERMINAL_DATA_SCHEDULER_ENQUEUE, {
+        bytes: data.length,
+        pendingBytes: session.pendingDataBytes,
+        interactiveBoost: interactiveBoostActive
+      }, termId)
 
       // Input latency: time from keystroke to echo arrival
       const ksTs = (session as any)._lastKeystrokeTs as number | undefined
@@ -1312,7 +1326,12 @@ export class TerminalSessionManager {
     // scrolled up we keep their position. No programmatic scroll on output.
     const t0 = performance.now()
     session.terminal.write(data)
-    perfMonitor.recordXtermWrite(performance.now() - t0)
+    const dur = performance.now() - t0
+    perfMonitor.recordXtermWrite(dur)
+    perfTraceTask(PERF_TRACE_EVENT.RENDERER_TERMINAL_DATA_XTERM_WRITE, {
+      bytes: data.length,
+      durationMs: +dur.toFixed(2)
+    }, session.id)
   }
 
   private activateInteractiveBoost(id: string): void {

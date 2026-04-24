@@ -3467,6 +3467,11 @@ export function ProjectEditor({
     source: OpenFileSource = 'user',
     options?: OpenFileOptions
   ) => {
+    perfTrace(PERF_TRACE_EVENT.RENDERER_PROJECT_FILE_OPEN, {
+      source,
+      pathLen: path.length,
+      ext: path.split('.').pop() || ''
+    })
     const currentActiveFilePath = activeFilePathRef.current
     if (source === 'user') {
       // User manual navigation has the highest priority, canceling any ongoing recovery process to avoid being "pulled back to old files".
@@ -5484,6 +5489,10 @@ export function ProjectEditor({
       debugLog('gitdiff:open:dispatch', { terminalId })
     }
     const detail: SubpageNavigateEventDetail = { terminalId, target: 'diff' }
+    perfTrace(PERF_TRACE_EVENT.RENDERER_PROJECT_SUBPAGE_NAVIGATE, {
+      target: 'diff',
+      hasTerminalId: Boolean(terminalId)
+    })
     window.dispatchEvent(new CustomEvent('subpage:navigate', { detail }))
   }, [
     _terminalId,
@@ -5517,6 +5526,10 @@ export function ProjectEditor({
     resetActiveFileState()
     const terminalId = _terminalId
     const detail: SubpageNavigateEventDetail = { terminalId, target: 'history' }
+    perfTrace(PERF_TRACE_EVENT.RENDERER_PROJECT_SUBPAGE_NAVIGATE, {
+      target: 'history',
+      hasTerminalId: Boolean(terminalId)
+    })
     window.dispatchEvent(new CustomEvent('subpage:navigate', { detail }))
   }, [
     _terminalId,

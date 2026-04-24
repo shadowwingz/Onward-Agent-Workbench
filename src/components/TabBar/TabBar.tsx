@@ -7,6 +7,8 @@ import { useState, useCallback, useEffect } from 'react'
 import { TabItem } from './TabItem'
 import { useAppState } from '../../hooks/useAppState'
 import { useI18n } from '../../i18n/useI18n'
+import { perfTrace } from '../../utils/perf-trace'
+import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
 import type { UpdaterStatus } from '../../types/electron.d.ts'
 import './TabBar.css'
 
@@ -226,7 +228,15 @@ export function TabBar() {
                 isOnly={state.tabs.length === 1}
                 isDragOver={dragOverIndex === index}
                 isDragging={draggedIndex === index}
-                onSelect={() => switchTab(tab.id)}
+                onSelect={() => {
+                  if (tab.id !== state.activeTabId) {
+                    perfTrace(PERF_TRACE_EVENT.RENDERER_TAB_SWITCH, {
+                      fromActive: state.activeTabId === tab.id ? 0 : 1,
+                      tabCount: state.tabs.length
+                    })
+                  }
+                  switchTab(tab.id)
+                }}
                 onClose={() => handleCloseTab(tab.id, index)}
                 onRename={(customName) => renameTab(tab.id, customName)}
                 onDragStart={() => handleDragStart(index)}
@@ -241,7 +251,12 @@ export function TabBar() {
           {/* New Tab button */}
           <button
             className={`tab-add-btn ${!canCreateTab() ? 'disabled' : ''}`}
-            onClick={() => createTab()}
+            onClick={() => {
+              perfTrace(PERF_TRACE_EVENT.RENDERER_TAB_CREATE, {
+                tabCountBefore: state.tabs.length
+              })
+              createTab()
+            }}
             disabled={!canCreateTab()}
             title={canCreateTab() ? t('tabBar.newTab') : t('tabBar.maxTabsReached')}
           >

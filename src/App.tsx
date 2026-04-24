@@ -29,6 +29,8 @@ import type { TabState, EditorDraft, PromptCleanupConfig, PromptSchedule, Execut
 import type { ShortcutAction } from './types/settings.d.ts'
 import type { ProjectEditorOpenEventDetail, ProjectEditorOpenRequest, SubpageId } from './types/subpage'
 import { requestOpenExternalHttpLink } from './utils/externalLink'
+import { perfTrace, perfTraceTask } from './utils/perf-trace'
+import { PERF_TRACE_EVENT } from './utils/perf-trace-names'
 import { computeNextExecution } from './utils/schedule'
 import {
   createTerminalBatchResult,
@@ -209,6 +211,9 @@ const TabTerminalGrid = memo(function TabTerminalGrid({
   }, [tab.terminals, tab.activeTerminalId, getTerminalDisplayName])
 
   const handleTerminalFocus = useCallback((terminalId: string) => {
+    perfTraceTask(PERF_TRACE_EVENT.RENDERER_TERMINAL_FOCUS_CHANGE, {
+      tabId: tab.id
+    }, terminalId)
     onTerminalFocus(tab.id, terminalId)
   }, [tab.id, onTerminalFocus])
 
@@ -575,8 +580,14 @@ function AppContent({
         if (tab.id === state.activeTabId) {
           const newTerminals = [...currentTerminals]
           for (let i = currentTerminals.length; i < layoutMode; i++) {
+            const id = `terminal-${tab.id}-${Date.now()}-${i}`
+            perfTraceTask(PERF_TRACE_EVENT.RENDERER_TERMINAL_SPLIT_ADD, {
+              tabId: tab.id,
+              layoutMode,
+              slotIndex: i
+            }, id)
             newTerminals.push({
-              id: `terminal-${tab.id}-${Date.now()}-${i}`,
+              id,
               customName: null,
               lastCwd: null
             })
@@ -720,6 +731,10 @@ function AppContent({
             continue
           }
         }
+        perfTraceTask(PERF_TRACE_EVENT.RENDERER_TERMINAL_SEND_INPUT, {
+          kind: isMultiLine ? 'paste' : 'raw',
+          bytes: content.length
+        }, id)
         const writeResult = await window.electronAPI.terminal.sendInputSequence(id, {
           kind: isMultiLine ? 'paste' : 'raw',
           content
@@ -948,6 +963,7 @@ function AppContent({
       if (currentTabId) {
         panelBeforeSettingsByTabRef.current[currentTabId] = activePanelRef.current
       }
+      perfTrace(PERF_TRACE_EVENT.RENDERER_SETTINGS_OPEN, {})
       setShowSettings(true)
       updateActiveTab({ activePanel: null })
     } else {
@@ -967,6 +983,7 @@ function AppContent({
     setShowChangeLog((previous) => {
       const next = !previous
       if (next) {
+        perfTrace(PERF_TRACE_EVENT.RENDERER_CHANGELOG_OPEN, {})
         setShowFeedbackModal(false)
       }
       return next
@@ -1666,11 +1683,13 @@ function SettingsProviderWithHandler() {
       }
       case 'terminalGitDiff': {
         window.electronAPI.telemetry.track('dropdown/development', { action: 'gitDiff' })
+        perfTrace(PERF_TRACE_EVENT.RENDERER_GITDIFF_OPEN, { entry: 'dropdown' })
         dispatchTerminalAction('gitDiff')
         break
       }
       case 'terminalGitHistory': {
         window.electronAPI.telemetry.track('dropdown/development', { action: 'gitHistory' })
+        perfTrace(PERF_TRACE_EVENT.RENDERER_GITHISTORY_OPEN, { entry: 'dropdown' })
         dispatchTerminalAction('gitHistory')
         break
       }
@@ -1692,6 +1711,7 @@ function SettingsProviderWithHandler() {
       case 'viewGitDiff': {
         const terminalId = activeTab?.activeTerminalId || getLastFocusedTerminalId()
         if (terminalId) {
+          perfTrace(PERF_TRACE_EVENT.RENDERER_GITDIFF_OPEN, { entry: 'shortcut' })
           window.dispatchEvent(new CustomEvent('git-diff:open', { detail: { terminalId } }))
         }
         break

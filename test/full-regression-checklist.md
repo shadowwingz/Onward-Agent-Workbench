@@ -280,6 +280,10 @@ below. Absence in a fresh trace is a regression:
 | IPC bridge latency | `renderer:ipc.project.read-file`, `renderer:ipc.git.get-diff`, `renderer:ipc.terminal.write` | `electron/preload/index.ts` `traceIpc()` wrapper |
 | Window events | `renderer:window.visibility-change`, `renderer:window.focus`, `renderer:window.blur`, `renderer:window.pagehide` | `src/utils/perf-trace.ts` `installWindowEventTrace()` |
 | Monaco / xterm init | `renderer:monaco.viewstate-restore`, `renderer:xterm.webgl-context-init` | ProjectEditor Monaco handler + `src/components/Terminal/Terminal.tsx` |
+| **PTY data flow (end-to-end)** | `main:terminal-data.ipc-send`, `renderer:terminal-data.ipc-recv`, `renderer:terminal-data.fast-path`, `renderer:terminal-data.scheduler-enqueue`, `renderer:terminal-data.scheduler-flush`, `renderer:terminal-data.xterm-write`, `main:pty.write` | All Task-scoped — land on per-Task tid rows (`task-<shortId>` on main, `-rnd` suffix on renderer). Absence of any hop in a trace that otherwise shows `main:pty.spawn` is a regression. |
+| User-input hot paths | `renderer:prompt.editor.submit/cancel`, `renderer:prompt.sender.dispatch`, `renderer:terminal.focus-change`, `renderer:terminal.send-input`, `renderer:project.file-open`, `renderer:project.subpage-navigate`, `renderer:project.search.global` | Previously registered-but-unwired; now fire on their respective user gestures. `focus-change` / `send-input` / `split-add` are Task-scoped. |
+| GUI entries | `renderer:tab.create`, `renderer:tab.switch`, `renderer:terminal.split-add`, `renderer:gitdiff.open`, `renderer:githistory.open`, `renderer:settings.open`, `renderer:changelog.open` | TabBar + App.tsx. |
+| Background ops | `main:file-index.build/update`, `main:project-tree-watch.event/batch` | Project FS worker build and tree-watch coalesce. |
 
 **Total canonical runners in v0.3: 44** (+1 skipped on macOS →
 `run-auto-update-windows-e2e.sh`, covered in §12).
