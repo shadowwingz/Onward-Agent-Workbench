@@ -13,6 +13,8 @@ import { resolve, relative, sep, isAbsolute, dirname, delimiter, basename, join 
 import { fileURLToPath } from 'url'
 import { gitRuntimeManager, type GitTaskKind, type GitTaskPriority } from './git-runtime-manager'
 import { MAX_IMAGE_FILE_SIZE, bufferToImageDataUrl, isSupportedImageFile } from './image-utils'
+import { perfTraceLogger } from './perf-trace-logger'
+import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 
 const PDF_EXT = '.pdf'
 const EPUB_EXT = '.epub'
@@ -85,6 +87,12 @@ async function execAsync(command: string, options?: Parameters<typeof rawExecAsy
   )
 }
 
+function classifyExecBinary(file: string): { binary: string; isGit: boolean } {
+  const raw = basename(file).toLowerCase()
+  const binary = raw.endsWith('.exe') ? raw.slice(0, -4) : raw
+  return { binary, isGit: binary === 'git' }
+}
+
 async function execFileAsync(
   file: string,
   args: string[],
@@ -92,16 +100,47 @@ async function execFileAsync(
   meta: GitTaskMeta = {}
 ): Promise<ExecFileResult> {
   const label = [file, ...args].join(' ')
+  const repoKey = normalizeRepoKey(meta.repoKey ?? normalizeExecCwd(options?.cwd))
+  const { binary, isGit } = classifyExecBinary(file)
   return gitRuntimeManager.enqueueTask(
     {
       key: meta.dedupeKey,
-      repoKey: normalizeRepoKey(meta.repoKey ?? normalizeExecCwd(options?.cwd)),
+      repoKey,
       repoConcurrencyLimit: meta.repoConcurrencyLimit,
       priority: meta.priority || 'normal',
       kind: meta.kind || 'git',
       label: meta.label || label
     },
-    () => rawExecFileAsync(file, args, options)
+    async () => {
+      const startMs = Date.now()
+      const basePayload: Record<string, unknown> = isGit
+        ? { subcommand: args[0] ?? null }
+        : { binary, firstArg: args[0] ?? null }
+      basePayload.repoKey = repoKey ?? null
+      basePayload.kind = meta.kind || 'git'
+      basePayload.priority = meta.priority || 'normal'
+      basePayload.argsLen = args.length
+      const eventName = isGit ? PERF_TRACE_EVENT.MAIN_GIT_EXEC : PERF_TRACE_EVENT.MAIN_PROC_EXEC
+      try {
+        const result = await rawExecFileAsync(file, args, options)
+        perfTraceLogger.record(eventName, {
+          ...basePayload,
+          durationMs: Date.now() - startMs,
+          ok: true
+        })
+        return result
+      } catch (error) {
+        const err = error as NodeJS.ErrnoException & { code?: string | number }
+        perfTraceLogger.record(eventName, {
+          ...basePayload,
+          durationMs: Date.now() - startMs,
+          ok: false,
+          exitCode: typeof err?.code === 'number' ? err.code : null,
+          errCode: typeof err?.code === 'string' ? err.code : null
+        })
+        throw error
+      }
+    }
   )
 }
 

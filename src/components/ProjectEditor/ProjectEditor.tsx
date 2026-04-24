@@ -14,6 +14,8 @@ import { useAppState } from '../../hooks/useAppState'
 import { DEFAULT_GIT_DIFF_FONT_SIZE } from '../../constants/gitDiff'
 import { useSubpageEscape } from '../../hooks/useSubpageEscape'
 import { useI18n } from '../../i18n/useI18n'
+import { perfTrace } from '../../utils/perf-trace'
+import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
 import { runAllTests } from '../../autotest/autotest-runner'
 import type { AutotestContext, CpuSummary, ProjectEditorDebugApi, TestResult } from '../../autotest/types'
 import 'katex/dist/katex.min.css'
@@ -959,6 +961,7 @@ export function ProjectEditor({
   const markdownIdleHandleRef = useRef<number | null>(null)
   const markdownWorkerInFlightRef = useRef(false)
   const markdownWorkerQueuedRef = useRef(false)
+  const markdownRenderStartRef = useRef(0)
   const markdownRenderSourceRef = useRef('')
   const markdownRootPathRef = useRef('')
   const markdownBaseDirRef = useRef('')
@@ -2217,7 +2220,12 @@ export function ProjectEditor({
       suppressProgrammaticEditorPreviewSyncRef.current = false
     }, PROGRAMMATIC_EDITOR_PREVIEW_SYNC_SUPPRESS_MS)
     if (pendingViewStateRef.current) {
+      const restoreStart = performance.now()
       editor.restoreViewState(pendingViewStateRef.current)
+      perfTrace(PERF_TRACE_EVENT.RENDERER_MONACO_VIEWSTATE_RESTORE, {
+        filePath: activeFilePathRef.current,
+        durationMs: +(performance.now() - restoreStart).toFixed(1)
+      })
       pendingViewStateRef.current = null
     }
     const cursorApplied = applyPendingCursorPosition({ reveal: !hadViewState })
@@ -2445,12 +2453,27 @@ export function ProjectEditor({
       if (!pending) return
       const start = performance.now()
       const safeHtml = DOMPurify.sanitize(pending.html || '', { ALLOWED_URI_REGEXP: DOMPURIFY_URI_POLICY })
+      const sanitizeEnd = performance.now()
+      perfTrace(PERF_TRACE_EVENT.RENDERER_MARKDOWN_SANITIZE, {
+        htmlLength: pending.html?.length ?? 0,
+        safeHtmlLength: safeHtml.length,
+        durationMs: +(sanitizeEnd - start).toFixed(1)
+      })
       if (applyId !== markdownApplyRequestIdRef.current) return
       setMarkdownRenderedHtml(safeHtml)
       setMarkdownImagePaths(Array.isArray(pending.imagePaths) ? pending.imagePaths : [])
       setMarkdownRenderPending(false)
       const duration = performance.now() - start
       markdownRenderDurationRef.current = duration
+      const endToEndStart = markdownRenderStartRef.current
+      if (endToEndStart > 0) {
+        perfTrace(PERF_TRACE_EVENT.RENDERER_MARKDOWN_RENDER, {
+          htmlLength: safeHtml.length,
+          imageCount: Array.isArray(pending.imagePaths) ? pending.imagePaths.length : 0,
+          durationMs: +(sanitizeEnd - endToEndStart).toFixed(1)
+        })
+        markdownRenderStartRef.current = 0
+      }
       if (DEBUG_PROJECT_EDITOR && (duration > 5 || markdownPurifyLogCountRef.current < 5)) {
         if (markdownPurifyLogCountRef.current < 5) {
           markdownPurifyLogCountRef.current += 1
@@ -2497,13 +2520,16 @@ export function ProjectEditor({
       perfCountersRef.current.workerSend += 1
     }
     setMarkdownRenderPending(true)
+    markdownRenderStartRef.current = performance.now()
     worker.postMessage({
       id: nextId,
       content,
       rootPath,
       baseDir,
       imageMap,
-      profile: DEBUG_PROJECT_EDITOR
+      // Enable worker-side profiling whenever DEBUG or perf trace is on;
+      // `renderDuration` is what `worker.markdown:render-complete` reports.
+      profile: DEBUG_PROJECT_EDITOR || Boolean(window.electronAPI?.debug?.perfTraceEnabled)
     })
   }, [])
 
@@ -2744,6 +2770,14 @@ export function ProjectEditor({
         if (!payload || typeof payload.id !== 'number') return
         if (payload.id !== markdownWorkerLatestIdRef.current) return
         markdownWorkerInFlightRef.current = false
+        if (typeof payload.renderDuration === 'number') {
+          perfTrace(PERF_TRACE_EVENT.WORKER_MARKDOWN_RENDER_COMPLETE, {
+            contentLength: payload.contentLength ?? 0,
+            htmlLength: payload.html?.length ?? 0,
+            imageCount: Array.isArray(payload.imagePaths) ? payload.imagePaths.length : 0,
+            durationMs: +payload.renderDuration.toFixed(1)
+          })
+        }
         if (
           DEBUG_PROJECT_EDITOR &&
           typeof payload.renderDuration === 'number' &&

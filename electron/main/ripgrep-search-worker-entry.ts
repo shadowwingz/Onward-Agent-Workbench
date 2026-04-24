@@ -5,6 +5,15 @@
 
 import { spawn, type ChildProcess } from 'child_process'
 import { parentPort } from 'worker_threads'
+import { basename } from 'path'
+
+import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
+
+type TracePayload = Record<string, unknown>
+
+function postTrace(name: string, data?: TracePayload): void {
+  parentPort?.postMessage({ event: 'trace', name, data: data ?? {} })
+}
 
 interface RipgrepSearchOptions {
   searchId?: string
@@ -131,6 +140,7 @@ function startSearch(searchId: string, rgPath: string, options: RipgrepSearchOpt
   const startTime = Date.now()
   const maxResults = options.maxResults ?? 5000
   let process: ChildProcess
+  const spawnStartMs = Date.now()
 
   try {
     process = spawn(rgPath, buildRipgrepArgs(options), {
@@ -138,7 +148,22 @@ function startSearch(searchId: string, rgPath: string, options: RipgrepSearchOpt
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true
     })
-  } catch {
+    postTrace(PERF_TRACE_EVENT.WORKER_RIPGREP_PROCESS_SPAWN, {
+      searchId,
+      rgBinary: basename(rgPath),
+      pid: process.pid ?? null,
+      argsLen: buildRipgrepArgs(options).length,
+      maxResults,
+      durationMs: Date.now() - spawnStartMs
+    })
+  } catch (error) {
+    postTrace(PERF_TRACE_EVENT.WORKER_RIPGREP_PROCESS_SPAWN, {
+      searchId,
+      rgBinary: basename(rgPath),
+      ok: false,
+      error: String(error),
+      durationMs: Date.now() - spawnStartMs
+    })
     postEvent({
       event: 'done',
       stats: { searchId, matchCount: 0, fileCount: 0, durationMs: 0, cancelled: false }
@@ -219,6 +244,14 @@ function startSearch(searchId: string, rgPath: string, options: RipgrepSearchOpt
     }
     flushBatch()
     activeProcesses.delete(searchId)
+    postTrace(PERF_TRACE_EVENT.WORKER_RIPGREP_PROCESS_EXIT, {
+      searchId,
+      pid: process.pid ?? null,
+      matchCount,
+      fileCount: files.size,
+      limitReached,
+      durationMs: Date.now() - startTime
+    })
     postEvent({
       event: 'done',
       stats: {

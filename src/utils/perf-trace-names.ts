@@ -61,6 +61,40 @@ export const PERF_TRACE_EVENT = {
   MAIN_IPC_GIT_GET_HISTORY: 'main:ipc.git.get-history',
   MAIN_IPC_TERMINAL_SPAWN: 'main:ipc.terminal.spawn',
 
+  // ───────── Main process — PTY child process lifecycle ─────────
+  // Covers every node-pty spawn, so terminal-startup cost and abnormal
+  // exits are visible per terminalId instead of only the 1s aggregate.
+  MAIN_PTY_SPAWN: 'main:pty.spawn',
+  MAIN_PTY_EXIT: 'main:pty.exit',
+  MAIN_PTY_KILL: 'main:pty.kill',
+
+  // ───────── Main process — Git CLI per-exec latency ─────────
+  // One ph='X' slice per execFile(git ...) call; tagged with the first
+  // arg as `subcommand` so Perfetto SQL can group by `status`/`diff`/etc.
+  MAIN_GIT_EXEC: 'main:git.exec',
+
+  // ───────── Main process — non-git child-process exec ─────────
+  // `git-utils.ts::execFileAsync` is also used for adjacent probes
+  // (lsof for terminal cwd, future helpers). Routing those to a
+  // distinct event name keeps `main:git.exec` honest — so percentile
+  // queries on git pressure do not accidentally include lsof spawns.
+  MAIN_PROC_EXEC: 'main:proc.exec',
+
+  // ───────── Main process — updater/installer child-process spawns ─────────
+  // Downloads/installers that Onward fires off via child_process.
+  MAIN_UPDATER_SPAWN: 'main:updater.spawn',
+
+  // ───────── Workers — ripgrep process lifecycle (inside rg worker) ─────────
+  // Runs on the ripgrep Node Worker Thread; forwarded to the main
+  // trace file through parentPort -> perfTraceLogger.
+  WORKER_RIPGREP_PROCESS_SPAWN: 'worker.ripgrep:process.spawn',
+  WORKER_RIPGREP_PROCESS_EXIT: 'worker.ripgrep:process.exit',
+
+  // ───────── Workers — markdown preview (renderer Web Worker) ─────────
+  // Emitted by the renderer-side client when a postMessage response
+  // returns; carries the worker-measured parse+highlight+katex duration.
+  WORKER_MARKDOWN_RENDER_COMPLETE: 'worker.markdown:render-complete',
+
   // ───────── Workers — app-state ─────────
   WORKER_APP_STATE_LATENCY: 'main:app-state-worker-latency',
   WORKER_APP_STATE_TIMEOUT: 'main:app-state-worker-timeout',

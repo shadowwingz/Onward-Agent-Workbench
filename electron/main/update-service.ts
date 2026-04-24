@@ -9,6 +9,8 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSyn
 import { tmpdir } from 'os'
 import { basename, dirname, isAbsolute, join } from 'path'
 import { spawn, execFileSync } from 'child_process'
+import { perfTraceLogger } from './perf-trace-logger'
+import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 import { getAppInfo, type ReleaseChannel, type ReleaseOs } from './app-info'
 import { compareVersions, parseVersion } from './update-version'
 import { getTelemetryService } from './telemetry/telemetry-service'
@@ -530,14 +532,27 @@ function launchWindowsUpdateScript(params: {
   writeFileSync(launcherPath, launcherContent, { encoding: 'utf-8' })
 
   try {
+    const wmiStart = Date.now()
     execFileSync(psPath, ['-ExecutionPolicy', 'Bypass', '-NoProfile', '-File', launcherPath], {
       windowsHide: true,
       stdio: 'ignore',
       timeout: 15000
     })
+    perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_UPDATER_SPAWN, {
+      strategy: 'wmi',
+      platform: 'win32',
+      ok: true,
+      durationMs: Date.now() - wmiStart
+    })
     appendToInstallLog(params.logPath, 'Node.js: WMI launch succeeded.')
     return true
   } catch (err) {
+    perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_UPDATER_SPAWN, {
+      strategy: 'wmi',
+      platform: 'win32',
+      ok: false,
+      error: String(err)
+    })
     appendToInstallLog(params.logPath, `Node.js: WMI launch failed: ${err}. Trying batch launcher.`)
   }
 
@@ -547,14 +562,27 @@ function launchWindowsUpdateScript(params: {
   writeFileSync(batPath, batContent, { encoding: 'utf-8' })
 
   try {
+    const batStart = Date.now()
     execFileSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', batPath], {
       windowsHide: true,
       stdio: 'ignore',
       timeout: 5000
     })
+    perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_UPDATER_SPAWN, {
+      strategy: 'batch',
+      platform: 'win32',
+      ok: true,
+      durationMs: Date.now() - batStart
+    })
     appendToInstallLog(params.logPath, 'Node.js: Batch launcher succeeded.')
     return true
   } catch (err) {
+    perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_UPDATER_SPAWN, {
+      strategy: 'batch',
+      platform: 'win32',
+      ok: false,
+      error: String(err)
+    })
     appendToInstallLog(params.logPath, `Node.js: Batch launcher failed: ${err}. Trying detached spawn.`)
   }
 
@@ -565,6 +593,12 @@ function launchWindowsUpdateScript(params: {
       stdio: 'ignore',
       windowsHide: true
     })
+    perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_UPDATER_SPAWN, {
+      strategy: 'detached-spawn',
+      platform: 'win32',
+      ok: true,
+      pid: child.pid ?? null
+    })
     child.on('error', (err) => {
       appendToInstallLog(params.logPath, `Node.js: Detached spawn emitted error: ${err}`)
     })
@@ -572,6 +606,12 @@ function launchWindowsUpdateScript(params: {
     appendToInstallLog(params.logPath, 'Node.js: Detached spawn succeeded (fire-and-forget).')
     return true
   } catch (err) {
+    perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_UPDATER_SPAWN, {
+      strategy: 'detached-spawn',
+      platform: 'win32',
+      ok: false,
+      error: String(err)
+    })
     appendToInstallLog(params.logPath, `Node.js: All launch strategies failed: ${err}`)
     return false
   }
@@ -1495,10 +1535,17 @@ export class UpdateService {
     ].join('\n')
 
     writeFileSync(scriptPath, `${scriptContent}\n`, { encoding: 'utf-8', mode: 0o755 })
-    spawn('/bin/sh', [scriptPath], {
+    const child = spawn('/bin/sh', [scriptPath], {
       detached: true,
       stdio: 'ignore'
-    }).unref()
+    })
+    perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_UPDATER_SPAWN, {
+      strategy: 'macos-sh',
+      platform: process.platform,
+      pid: child.pid ?? null,
+      ok: true
+    })
+    child.unref()
   }
 
   private installDownloadedUpdateOnQuitWindows(): void {

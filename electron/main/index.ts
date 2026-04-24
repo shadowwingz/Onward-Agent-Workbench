@@ -30,6 +30,7 @@ import { getTelemetryService } from './telemetry/telemetry-service'
 import { TELEMETRY_RESET_CONSENT } from './telemetry/telemetry-constants'
 import { startSessionHeartbeat, stopSessionHeartbeat, getSessionDurationMs } from './telemetry/telemetry-session-tracker'
 import { perfTraceLogger } from './perf-trace-logger'
+import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 import { IPC } from '../shared/ipc-channels'
 
 // ONWARD_SMOKE_LAUNCH=1 makes the main process self-quit once the main window
@@ -413,7 +414,7 @@ function createWindow(displayName: string): void {
     }
     mainWindow.webContents.on('render-process-gone', (_event, details) => {
       log('[Window] render-process-gone', details)
-      perfTraceLogger.record('main:renderer-process-gone', {
+      perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_RENDERER_PROCESS_GONE, {
         reason: details.reason,
         exitCode: details.exitCode
       })
@@ -424,7 +425,7 @@ function createWindow(displayName: string): void {
     })
     mainWindow.webContents.on('unresponsive', () => {
       log('[Window] renderer unresponsive')
-      perfTraceLogger.record('main:renderer-unresponsive')
+      perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_RENDERER_UNRESPONSIVE)
     })
     mainWindow.webContents.on('console-message', (_event, level, message, line, sourceId) => {
       log('[Renderer]', { level, message, line, sourceId })
@@ -588,6 +589,10 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', async (e) => {
+  perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_APP_BEFORE_QUIT, {
+    isQuitting,
+    installUpdateOnQuit
+  })
   // If you have confirmed to exit, continue directly.
   if (isQuitting) return
 
@@ -599,6 +604,9 @@ app.on('before-quit', async (e) => {
 
 // Move the cleanup logic to will-quit (it will be triggered after confirming the exit)
 app.on('will-quit', () => {
+  perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_APP_WILL_QUIT, {
+    installUpdateOnQuit
+  })
   if (installUpdateOnQuit) {
     getUpdateService().installDownloadedUpdateOnQuit()
   }

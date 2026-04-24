@@ -5,6 +5,7 @@
 
 import { contextBridge, ipcRenderer } from 'electron'
 import { IPC } from '../shared/ipc-channels'
+import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 import type {
   FeedbackActionResult,
   FeedbackCreateSubmissionResult,
@@ -12,6 +13,38 @@ import type {
   FeedbackState,
   FeedbackSubmissionInput
 } from '../../src/types/feedback'
+
+// Hoisted so traceIpc() below works from inside the early API objects.
+// The flag is read once at preload load; IPC spans are only emitted
+// when ONWARD_PERF_TRACE=1 matches the main-process logger's gate.
+const preloadPerfTraceEnabled = process.env.ONWARD_PERF_TRACE === '1'
+
+/**
+ * Wrap an ipcRenderer.invoke() call with a renderer-side latency span.
+ * Recorded as `ph='X'` (dur=ms) so Perfetto SQL can group it alongside
+ * main-side IPC hot-path slices and the renderer input events that
+ * triggered them. Emission path mirrors perfTrace(): ipcRenderer.send to
+ * DEBUG_PERF_TRACE; main-side logger tags the event onto the renderer
+ * thread track via the forwarding handler in ipc-handlers.ts.
+ */
+async function traceIpc<T>(eventName: string, extra: Record<string, unknown>, thunk: () => Promise<T>): Promise<T> {
+  if (!preloadPerfTraceEnabled) return thunk()
+  const startedAt = performance.now()
+  try {
+    const value = await thunk()
+    ipcRenderer.send(IPC.DEBUG_PERF_TRACE, {
+      event: eventName,
+      data: { ...extra, ok: true, durationMs: +(performance.now() - startedAt).toFixed(1) }
+    })
+    return value
+  } catch (error) {
+    ipcRenderer.send(IPC.DEBUG_PERF_TRACE, {
+      event: eventName,
+      data: { ...extra, ok: false, durationMs: +(performance.now() - startedAt).toFixed(1), error: String(error) }
+    })
+    throw error
+  }
+}
 
 export interface TerminalOptions {
   cols?: number
@@ -1007,7 +1040,11 @@ const terminalAPI: TerminalAPI = {
   },
 
   write: (id: string, data: string) => {
-    return ipcRenderer.invoke(IPC.TERMINAL_WRITE, id, data)
+    return traceIpc(
+      PERF_TRACE_EVENT.RENDERER_IPC_TERMINAL_WRITE,
+      { terminalId: id, bytes: data.length },
+      () => ipcRenderer.invoke(IPC.TERMINAL_WRITE, id, data)
+    )
   },
 
   resize: (id: string, cols: number, rows: number) => {
@@ -1194,7 +1231,11 @@ const gitAPI: GitAPI = {
   },
 
   getDiff: (cwd: string, options?: GitDiffLoadOptions) => {
-    return ipcRenderer.invoke(IPC.GIT_GET_DIFF, cwd, options)
+    return traceIpc(
+      PERF_TRACE_EVENT.RENDERER_IPC_GIT_GET_DIFF,
+      { scope: options?.scope ?? 'default' },
+      () => ipcRenderer.invoke(IPC.GIT_GET_DIFF, cwd, options)
+    )
   },
 
   getHistory: (cwd: string, options?: { limit?: number; skip?: number }) => {
@@ -1302,7 +1343,11 @@ const projectAPI: ProjectAPI = {
   },
 
   readFile: (root: string, path: string) => {
-    return ipcRenderer.invoke(IPC.PROJECT_READ_FILE, root, path)
+    return traceIpc(
+      PERF_TRACE_EVENT.RENDERER_IPC_PROJECT_READ_FILE,
+      { pathLen: path.length },
+      () => ipcRenderer.invoke(IPC.PROJECT_READ_FILE, root, path)
+    )
   },
 
   saveFile: (root: string, path: string, content: string) => {

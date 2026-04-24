@@ -58,6 +58,7 @@ type WorkerResponse = {
 type WorkerEvent =
   | { event: 'result'; searchId: string; matches: RipgrepMatch[] }
   | { event: 'done'; stats: RipgrepSearchStats }
+  | { event: 'trace'; name: string; data?: Record<string, unknown> }
 
 type PendingRequest = {
   resolve: (value: unknown) => void
@@ -221,6 +222,11 @@ export class RipgrepSearchManager {
   }
 
   private handleWorkerEvent(message: WorkerEvent): void {
+    if (message.event === 'trace') {
+      perfTraceLogger.record(message.name, message.data)
+      return
+    }
+
     const mainWindow = this.mainWindow
     if (!mainWindow || mainWindow.isDestroyed()) return
 

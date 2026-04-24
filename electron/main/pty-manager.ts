@@ -9,6 +9,8 @@ import { join, delimiter, basename } from 'path'
 import { execFileSync } from 'child_process'
 import { app } from 'electron'
 import { getApiPort } from './api-server'
+import { perfTraceLogger } from './perf-trace-logger'
+import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 
 export interface PtyOptions {
   cols?: number
@@ -120,6 +122,7 @@ export class PtyManager {
 
     const initialCwd = cwd || process.env.HOME || process.env.USERPROFILE || process.cwd()
 
+    const spawnStartMs = Date.now()
     const ptyProcess = pty.spawn(execCommand, execArgs, {
       name: 'xterm-256color',
       cols,
@@ -141,6 +144,17 @@ export class PtyManager {
         // Onward Bridge API environment variables
         ...bridgeEnv
       } as { [key: string]: string }
+    })
+    perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_PTY_SPAWN, {
+      terminalId: id,
+      shellKind,
+      shellBasename: basename(execCommand),
+      argsLen: execArgs.length,
+      cols,
+      rows,
+      platform: platform(),
+      durationMs: Date.now() - spawnStartMs,
+      hasShellIntegration: Object.keys(shellIntegrationEnv).length > 0
     })
 
     // Store initial CWD for Windows shell-integration tracking
@@ -164,6 +178,12 @@ export class PtyManager {
 
     record.exitDisposable = ptyProcess.onExit((event) => {
       record.exited = true
+      perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_PTY_EXIT, {
+        terminalId: id,
+        shellKind,
+        exitCode: event.exitCode,
+        signal: event.signal ?? null
+      })
       resolveExit(event)
     })
 
@@ -446,11 +466,30 @@ export class PtyManager {
   }
 
   private killRecord(record: PtyRecord): void {
+    const terminalId = this.findIdForRecord(record)
     try {
       record.pty.kill()
+      perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_PTY_KILL, {
+        terminalId,
+        shellKind: record.shellKind,
+        alreadyExited: record.exited
+      })
     } catch (error) {
+      perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_PTY_KILL, {
+        terminalId,
+        shellKind: record.shellKind,
+        alreadyExited: record.exited,
+        error: String(error)
+      })
       console.warn('[PTY] kill failed:', error)
     }
+  }
+
+  private findIdForRecord(record: PtyRecord): string | null {
+    for (const [id, candidate] of this.instances) {
+      if (candidate === record) return id
+    }
+    return null
   }
 
   private async waitForExit(record: PtyRecord, timeoutMs: number): Promise<boolean> {

@@ -263,6 +263,24 @@ is a short list of user-observable contracts the runner asserts on.
 |---|---|
 | `run-trace-infra-self-check-autotest.sh` | T02 baseline. Launches app with `ONWARD_PERF_TRACE=1` for ~6 s, asserts `traces/perf/*.json` is produced, is valid Chrome trace JSON, and carries at least one `main:*` event. Optionally parse-verifies via `trace_processor_shell` when locally installed. |
 
+**Per-operation trace coverage** — wired in the v0.3.x trace-expansion
+pass. Every Onward-initiated operation, child process, and renderer
+hot path is expected to emit at least one event from the families
+below. Absence in a fresh trace is a regression:
+
+| Family | Events | Call site |
+|---|---|---|
+| App lifecycle | `main:app.before-quit`, `main:app.will-quit`, `main:renderer-process-gone`, `main:renderer-unresponsive` | `electron/main/index.ts` app/webContents handlers |
+| PTY subprocess | `main:pty.spawn`, `main:pty.exit`, `main:pty.kill` | `electron/main/pty-manager.ts` |
+| Git CLI exec | `main:git.exec` (one slice per `execFile(git ...)`, tagged with `subcommand`) | `electron/main/git-utils.ts` shared `execFileAsync` wrapper, routed by `classifyExecBinary` so only real git calls qualify |
+| Non-git proc exec | `main:proc.exec` (lsof cwd probes, future helpers) | Same wrapper, non-git branch — tagged with `binary` |
+| Ripgrep subprocess | `worker.ripgrep:process.spawn`, `worker.ripgrep:process.exit` | `electron/main/ripgrep-search-worker-entry.ts` (forwarded via `parentPort`) |
+| Updater spawns | `main:updater.spawn` (tagged `wmi` / `batch` / `detached-spawn` / `macos-sh`) | `electron/main/update-service.ts` |
+| Markdown pipeline | `worker.markdown:render-complete`, `renderer:markdown.dompurify-sanitize`, `renderer:markdown.render` | `src/components/ProjectEditor/ProjectEditor.tsx` + `src/workers/markdownPreviewWorker.ts` |
+| IPC bridge latency | `renderer:ipc.project.read-file`, `renderer:ipc.git.get-diff`, `renderer:ipc.terminal.write` | `electron/preload/index.ts` `traceIpc()` wrapper |
+| Window events | `renderer:window.visibility-change`, `renderer:window.focus`, `renderer:window.blur`, `renderer:window.pagehide` | `src/utils/perf-trace.ts` `installWindowEventTrace()` |
+| Monaco / xterm init | `renderer:monaco.viewstate-restore`, `renderer:xterm.webgl-context-init` | ProjectEditor Monaco handler + `src/components/Terminal/Terminal.tsx` |
+
 **Total canonical runners in v0.3: 44** (+1 skipped on macOS →
 `run-auto-update-windows-e2e.sh`, covered in §12).
 

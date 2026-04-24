@@ -103,8 +103,8 @@ append new names, never rename existing ones.
 |---|---|---|---|
 | `MAIN_TRACE_START` | `main:trace-start` | `i` (g) | `perf-trace-logger.ts` first start() |
 | `MAIN_TRACE_STOP` | `main:trace-stop` | `i` (t) | `perf-trace-logger.ts::stop()` |
-| `MAIN_APP_BEFORE_QUIT` | `main:app.before-quit` | `i` | Electron `before-quit` handler (planned) |
-| `MAIN_APP_WILL_QUIT` | `main:app.will-quit` | `i` | Electron `will-quit` handler (planned) |
+| `MAIN_APP_BEFORE_QUIT` | `main:app.before-quit` | `i` | `electron/main/index.ts` `app.on('before-quit')` |
+| `MAIN_APP_WILL_QUIT` | `main:app.will-quit` | `i` | `electron/main/index.ts` `app.on('will-quit')` |
 
 #### Monitors (1 s tick)
 
@@ -131,15 +131,34 @@ append new names, never rename existing ones.
 | `MAIN_APP_STATE_SAVE` | `main:app-state-save` | `X` (has `durationMs`) | `app-state-storage.ts` save completion |
 | `MAIN_APP_STATE_SAVE_ERROR` | `main:app-state-save-error` | `i` | same, error path |
 
-#### IPC hot paths (planned)
+#### IPC hot paths
 
-| Constant | Name | Phase | Intended call site |
+| Constant | Name | Phase | Call site |
 |---|---|---|---|
 | `MAIN_IPC_PROJECT_READ_FILE` | `main:ipc.project.read-file` | `X` | `ipc-handlers.ts` readFile handler |
 | `MAIN_IPC_PROJECT_SAVE_FILE` | `main:ipc.project.save-file` | `X` | saveFile handler |
 | `MAIN_IPC_GIT_GET_DIFF` | `main:ipc.git.get-diff` | `X` | getDiff handler |
 | `MAIN_IPC_GIT_GET_HISTORY` | `main:ipc.git.get-history` | `X` | getHistory handler |
 | `MAIN_IPC_TERMINAL_SPAWN` | `main:ipc.terminal.spawn` | `X` | terminal create handler |
+
+#### Child processes — PTY / Git CLI / Ripgrep / Updater
+
+Every subprocess Onward fires off is emitted so a trace shows the
+operation in the same timeline as the renderer/user input that
+triggered it (see `CLAUDE.md` § "Hard rule — Per-feature perf
+instrumentation"). Git emits one slice per `execFile`; PTY / Ripgrep /
+Updater emit on spawn + exit/kill.
+
+| Constant | Name | Phase | Call site |
+|---|---|---|---|
+| `MAIN_PTY_SPAWN` | `main:pty.spawn` | `X` | `electron/main/pty-manager.ts` `PtyManager.create()` |
+| `MAIN_PTY_EXIT` | `main:pty.exit` | `i` | Same, `pty.onExit` handler |
+| `MAIN_PTY_KILL` | `main:pty.kill` | `i` | `PtyManager.killRecord()` |
+| `MAIN_GIT_EXEC` | `main:git.exec` | `X` (has `durationMs`) | `electron/main/git-utils.ts` shared `execFileAsync` wrapper — **only** emitted when the executed binary's basename is `git` (routing via `classifyExecBinary`). Tagged with `subcommand`, `repoKey`, `ok`. |
+| `MAIN_PROC_EXEC` | `main:proc.exec` | `X` (has `durationMs`) | Same wrapper, **non-git** exec path (lsof cwd probes, etc.) — tagged with `binary`. Separated from `main:git.exec` so git-pressure percentiles are not diluted by unrelated spawns. |
+| `WORKER_RIPGREP_PROCESS_SPAWN` | `worker.ripgrep:process.spawn` | `X` | `electron/main/ripgrep-search-worker-entry.ts` — forwarded via `parentPort.postMessage({event:'trace', …})` and replayed by `ripgrep-search.ts::handleWorkerEvent` |
+| `WORKER_RIPGREP_PROCESS_EXIT` | `worker.ripgrep:process.exit` | `X` (has `durationMs`) | Same, on ripgrep process `close`/`error` |
+| `MAIN_UPDATER_SPAWN` | `main:updater.spawn` | `i` / `X` | `electron/main/update-service.ts` — one emission per strategy (`wmi` / `batch` / `detached-spawn` on win32, `macos-sh` on darwin) |
 
 ### 2.2 Worker threads (pid=1, tid=1 — emitted on main track)
 
@@ -177,59 +196,61 @@ grep PERF_TRACE_EVENT.WORKER_` than a stale markdown table).
 | `RENDERER_PERF_SNAPSHOT` | `renderer:perf-snapshot` | `i` (t) | `perf-monitor.ts` 1 s tick |
 | `RENDERER_APPSTATE_SUMMARY` | `renderer:appstate-summary` | `i` (t) | `AppStateContext` 1 s tick |
 
-#### Planned — Web events + user input
+#### Web events — wired
 
-These constants are registered but not yet emitted. They cover user's
-directive that instrumentation must span "main thread / renderer /
-worker / Web events / user input". Adding the emitter call is a
-simple `perfTrace(PERF_TRACE_EVENT.X, {...})` at the listed site.
+| Constant | Name | Phase | Call site |
+|---|---|---|---|
+| `RENDERER_WINDOW_VISIBILITY_CHANGE` | `renderer:window.visibility-change` | `i` | `src/utils/perf-trace.ts::installWindowEventTrace()` — `document.addEventListener('visibilitychange', …)` |
+| `RENDERER_WINDOW_FOCUS` | `renderer:window.focus` | `i` | Same, `window.addEventListener('focus', …)` |
+| `RENDERER_WINDOW_BLUR` | `renderer:window.blur` | `i` | Same, `blur` |
+| `RENDERER_WINDOW_PAGEHIDE` | `renderer:window.pagehide` | `i` | Same, `pagehide` |
 
-| Constant | Name | Intended site |
-|---|---|---|
-| `RENDERER_WINDOW_VISIBILITY_CHANGE` | `renderer:window.visibility-change` | `document.addEventListener('visibilitychange', …)` in `App.tsx` |
-| `RENDERER_WINDOW_FOCUS` | `renderer:window.focus` | `window.addEventListener('focus', …)` |
-| `RENDERER_WINDOW_BLUR` | `renderer:window.blur` | `window.addEventListener('blur', …)` |
-| `RENDERER_WINDOW_PAGEHIDE` | `renderer:window.pagehide` | `window.addEventListener('pagehide', …)` |
-| `RENDERER_PROMPT_EDITOR_SUBMIT` | `renderer:prompt.editor.submit` | `PromptEditor.tsx` submit handler |
-| `RENDERER_PROMPT_EDITOR_CANCEL` | `renderer:prompt.editor.cancel-edit` | PromptEditor cancel |
-| `RENDERER_PROMPT_SENDER_DISPATCH` | `renderer:prompt.sender.dispatch` | `PromptSender.tsx` send/execute |
-| `RENDERER_TERMINAL_FOCUS_CHANGE` | `renderer:terminal.focus-change` | `TerminalGrid.tsx` focus activation |
-| `RENDERER_TERMINAL_SEND_INPUT` | `renderer:terminal.send-input` | `App.tsx:723` sendInputSequence |
-| `RENDERER_PROJECT_FILE_OPEN` | `renderer:project.file-open` | `ProjectEditor.tsx` openFile |
-| `RENDERER_PROJECT_SUBPAGE_NAVIGATE` | `renderer:project.subpage-navigate` | `subpage:navigate` dispatch |
-| `RENDERER_PROJECT_SEARCH_GLOBAL` | `renderer:project.search.global` | `GlobalSearch/SearchPanel.tsx` submit |
-| `RENDERER_IPC_PROJECT_READ_FILE` | `renderer:ipc.project.read-file` | `electronAPI.project.readFile()` wrapper |
-| `RENDERER_IPC_GIT_GET_DIFF` | `renderer:ipc.git.get-diff` | `electronAPI.git.getDiff()` wrapper |
-| `RENDERER_IPC_TERMINAL_WRITE` | `renderer:ipc.terminal.write` | `electronAPI.terminal.write()` wrapper |
-| `RENDERER_MARKDOWN_RENDER` | `renderer:markdown.render` | ProjectEditor markdown render cycle |
-| `RENDERER_MARKDOWN_SANITIZE` | `renderer:markdown.dompurify-sanitize` | DOMPurify call |
-| `RENDERER_MARKDOWN_MERMAID` | `renderer:markdown.mermaid-render` | mermaid rendering |
-| `RENDERER_MONACO_VIEWSTATE_RESTORE` | `renderer:monaco.viewstate-restore` | Monaco restoreViewState |
-| `RENDERER_XTERM_WEBGL_INIT` | `renderer:xterm.webgl-context-init` | terminal-session-manager.ts WebGL attach |
+#### IPC bridge latency (renderer→main→renderer round trip)
+
+Wrapped at the preload boundary (`electron/preload/index.ts::traceIpc`),
+so every call through `window.electronAPI.<domain>.<method>()` gets a
+`ph='X'` span with `durationMs` in its payload.
+
+| Constant | Name | Phase | Call site |
+|---|---|---|---|
+| `RENDERER_IPC_PROJECT_READ_FILE` | `renderer:ipc.project.read-file` | `X` | `project.readFile()` wrapper |
+| `RENDERER_IPC_GIT_GET_DIFF` | `renderer:ipc.git.get-diff` | `X` | `git.getDiff()` wrapper |
+| `RENDERER_IPC_TERMINAL_WRITE` | `renderer:ipc.terminal.write` | `X` | `terminal.write()` wrapper |
+
+#### Async rendering hot paths
+
+| Constant | Name | Phase | Call site |
+|---|---|---|---|
+| `RENDERER_MARKDOWN_RENDER` | `renderer:markdown.render` | `X` | `ProjectEditor.tsx::scheduleMarkdownApply` — end-to-end span from `postMessage` send to sanitized HTML commit |
+| `RENDERER_MARKDOWN_SANITIZE` | `renderer:markdown.dompurify-sanitize` | `X` | Same, DOMPurify call |
+| `RENDERER_MARKDOWN_MERMAID` | `renderer:markdown.mermaid-render` | `i`/`X` | `src/utils/mermaidRenderer.ts` |
+| `WORKER_MARKDOWN_RENDER_COMPLETE` | `worker.markdown:render-complete` | `X` | Worker-measured duration reported to renderer via `worker.onmessage` — parse + katex + highlight |
+| `RENDERER_MONACO_VIEWSTATE_RESTORE` | `renderer:monaco.viewstate-restore` | `X` | `ProjectEditor.tsx::editor.restoreViewState` |
+| `RENDERER_XTERM_WEBGL_INIT` | `renderer:xterm.webgl-context-init` | `X` | `src/components/Terminal/Terminal.tsx` WebGL addon attach |
 
 ---
 
 ## 3. Planned coverage gaps
 
-Short list of instrumentation work that is **not yet done** but has a
-reserved constant in the registry. Each is a single `perfTrace(…)` call
-away from active. Prioritise in this order for ROI:
+Remaining registered-but-unwired constants, in priority order. Each is
+a single `perfTrace(PERF_TRACE_EVENT.X, {...})` / `perfTraceLogger.record
+(...)` away from active.
 
-1. **IPC bridge latency** (`RENDERER_IPC_*`) — the single most useful
-   addition. Wrap the three hot `window.electronAPI.*` calls in a
-   `performance.now()`-timed closure and record a complete span.
-2. **Markdown render cycle** (`RENDERER_MARKDOWN_*`) — the longest
-   renderer stalls in Onward's current profile; having per-phase
-   spans (`render` → `sanitize` → `mermaid`) makes the real slow step
-   visible.
-3. **Window visibility + focus / blur** — needed to explain
-   "autosave burst on pagehide" and to correlate stalls with hidden /
-   foregrounded state.
-4. **User-input hot paths** — `prompt.editor.submit`, `prompt.sender.
-   dispatch`, `terminal.focus-change`, `project.subpage-navigate`.
-   These anchor user-observable events on the timeline and let the
-   next `trace_processor_shell` query be: "for every submit, what
-   was the timeline until the next event-loop-stall?"
+1. **User-input hot paths** — anchor user-observable events on the
+   timeline so the next SQL query can be "for every submit, what was
+   the timeline until the next event-loop-stall?".
+   - `RENDERER_PROMPT_EDITOR_SUBMIT` — `PromptEditor.tsx` submit handler
+   - `RENDERER_PROMPT_EDITOR_CANCEL` — PromptEditor cancel
+   - `RENDERER_PROMPT_SENDER_DISPATCH` — `PromptSender.tsx` send/execute
+   - `RENDERER_TERMINAL_FOCUS_CHANGE` — `TerminalGrid.tsx` focus activation
+   - `RENDERER_TERMINAL_SEND_INPUT` — `App.tsx` sendInputSequence
+   - `RENDERER_PROJECT_FILE_OPEN` — `ProjectEditor.tsx` openFile
+   - `RENDERER_PROJECT_SUBPAGE_NAVIGATE` — `subpage:navigate` dispatch
+   - `RENDERER_PROJECT_SEARCH_GLOBAL` — `GlobalSearch/SearchPanel.tsx` submit
+2. **Main-side IPC payload enrichment** — `MAIN_IPC_*` slices exist but
+   could carry richer payloads (file size, repo key) so the
+   renderer-side `RENDERER_IPC_*` spans can be joined against
+   main-side execution time in SQL.
 
 When moving an event from this list to § 2, add the file:line to the
 corresponding `PERF_TRACE_EVENT` block comment in `perf-trace-names.ts`

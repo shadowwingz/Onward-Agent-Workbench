@@ -14,6 +14,8 @@ import { getTheme, ThemeName } from '../../themes/terminal-themes'
 import { DEFAULT_TERMINAL_FONT_SIZE, DEFAULT_TERMINAL_FONT_FAMILY } from '../../constants/terminal'
 import { requestOpenExternalHttpLink } from '../../utils/externalLink'
 import { useI18n } from '../../i18n/useI18n'
+import { perfTrace } from '../../utils/perf-trace'
+import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
 import '@xterm/xterm/css/xterm.css'
 import './Terminal.css'
 
@@ -162,13 +164,25 @@ export function Terminal({
     terminal.open(containerRef.current)
 
     // Try to load WebGL addon for better performance
+    const webglStart = performance.now()
     try {
       const webglAddon = new WebglAddon()
       webglAddon.onContextLoss(() => {
         webglAddon.dispose()
       })
       terminal.loadAddon(webglAddon)
+      perfTrace(PERF_TRACE_EVENT.RENDERER_XTERM_WEBGL_INIT, {
+        terminalId: id,
+        ok: true,
+        durationMs: +(performance.now() - webglStart).toFixed(1)
+      })
     } catch (e) {
+      perfTrace(PERF_TRACE_EVENT.RENDERER_XTERM_WEBGL_INIT, {
+        terminalId: id,
+        ok: false,
+        error: String(e),
+        durationMs: +(performance.now() - webglStart).toFixed(1)
+      })
       console.warn('WebGL addon failed to load, using canvas renderer')
     }
 
