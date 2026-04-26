@@ -28,8 +28,13 @@ if (-not $VerifyLogFile) {
   $VerifyLogFile = Join-Path $env:TEMP "onward-feedback-persistence-verify.log"
 }
 
+# Track whether this script created the user-data dir, so cleanup only removes
+# self-created directories and never a caller-supplied path that may hold real data.
+$TmpRootOwned = $false
+
 if (-not $UserDataDir) {
-  $UserDataDir = Join-Path $env:TEMP ("onward-feedback-persistence-" + [guid]::NewGuid().ToString())
+  $UserDataDir = Join-Path $env:TEMP ("onward-autotest-feedback-persistence-" + [guid]::NewGuid().ToString())
+  $TmpRootOwned = $true
 }
 
 New-Item -ItemType Directory -Force -Path $UserDataDir | Out-Null
@@ -73,11 +78,21 @@ function Invoke-FeedbackPersistenceSuite {
 }
 
 Write-Host "Starting feedback persistence autotest..."
-Write-Host "Using isolated user data dir: $UserDataDir"
+Write-Host "[autotest] tmp dir: $UserDataDir"
 
-Invoke-FeedbackPersistenceSuite -SuiteId "feedback-persistence-seed" -LogFile $SeedLogFile -Marker "FBP-SEED-03-create-pending-history-record"
-Invoke-FeedbackPersistenceSuite -SuiteId "feedback-persistence-verify" -LogFile $VerifyLogFile -Marker "FBP-VERIFY-04-history-record-removable"
+try {
+  Invoke-FeedbackPersistenceSuite -SuiteId "feedback-persistence-seed" -LogFile $SeedLogFile -Marker "FBP-SEED-03-create-pending-history-record"
+  Invoke-FeedbackPersistenceSuite -SuiteId "feedback-persistence-verify" -LogFile $VerifyLogFile -Marker "FBP-VERIFY-04-history-record-removable"
 
-Write-Host "Feedback persistence autotest passed."
-Write-Host "Seed log: $SeedLogFile"
-Write-Host "Verify log: $VerifyLogFile"
+  Write-Host "Feedback persistence autotest passed."
+  Write-Host "Seed log: $SeedLogFile"
+  Write-Host "Verify log: $VerifyLogFile"
+} finally {
+  if ($TmpRootOwned -and (Test-Path $UserDataDir)) {
+    if ($env:ONWARD_AUTOTEST_KEEP_TMP -eq '1') {
+      Write-Host "[autotest] retained tmp for debugging: $UserDataDir"
+    } else {
+      Remove-Item -Recurse -Force $UserDataDir
+    }
+  }
+}

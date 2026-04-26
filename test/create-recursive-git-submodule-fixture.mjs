@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { execFileSync } from 'child_process'
-import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync } from 'fs'
+import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, rmSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { pathToFileURL } from 'url'
@@ -63,43 +63,61 @@ function appendLine(filePath, line) {
   appendFileSync(filePath, `${line}\n`, 'utf8')
 }
 
+// Fail-safe cleanup: if any step below throws, remove tempRoot before
+// re-throwing so a standalone invocation (no wrapper script trap) does not
+// leak. On the success path, stdout-printed tempRoot transfers ownership to
+// the caller (typically a `.sh` / `.ps1` runner that traps cleanup itself).
 const tempRoot = mkdtempSync(join(tmpdir(), 'onward-git-recursive-submodules-'))
-const sourcesRoot = join(tempRoot, 'sources')
-const workspaceRoot = join(tempRoot, 'workspace')
 
-const betaRepo = join(sourcesRoot, 'beta')
-const alphaRepo = join(sourcesRoot, 'alpha')
-const gammaRepo = join(sourcesRoot, 'gamma')
-const rootRepo = join(workspaceRoot, 'root')
+try {
+  const sourcesRoot = join(tempRoot, 'sources')
+  const workspaceRoot = join(tempRoot, 'workspace')
 
-initRepo(betaRepo, {
-  'BETA.md': '# Beta\n\nBase fixture file.\n'
-}, 'init beta')
+  const betaRepo = join(sourcesRoot, 'beta')
+  const alphaRepo = join(sourcesRoot, 'alpha')
+  const gammaRepo = join(sourcesRoot, 'gamma')
+  const rootRepo = join(workspaceRoot, 'root')
 
-initRepo(alphaRepo, {
-  'ALPHA.md': '# Alpha\n\nBase fixture file.\n'
-}, 'init alpha')
-addSubmodule(alphaRepo, betaRepo, 'deps/beta')
-commitAll(alphaRepo, 'add beta submodule')
+  initRepo(betaRepo, {
+    'BETA.md': '# Beta\n\nBase fixture file.\n'
+  }, 'init beta')
 
-initRepo(gammaRepo, {
-  'GAMMA.md': '# Gamma\n\nBase fixture file.\n'
-}, 'init gamma')
+  initRepo(alphaRepo, {
+    'ALPHA.md': '# Alpha\n\nBase fixture file.\n'
+  }, 'init alpha')
+  addSubmodule(alphaRepo, betaRepo, 'deps/beta')
+  commitAll(alphaRepo, 'add beta submodule')
 
-initRepo(rootRepo, {
-  'README.md': '# Recursive Submodule Fixture\n'
-}, 'init root')
-addSubmodule(rootRepo, alphaRepo, 'modules/alpha')
-addSubmodule(rootRepo, gammaRepo, 'modules/gamma')
-commitAll(rootRepo, 'add nested submodules')
-git(rootRepo, ['-c', 'protocol.file.allow=always', 'submodule', 'update', '--init', '--recursive'])
+  initRepo(gammaRepo, {
+    'GAMMA.md': '# Gamma\n\nBase fixture file.\n'
+  }, 'init gamma')
 
-appendLine(join(rootRepo, 'README.md'), 'root dirty change')
-appendLine(join(rootRepo, 'modules', 'alpha', 'ALPHA.md'), 'alpha dirty change')
-appendLine(join(rootRepo, 'modules', 'alpha', 'deps', 'beta', 'BETA.md'), 'beta nested dirty change')
-appendLine(join(rootRepo, 'modules', 'gamma', 'GAMMA.md'), 'gamma dirty change')
+  initRepo(rootRepo, {
+    'README.md': '# Recursive Submodule Fixture\n'
+  }, 'init root')
+  addSubmodule(rootRepo, alphaRepo, 'modules/alpha')
+  addSubmodule(rootRepo, gammaRepo, 'modules/gamma')
+  commitAll(rootRepo, 'add nested submodules')
+  git(rootRepo, ['-c', 'protocol.file.allow=always', 'submodule', 'update', '--init', '--recursive'])
 
-process.stdout.write(JSON.stringify({
-  tempRoot,
-  repoRoot: rootRepo
-}))
+  appendLine(join(rootRepo, 'README.md'), 'root dirty change')
+  appendLine(join(rootRepo, 'modules', 'alpha', 'ALPHA.md'), 'alpha dirty change')
+  appendLine(join(rootRepo, 'modules', 'alpha', 'deps', 'beta', 'BETA.md'), 'beta nested dirty change')
+  appendLine(join(rootRepo, 'modules', 'gamma', 'GAMMA.md'), 'gamma dirty change')
+
+  process.stdout.write(JSON.stringify({
+    tempRoot,
+    repoRoot: rootRepo
+  }))
+} catch (err) {
+  if (process.env.ONWARD_AUTOTEST_KEEP_TMP === '1') {
+    console.error(`[autotest] retained tmp for debugging: ${tempRoot}`)
+  } else {
+    try {
+      rmSync(tempRoot, { recursive: true, force: true })
+    } catch {
+      // Best-effort: do not mask the original error with a cleanup error.
+    }
+  }
+  throw err
+}

@@ -9,7 +9,7 @@ Onward uses `ONWARD_*` environment variables as feature-level debug switches. Ea
 
 1. **One variable, one concern.** Each env var toggles exactly one debug behavior. Never overload a single variable to control multiple unrelated features.
 2. **Prefix `ONWARD_`.** All debug variables share the `ONWARD_` namespace so they are easy to discover and unlikely to collide with system env vars.
-3. **Value convention.** Use `1` to enable, absence or any other value to disable. Example: `ONWARD_DEBUG=1`.
+3. **Value convention.** Use `1` to enable, absence or any other value to disable. Example: `ONWARD_DEBUG=1`. A small number of legacy variables deviate from this — `ONWARD_GIT_POLLING` uses `0` to disable (default enabled), and `ONWARD_GIT_MAX_*` are numeric tunables rather than `0`/`1` toggles. Each deviation is called out per row in the reference table below.
 4. **Read at startup.** Variables are read once from `process.env` during main-process initialization. They are not watched for changes at runtime.
 5. **No side effects when absent.** The application must behave identically to a normal build when no debug variables are set.
 6. **Log when active.** When a debug variable takes effect, log a message to the console so the developer knows it is active. Example: `[Telemetry] Consent reset for debugging (ONWARD_TELEMETRY_RESET_CONSENT=1)`.
@@ -72,6 +72,10 @@ set ONWARD_TELEMETRY_RESET_CONSENT=1
 | `ONWARD_DIST_DEV_OPEN` | `0` / `1` / unset | Controls whether `pnpm dist:dev` opens the packaged app after a successful build: **unset** = open on local machines (skipped when `CI` is truthy); **`1`** = always open (including in CI); **`0`** = never open. |
 | `ONWARD_SMOKE_LAUNCH` | `1` | Smoke-launch mode: once the main window's renderer finishes loading, write the ready marker (see `ONWARD_SMOKE_READY_FILE`) and self-quit with exit code 0. CI uses this to assert the packaged app starts cleanly. |
 | `ONWARD_SMOKE_READY_FILE` | path | Absolute path where the smoke-launch ready marker JSON should be written. Only honored when `ONWARD_SMOKE_LAUNCH=1`. |
+| `ONWARD_GIT_POLLING` | `0` to disable (default: enabled) | Disables adaptive Git polling (`400` / `1200` / `3000` ms tiers in `git-watch-manager.ts`) and falls back to fixed-interval polling. Note: inverted convention — `0` disables, anything else (including unset) enables. |
+| `ONWARD_GIT_MAX_CONCURRENCY` | integer (default: `6`) | Global cap on the number of concurrent in-flight Git operations across all repositories. Read in `git-runtime-manager.ts`. Numeric tunable, not a `0`/`1` toggle. |
+| `ONWARD_GIT_MAX_PER_REPO` | integer (default: `3`) | Per-repository cap on concurrent in-flight Git operations. Read in `git-runtime-manager.ts`. Numeric tunable, not a `0`/`1` toggle. |
+| `ONWARD_AUTOTEST_KEEP_TMP` | `1` | Preserve a test's scratch directory on exit instead of deleting it, for failure debugging. Honored by the converted runners that build a tmp dir and register cleanup: the 5 `.sh` runners (`run-feedback-autotest.sh`, `run-feedback-persistence-autotest.sh`, `run-pdf-epub-{preview,full,diff}-autotest.sh`), the 2 `.ps1` runners (`run-feedback-autotest.ps1`, `run-feedback-persistence-autotest.ps1`), and the `mkTempDir` helper in `test/project-tree-watch-manager.test.mts`. Other legacy runners that unconditionally `rm -rf` their tmp roots (for example `test/run-git-diff-recursive-submodules-autotest.sh`) still ignore the variable. CI must not set this. |
 
 ## Adding a New Debug Variable
 
