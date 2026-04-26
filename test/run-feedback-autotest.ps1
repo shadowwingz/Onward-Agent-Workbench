@@ -23,8 +23,13 @@ if (-not $LogFile) {
   $LogFile = Join-Path $env:TEMP "onward-feedback-autotest.log"
 }
 
+# Track whether this script created the user-data dir, so cleanup only removes
+# self-created directories and never a caller-supplied path that may hold real data.
+$TmpRootOwned = $false
+
 if (-not $UserDataDir) {
-  $UserDataDir = Join-Path $env:TEMP ("onward-feedback-autotest-" + [guid]::NewGuid().ToString())
+  $UserDataDir = Join-Path $env:TEMP ("onward-autotest-feedback-" + [guid]::NewGuid().ToString())
+  $TmpRootOwned = $true
 }
 
 New-Item -ItemType Directory -Force -Path $UserDataDir | Out-Null
@@ -33,7 +38,7 @@ if (Test-Path $LogFile) {
 }
 
 Write-Host "Starting feedback autotest..."
-Write-Host "Using isolated user data dir: $UserDataDir"
+Write-Host "[autotest] tmp dir: $UserDataDir"
 
 $env:ONWARD_DEBUG = "1"
 $env:ONWARD_AUTOTEST = "1"
@@ -43,20 +48,30 @@ $env:ONWARD_AUTOTEST_EXIT = "1"
 $env:ONWARD_USER_DATA_DIR = $UserDataDir
 
 try {
-  & $AppBin *> $LogFile
-} catch {
-}
+  try {
+    & $AppBin *> $LogFile
+  } catch {
+  }
 
-if (Select-String -Path $LogFile -Pattern "\[AutoTest\] FAIL" -Quiet) {
-  Write-Error "Feedback autotest failed. Log: $LogFile"
-  Get-Content $LogFile -Tail 160
-  exit 1
-}
+  if (Select-String -Path $LogFile -Pattern "\[AutoTest\] FAIL" -Quiet) {
+    Write-Error "Feedback autotest failed. Log: $LogFile"
+    Get-Content $LogFile -Tail 160
+    exit 1
+  }
 
-if (-not (Select-String -Path $LogFile -Pattern "FBU-11-remove-local-record" -Quiet)) {
-  Write-Error "Feedback autotest did not complete. Log: $LogFile"
-  Get-Content $LogFile -Tail 160
-  exit 1
-}
+  if (-not (Select-String -Path $LogFile -Pattern "FBU-11-remove-local-record" -Quiet)) {
+    Write-Error "Feedback autotest did not complete. Log: $LogFile"
+    Get-Content $LogFile -Tail 160
+    exit 1
+  }
 
-Write-Host "Feedback autotest passed. Log: $LogFile"
+  Write-Host "Feedback autotest passed. Log: $LogFile"
+} finally {
+  if ($TmpRootOwned -and (Test-Path $UserDataDir)) {
+    if ($env:ONWARD_AUTOTEST_KEEP_TMP -eq '1') {
+      Write-Host "[autotest] retained tmp for debugging: $UserDataDir"
+    } else {
+      Remove-Item -Recurse -Force $UserDataDir
+    }
+  }
+}

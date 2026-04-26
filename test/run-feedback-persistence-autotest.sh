@@ -10,12 +10,32 @@ SEED_LOG_FILE="${2:-/tmp/onward-feedback-persistence-seed.log}"
 VERIFY_LOG_FILE="${3:-/tmp/onward-feedback-persistence-verify.log}"
 USER_DATA_DIR="${4:-}"
 
+# Track whether this script created the user-data dir, so cleanup only removes
+# self-created directories and never a caller-supplied path that may hold real data.
+TMP_ROOT_OWNED=0
+
+cleanup() {
+  if [[ "$TMP_ROOT_OWNED" -eq 1 && -n "${USER_DATA_DIR:-}" && -d "$USER_DATA_DIR" ]]; then
+    if [[ "${ONWARD_AUTOTEST_KEEP_TMP:-0}" == "1" ]]; then
+      echo "[autotest] retained tmp for debugging: $USER_DATA_DIR"
+    else
+      rm -rf "$USER_DATA_DIR"
+    fi
+  fi
+}
+trap cleanup EXIT
+# Signal trap must exit (not just return) so an interrupted run does not fall
+# through to the post-app log checks and report a stale success.
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 if [[ -z "$APP_BIN" ]]; then
   APP_BIN="$("$ROOT_DIR/test/resolve-dev-app-bin.sh" "$ROOT_DIR")"
 fi
 
 if [[ -z "$USER_DATA_DIR" ]]; then
-  USER_DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/onward-feedback-persistence.XXXXXX")"
+  USER_DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/onward-autotest-feedback-persistence.XXXXXXXX")"
+  TMP_ROOT_OWNED=1
 fi
 
 if [[ ! -x "$APP_BIN" ]]; then
@@ -52,7 +72,7 @@ run_suite() {
 }
 
 echo "Starting feedback persistence autotest..."
-echo "Using isolated user data dir: $USER_DATA_DIR"
+echo "[autotest] tmp dir: $USER_DATA_DIR"
 
 run_suite "feedback-persistence-seed" "$SEED_LOG_FILE" "FBP-SEED-03-create-pending-history-record"
 run_suite "feedback-persistence-verify" "$VERIFY_LOG_FILE" "FBP-VERIFY-04-history-record-removable"

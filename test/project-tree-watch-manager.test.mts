@@ -11,7 +11,7 @@
  * expected added/removed lists.
  */
 
-import { test } from 'node:test'
+import { test, type TestContext } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, writeFileSync, unlinkSync, rmSync, mkdirSync, renameSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -22,6 +22,21 @@ import { ProjectTreeWatchManager } from '../electron/main/project-tree-watch-man
 interface CapturedEvent {
   channel: string
   payload: { cwd: string; added: string[]; removed: string[]; resync?: boolean }
+}
+
+// Create a tmp directory and register fail-safe cleanup on the test context.
+// When ONWARD_AUTOTEST_KEEP_TMP=1 is set, retain the directory on exit instead
+// of removing it, so a failed test's state stays on disk for inspection.
+function mkTempDir(t: TestContext, prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix))
+  t.after(() => {
+    if (process.env.ONWARD_AUTOTEST_KEEP_TMP === '1') {
+      console.log(`[autotest] retained tmp for debugging: ${dir}`)
+    } else {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+  return dir
 }
 
 function makeFakeWindow() {
@@ -51,8 +66,8 @@ async function waitForEvent(events: CapturedEvent[], predicate: (event: Captured
   return null
 }
 
-test('emits an added event for a newly created file', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'onward-tree-watch-'))
+test('emits an added event for a newly created file', async (t) => {
+  const dir = mkTempDir(t, 'onward-tree-watch-')
   const { win, events } = makeFakeWindow()
   const manager = new ProjectTreeWatchManager(win as any)
   manager.start(dir)
@@ -65,11 +80,10 @@ test('emits an added event for a newly created file', async () => {
   assert.equal(match!.channel, 'project:tree-watch:event')
 
   manager.stop(dir)
-  rmSync(dir, { recursive: true, force: true })
 })
 
-test('emits a removed event for a deleted file', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'onward-tree-watch-'))
+test('emits a removed event for a deleted file', async (t) => {
+  const dir = mkTempDir(t, 'onward-tree-watch-')
   writeFileSync(join(dir, 'victim.ts'), '// doomed\n')
   const { win, events } = makeFakeWindow()
   const manager = new ProjectTreeWatchManager(win as any)
@@ -81,11 +95,10 @@ test('emits a removed event for a deleted file', async () => {
   assert.ok(match, 'expected removed event for victim.ts')
 
   manager.stop(dir)
-  rmSync(dir, { recursive: true, force: true })
 })
 
-test('tracks changes inside nested subdirectories', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'onward-tree-watch-nested-'))
+test('tracks changes inside nested subdirectories', async (t) => {
+  const dir = mkTempDir(t, 'onward-tree-watch-nested-')
   mkdirSync(join(dir, 'src'))
   const { win, events } = makeFakeWindow()
   const manager = new ProjectTreeWatchManager(win as any)
@@ -99,11 +112,10 @@ test('tracks changes inside nested subdirectories', async () => {
   assert.ok(match, 'expected nested added event for src/inner.ts')
 
   manager.stop(dir)
-  rmSync(dir, { recursive: true, force: true })
 })
 
-test('debounces rapid successive writes into a single flush', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'onward-tree-watch-burst-'))
+test('debounces rapid successive writes into a single flush', async (t) => {
+  const dir = mkTempDir(t, 'onward-tree-watch-burst-')
   const { win, events } = makeFakeWindow()
   const manager = new ProjectTreeWatchManager(win as any)
   manager.start(dir)
@@ -127,11 +139,10 @@ test('debounces rapid successive writes into a single flush', async () => {
   assert.ok(events.length <= 2, `expected at most 2 flushes, saw ${events.length}`)
 
   manager.stop(dir)
-  rmSync(dir, { recursive: true, force: true })
 })
 
-test('stop() silences further events and double-start is a no-op', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'onward-tree-watch-stop-'))
+test('stop() silences further events and double-start is a no-op', async (t) => {
+  const dir = mkTempDir(t, 'onward-tree-watch-stop-')
   const { win, events } = makeFakeWindow()
   const manager = new ProjectTreeWatchManager(win as any)
   manager.start(dir)
@@ -146,8 +157,6 @@ test('stop() silences further events and double-start is a no-op', async () => {
   writeFileSync(join(dir, 'post-stop.ts'), '2')
   await sleep(300)
   assert.equal(events.length, beforeStop, 'no events must arrive after stop')
-
-  rmSync(dir, { recursive: true, force: true })
 })
 
 test('starting a non-existent cwd does not throw and does not emit', async () => {
@@ -159,9 +168,9 @@ test('starting a non-existent cwd does not throw and does not emit', async () =>
   manager.dispose()
 })
 
-test('dispose tears down all active watchers', async () => {
-  const dirA = mkdtempSync(join(tmpdir(), 'onward-tree-dispose-a-'))
-  const dirB = mkdtempSync(join(tmpdir(), 'onward-tree-dispose-b-'))
+test('dispose tears down all active watchers', async (t) => {
+  const dirA = mkTempDir(t, 'onward-tree-dispose-a-')
+  const dirB = mkTempDir(t, 'onward-tree-dispose-b-')
   const { win, events } = makeFakeWindow()
   const manager = new ProjectTreeWatchManager(win as any)
   manager.start(dirA)
@@ -173,13 +182,10 @@ test('dispose tears down all active watchers', async () => {
   writeFileSync(join(dirB, 'late-b.ts'), '2')
   await sleep(300)
   assert.equal(events.length, 0, 'dispose must silence both watchers')
-
-  rmSync(dirA, { recursive: true, force: true })
-  rmSync(dirB, { recursive: true, force: true })
 })
 
-test('creating a bare directory does NOT surface the directory path as a file addition', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'onward-tree-dir-add-'))
+test('creating a bare directory does NOT surface the directory path as a file addition', async (t) => {
+  const dir = mkTempDir(t, 'onward-tree-dir-add-')
   const { win, events } = makeFakeWindow()
   const manager = new ProjectTreeWatchManager(win as any)
   manager.start(dir)
@@ -194,11 +200,10 @@ test('creating a bare directory does NOT surface the directory path as a file ad
   assert.ok(!addedUnion.has('empty-dir'), `directory path must not appear as added (saw: ${[...addedUnion].join(',')})`)
 
   manager.stop(dir)
-  rmSync(dir, { recursive: true, force: true })
 })
 
-test('creating a directory pre-populated with files emits only the file entries', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'onward-tree-dir-prefill-'))
+test('creating a directory pre-populated with files emits only the file entries', async (t) => {
+  const dir = mkTempDir(t, 'onward-tree-dir-prefill-')
   const { win, events } = makeFakeWindow()
   const manager = new ProjectTreeWatchManager(win as any)
   manager.start(dir)
@@ -207,14 +212,13 @@ test('creating a directory pre-populated with files emits only the file entries'
   // Create the tree in a sibling temp dir then atomically rename it into the
   // watched cwd. This simulates an external `mv` that drops a fully-populated
   // directory into the project.
-  const staging = mkdtempSync(join(tmpdir(), 'onward-tree-dir-staging-'))
+  const staging = mkTempDir(t, 'onward-tree-dir-staging-')
   mkdirSync(join(staging, 'pkg'))
   writeFileSync(join(staging, 'pkg', 'one.ts'), 'export {}')
   writeFileSync(join(staging, 'pkg', 'two.ts'), 'export {}')
   mkdirSync(join(staging, 'pkg', 'nested'))
   writeFileSync(join(staging, 'pkg', 'nested', 'three.ts'), 'export {}')
   renameSync(join(staging, 'pkg'), join(dir, 'pkg'))
-  rmSync(staging, { recursive: true, force: true })
 
   await sleep(500)
   const added = new Set<string>()
@@ -230,11 +234,10 @@ test('creating a directory pre-populated with files emits only the file entries'
   assert.ok(added.has('pkg/nested/three.ts'), `expected pkg/nested/three.ts, saw: ${[...added].join(',')}`)
 
   manager.stop(dir)
-  rmSync(dir, { recursive: true, force: true })
 })
 
-test('removing a directory cascades via a single removed entry (cache handles the prefix)', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'onward-tree-dir-remove-'))
+test('removing a directory cascades via a single removed entry (cache handles the prefix)', async (t) => {
+  const dir = mkTempDir(t, 'onward-tree-dir-remove-')
   mkdirSync(join(dir, 'doomed'))
   writeFileSync(join(dir, 'doomed', 'a.ts'), '1')
   writeFileSync(join(dir, 'doomed', 'b.ts'), '2')
@@ -255,11 +258,10 @@ test('removing a directory cascades via a single removed entry (cache handles th
   )
 
   manager.stop(dir)
-  rmSync(dir, { recursive: true, force: true })
 })
 
-test('a null-filename event surfaces as a resync signal', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'onward-tree-null-'))
+test('a null-filename event surfaces as a resync signal', async (t) => {
+  const dir = mkTempDir(t, 'onward-tree-null-')
   const { win, events } = makeFakeWindow()
   const manager = new ProjectTreeWatchManager(win as any)
   manager.start(dir)
@@ -282,11 +284,10 @@ test('a null-filename event surfaces as a resync signal', async () => {
   assert.ok(match, 'expected a resync event from null-filename raw input')
 
   manager.stop(dir)
-  rmSync(dir, { recursive: true, force: true })
 })
 
-test('rename within the watched tree reports removed+added on the two endpoints', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'onward-tree-rename-'))
+test('rename within the watched tree reports removed+added on the two endpoints', async (t) => {
+  const dir = mkTempDir(t, 'onward-tree-rename-')
   writeFileSync(join(dir, 'before.ts'), 'x')
   const { win, events } = makeFakeWindow()
   const manager = new ProjectTreeWatchManager(win as any)
@@ -305,5 +306,4 @@ test('rename within the watched tree reports removed+added on the two endpoints'
   assert.ok(added.has('after.ts'), 'new name must appear as added')
 
   manager.stop(dir)
-  rmSync(dir, { recursive: true, force: true })
 })
