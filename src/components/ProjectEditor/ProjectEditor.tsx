@@ -5060,7 +5060,12 @@ export function ProjectEditor({
     const preview = previewRef.current
     if (!preview) return
     const initialMermaidState = getMermaidPreviewState()
-    if (initialMermaidState.pending === 0) return
+    // Skip only when there is nothing at all to act on. A pending count of 0
+    // does not necessarily mean idle — when the markdown session cache
+    // restores a previously-enhanced HTML snapshot, every diagram already
+    // carries `.mermaid-rendered` (so pending===0) but the runtime panzoom
+    // instances were destroyed with the old DOM and need to be rebuilt.
+    if (initialMermaidState.total === 0) return
     const signal = { cancelled: false }
     const token = mermaidRenderTokenRef.current + 1
     mermaidRenderTokenRef.current = token

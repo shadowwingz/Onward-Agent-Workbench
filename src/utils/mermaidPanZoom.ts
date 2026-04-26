@@ -232,6 +232,10 @@ function createInstance(
 ): Instance | null {
   prepareSvgForTransform(svg)
 
+  // buildViewport reparents `svg` into the new content wrapper before we wipe
+  // the diagram below, so the SVG survives even when it was previously nested
+  // inside a stale `.mermaid-pz-content` (e.g. after a session-cache restore
+  // injected a pre-enhanced HTML snapshot).
   const { viewport, content } = buildViewport(svg)
   const { toolbar, btnZoomOut, btnZoomIn, btnFit, btnReset, btnFullscreen, zoomLabel } =
     createToolbar(strings)
@@ -635,7 +639,11 @@ export function enhanceMermaidDiagrams(
   for (const diagram of Array.from(diagrams)) {
     if (signal.cancelled) return
     if (getDiagramInstance(diagram)) continue
-    const svg = diagram.querySelector<SVGElement>(':scope > svg')
+    // Match an SVG anywhere under the diagram so we can rehydrate diagrams
+    // restored from the markdown session cache, where the original SVG sits
+    // inside a serialized `.mermaid-pz-content` wrapper instead of being a
+    // direct child.
+    const svg = diagram.querySelector<SVGElement>('svg')
     if (!svg) continue
     const inst = createInstance(diagram, svg, strings)
     if (inst) registry.add(inst)
