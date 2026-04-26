@@ -176,6 +176,16 @@ const en = {
   'terminalDropdown.closeBrowser': 'Close Browser',
   'terminalDropdown.codeAgent': 'Launch Code Agent',
 
+  'terminalTitleMenu.ariaLabel': 'Terminal title menu',
+  'terminalTitleMenu.renameItem': 'Rename (double-click)',
+  'terminalTitleMenu.useBranchItem': 'Use branch name',
+  'terminalTitleMenu.useRepoItem': 'Use Git folder name',
+  'terminalTitleMenu.renameTooltip': 'Rename this terminal',
+  'terminalTitleMenu.useBranchTooltip': 'Set the name to the current Git branch (snapshot)',
+  'terminalTitleMenu.useRepoTooltip': 'Set the name to the Git folder name (snapshot)',
+  'terminalTitleMenu.useBranchDisabledTooltip': 'No Git branch detected in this terminal',
+  'terminalTitleMenu.useRepoDisabledTooltip': 'This terminal is not inside a Git repository',
+
   // Coding Agent Modal
   'codingAgent.title': 'Launch Code Agent',
   'codingAgent.titleWithCommand': 'Launch {{command}}',
@@ -1252,6 +1262,16 @@ const zhCN: LocaleTranslations = {
   'terminalDropdown.openBrowser': '打开浏览器',
   'terminalDropdown.closeBrowser': '关闭浏览器',
   'terminalDropdown.codeAgent': '启动编码助手',
+
+  'terminalTitleMenu.ariaLabel': '终端标题菜单',
+  'terminalTitleMenu.renameItem': '重命名（双击）',
+  'terminalTitleMenu.useBranchItem': '使用分支名称',
+  'terminalTitleMenu.useRepoItem': '使用 Git 文件夹名',
+  'terminalTitleMenu.renameTooltip': '重命名该终端',
+  'terminalTitleMenu.useBranchTooltip': '将名称设为当前 Git 分支（快照）',
+  'terminalTitleMenu.useRepoTooltip': '将名称设为 Git 文件夹名（快照）',
+  'terminalTitleMenu.useBranchDisabledTooltip': '未在该终端检测到 Git 分支',
+  'terminalTitleMenu.useRepoDisabledTooltip': '该终端不在 Git 仓库内',
 
   // Coding Agent Modal
   'codingAgent.title': '启动编码助手',

@@ -237,6 +237,7 @@ is a short list of user-observable contracts the runner asserts on.
 | `run-prompt-list-autotest.sh` | Prompt cards grid, edit mode, save-as-new button label contract |
 | `run-prompt-sender-autotest.sh` | Terminal selection grid, send vs. send-and-execute dispatch |
 | `run-schedule-autotest.sh` | Schedule create / pause / resume / delete lifecycle against stored state |
+| `run-terminal-title-rename-autotest.sh` *(new)* | Task Terminal title menu — single-click dropdown (Rename / Use branch name / Use Git folder name), 220 ms double-click guard, snapshot-style branch / repo naming, inline-rename interplay |
 
 ### 6.5 Subpage navigation & platform
 
@@ -288,7 +289,7 @@ below. Absence in a fresh trace is a regression:
 | Git Repository Snapshot Service | `main:git.snapshot.capture`, `main:git.snapshot.cache-hit`, `main:git.snapshot.invalidate` | `electron/main/git-repository-snapshot-service.ts` is the canonical place where ".gitmodules + git submodule status + getGitRepoMeta validation" converge. `loadGitDiff` (phase 1 migration) consumes the service; History / Editor scope / Quick Open remain on the legacy `detectSubmodulesRecursive` wrapper which now delegates to the service internally. Required by GDS-16. |
 | Background ops | `main:file-index.build/update`, `main:project-tree-watch.event/batch` | Project FS worker build and tree-watch coalesce. |
 
-**Total canonical runners in v0.3: 44** (+1 skipped on macOS →
+**Total canonical runners in v0.3: 45** (+1 skipped on macOS →
 `run-auto-update-windows-e2e.sh`, covered in §12).
 
 ## 7. Full macOS regression command
@@ -352,6 +353,7 @@ SCRIPTS=(
   test/run-terminal-focus-activation-autotest.sh
   test/run-terminal-perf-autotest.sh
   test/run-terminal-stress-autotest.sh
+  test/run-terminal-title-rename-autotest.sh
   test/run-trace-infra-self-check-autotest.sh
   test/run-working-directory-copy-autotest.sh
 )
@@ -419,7 +421,7 @@ for a pointer.
 Baseline clean-run target for v0.3:
 
 ```text
-Passed: 44
+Passed: 45
 Failed: 0
 Skipped: 1
 ```
