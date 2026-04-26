@@ -11,6 +11,8 @@
  * so autotest / DevTools can query snapshots programmatically.
  */
 
+import { performanceTrace } from './performance-trace'
+
 export interface PerfSnapshot {
   ts: number
   fps: number
@@ -216,6 +218,23 @@ class PerfMonitor {
     for (const cb of this.onSnapshotCallbacks) {
       try { cb(snap) } catch { /* ignore */ }
     }
+
+    performanceTrace.recordCounter('perf.renderer.snapshot', {
+      fps: snap.fps,
+      frameDrops: snap.frameDrops,
+      longestFrameMs: snap.longestFrameMs,
+      xtermWriteCount: snap.xtermWriteCount,
+      xtermWriteMaxMs: snap.xtermWriteMaxMs,
+      ipcDataMsgCount: snap.ipcDataMsgCount,
+      ipcDataBytes: snap.ipcDataBytes,
+      hiddenTermWriteCount: snap.hiddenTermWriteCount,
+      hiddenTermWriteBytes: snap.hiddenTermWriteBytes,
+      webglContextCount: snap.webglContextCount,
+      reactRenderCount: snap.reactRenderCount,
+      inputLatencySamples: snap.inputLatencySamples,
+      inputLatencyAvgMs: snap.inputLatencyAvgMs,
+      inputLatencyMaxMs: snap.inputLatencyMaxMs
+    }, 'perf')
 
     // Reset per-interval counters
     this.frameCount = 0

@@ -47,6 +47,7 @@ import { terminalSessionManager } from './terminal/terminal-session-manager'
 import { focusCoordinator, type TerminalFocusRestoreReason } from './terminal/focus-coordinator'
 import { registerTerminalFocusDebugApi } from './terminal/focus-debug-api'
 import { buildChangeDirectoryCommand, type TerminalShellKind } from './utils/terminal-command'
+import { performanceTrace } from './utils/performance-trace'
 import './App.css'
 import './styles/form-controls.css'
 
@@ -652,13 +653,23 @@ function AppContent({
   const writeToTerminals = useCallback(async (
     terminalIds: string[],
     data: string,
-    action: string
+    action: string,
+    traceFlowId?: string
   ): Promise<TerminalBatchResult> => {
     const result = createTerminalBatchResult()
 
     for (const id of terminalIds) {
       try {
-        const ok = await window.electronAPI.terminal.write(id, data)
+        if (traceFlowId) {
+          performanceTrace.setActiveTerminalFlow(id, traceFlowId)
+          performanceTrace.recordFlowStep('ui.terminal.write', traceFlowId, {
+            terminalId: id,
+            action,
+            includesEnter: data.includes('\r') || data.includes('\n'),
+            ...performanceTrace.summarizeText('payload', data)
+          }, 'prompt')
+        }
+        const ok = await window.electronAPI.terminal.write(id, data, performanceTrace.context(traceFlowId))
         if (ok) {
           result.successIds.push(id)
         } else {
@@ -692,7 +703,8 @@ function AppContent({
   const sendContentToTerminals = useCallback(async (
     terminalIds: string[],
     content: string,
-    action: string
+    action: string,
+    traceFlowId?: string
   ): Promise<TerminalBatchResult> => {
     const result = createTerminalBatchResult()
     const isMultiLine = /\r?\n/.test(content)
@@ -701,6 +713,14 @@ function AppContent({
       if (isMultiLine) {
         const sessionBracketedPaste = terminalSessionManager.isBracketedPasteEnabled(id)
         if (sessionBracketedPaste === true && terminalSessionManager.paste(id, content)) {
+          if (traceFlowId) {
+            performanceTrace.setActiveTerminalFlow(id, traceFlowId)
+            performanceTrace.recordFlowStep('ui.terminal.paste', traceFlowId, {
+              terminalId: id,
+              action,
+              ...performanceTrace.summarizeText('payload', content)
+            }, 'prompt')
+          }
           result.successIds.push(id)
           continue
         }
@@ -722,8 +742,18 @@ function AppContent({
         }
         const writeResult = await window.electronAPI.terminal.sendInputSequence(id, {
           kind: isMultiLine ? 'paste' : 'raw',
-          content
+          content,
+          traceContext: performanceTrace.context(traceFlowId)
         })
+        if (traceFlowId) {
+          performanceTrace.setActiveTerminalFlow(id, traceFlowId)
+          performanceTrace.recordFlowStep('ui.terminal.send_input_sequence', traceFlowId, {
+            terminalId: id,
+            action,
+            kind: isMultiLine ? 'paste' : 'raw',
+            ...performanceTrace.summarizeText('payload', content)
+          }, 'prompt')
+        }
         if (writeResult.ok) {
           result.successIds.push(id)
         } else {
@@ -745,58 +775,123 @@ function AppContent({
   }, [buildTerminalIssue])
 
   // Send command to specified terminal
-  const handleSendToTerminals = useCallback(async (terminalIds: string[], content: string) => {
+  const handleSendToTerminals = useCallback(async (terminalIds: string[], content: string, traceFlowId?: string) => {
     window.electronAPI.telemetry.track('prompt/use', { action: 'send' })
-    return sendContentToTerminals(terminalIds, content, 'send')
+    const flowId = traceFlowId || performanceTrace.createFlowId('prompt-send')
+    performanceTrace.recordFlowStart('ui.prompt.action', flowId, {
+      action: 'send',
+      terminalIds,
+      isMultiline: /\r?\n/.test(content),
+      ...performanceTrace.summarizeText('payload', content)
+    }, 'prompt')
+    return await performanceTrace.timeAsync('ui.prompt.action', {
+      action: 'send',
+      terminalIds,
+      flowId,
+      ...performanceTrace.summarizeText('payload', content)
+    }, async () => {
+      const result = await sendContentToTerminals(terminalIds, content, 'send', flowId)
+      performanceTrace.recordFlowEnd('ui.prompt.action.done', flowId, {
+        action: 'send',
+        successCount: result.successIds.length,
+        sentOnlyCount: result.sentOnlyIds.length,
+        failedCount: result.failedIds.length
+      }, 'prompt')
+      return result
+    }, 'prompt')
   }, [sendContentToTerminals])
 
   // Execute command in terminal (send carriage return)
-  const handleExecuteOnTerminals = useCallback(async (terminalIds: string[]) => {
+  const handleExecuteOnTerminals = useCallback(async (terminalIds: string[], traceFlowId?: string) => {
     window.electronAPI.telemetry.track('prompt/use', { action: 'execute' })
-    return writeToTerminals(terminalIds, '\r', 'execute')
+    const flowId = traceFlowId || performanceTrace.createFlowId('prompt-execute')
+    performanceTrace.recordFlowStart('ui.prompt.action', flowId, {
+      action: 'execute',
+      terminalIds
+    }, 'prompt')
+    return await performanceTrace.timeAsync('ui.prompt.action', {
+      action: 'execute',
+      terminalIds,
+      flowId
+    }, async () => {
+      const result = await writeToTerminals(terminalIds, '\r', 'execute', flowId)
+      performanceTrace.recordFlowEnd('ui.prompt.action.done', flowId, {
+        action: 'execute',
+        successCount: result.successIds.length,
+        sentOnlyCount: result.sentOnlyIds.length,
+        failedCount: result.failedIds.length
+      }, 'prompt')
+      return result
+    }, 'prompt')
   }, [writeToTerminals])
 
-  const handleSendAndExecuteOnTerminals = useCallback(async (terminalIds: string[], content: string) => {
+  const handleSendAndExecuteOnTerminals = useCallback(async (terminalIds: string[], content: string, traceFlowId?: string) => {
     window.electronAPI.telemetry.track('prompt/use', { action: 'sendAndExecute' })
-    const sendResult = await sendContentToTerminals(terminalIds, content, 'send-and-execute:send')
-    const deliveredIds = getDeliveredTerminalIds(sendResult)
-    if (deliveredIds.length === 0) {
-      return sendResult
-    }
+    const flowId = traceFlowId || performanceTrace.createFlowId('prompt-send-execute')
+    performanceTrace.recordFlowStart('ui.prompt.action', flowId, {
+      action: 'sendAndExecute',
+      terminalIds,
+      isMultiline: /\r?\n/.test(content),
+      ...performanceTrace.summarizeText('payload', content)
+    }, 'prompt')
+    return await performanceTrace.timeAsync('ui.prompt.action', {
+      action: 'sendAndExecute',
+      terminalIds,
+      flowId,
+      ...performanceTrace.summarizeText('payload', content)
+    }, async () => {
+      const sendResult = await sendContentToTerminals(terminalIds, content, 'send-and-execute:send', flowId)
+      const deliveredIds = getDeliveredTerminalIds(sendResult)
+      if (deliveredIds.length === 0) {
+        performanceTrace.recordFlowEnd('ui.prompt.action.done', flowId, {
+          action: 'sendAndExecute',
+          successCount: sendResult.successIds.length,
+          sentOnlyCount: sendResult.sentOnlyIds.length,
+          failedCount: sendResult.failedIds.length
+        }, 'prompt')
+        return sendResult
+      }
 
-    await waitForSendAndExecuteSettle()
+      await waitForSendAndExecuteSettle()
 
-    const executeResult = await writeToTerminals(deliveredIds, '\r', 'send-and-execute:execute')
-    const result = createTerminalBatchResult({
-      successIds: executeResult.successIds,
-      failedIds: sendResult.failedIds,
-      issues: [...sendResult.issues]
-    })
-
-    if (executeResult.sentOnlyIds.length > 0) {
-      result.sentOnlyIds.push(...executeResult.sentOnlyIds)
-    }
-
-    if (executeResult.failedIds.length > 0) {
-      result.sentOnlyIds.push(...executeResult.failedIds)
-      result.issues.push(
-        ...executeResult.issues.map((issue) => ({
-          ...issue,
-          status: 'sent-only' as const
-        }))
-      )
-    }
-
-    if (result.failedIds.length > 0 || result.sentOnlyIds.length > 0) {
-      console.warn('[PromptSender] sendAndExecute completed with issues:', {
-        successIds: result.successIds,
-        sentOnlyIds: result.sentOnlyIds,
-        failedIds: result.failedIds,
-        issues: result.issues
+      const executeResult = await writeToTerminals(deliveredIds, '\r', 'send-and-execute:execute', flowId)
+      const result = createTerminalBatchResult({
+        successIds: executeResult.successIds,
+        failedIds: sendResult.failedIds,
+        issues: [...sendResult.issues]
       })
-    }
 
-    return result
+      if (executeResult.sentOnlyIds.length > 0) {
+        result.sentOnlyIds.push(...executeResult.sentOnlyIds)
+      }
+
+      if (executeResult.failedIds.length > 0) {
+        result.sentOnlyIds.push(...executeResult.failedIds)
+        result.issues.push(
+          ...executeResult.issues.map((issue) => ({
+            ...issue,
+            status: 'sent-only' as const
+          }))
+        )
+      }
+
+      if (result.failedIds.length > 0 || result.sentOnlyIds.length > 0) {
+        console.warn('[PromptSender] sendAndExecute completed with issues:', {
+          successIds: result.successIds,
+          sentOnlyIds: result.sentOnlyIds,
+          failedIds: result.failedIds,
+          issues: result.issues
+        })
+      }
+
+      performanceTrace.recordFlowEnd('ui.prompt.action.done', flowId, {
+        action: 'sendAndExecute',
+        successCount: result.successIds.length,
+        sentOnlyCount: result.sentOnlyIds.length,
+        failedCount: result.failedIds.length
+      }, 'prompt')
+      return result
+    }, 'prompt')
   }, [sendContentToTerminals, writeToTerminals])
 
   const handleRetrySchedule = useCallback(async (promptId: string) => {
@@ -1286,19 +1381,19 @@ function AppContent({
   // Prompt Bridge IPC monitoring: receiving command sending requests from the main process
   useEffect(() => {
     const cleanup = window.electronAPI.terminal.onPromptBridgeSend(async (request) => {
-      const { requestId, terminalId, content, action } = request
+      const { requestId, terminalId, content, action, traceFlowId } = request
       try {
         let result: TerminalBatchResult
 
         switch (action) {
           case 'send':
-            result = await handleSendToTerminals([terminalId], content)
+            result = await handleSendToTerminals([terminalId], content, traceFlowId)
             break
           case 'execute':
-            result = await handleExecuteOnTerminals([terminalId])
+            result = await handleExecuteOnTerminals([terminalId], traceFlowId)
             break
           case 'send-and-execute':
-            result = await handleSendAndExecuteOnTerminals([terminalId], content)
+            result = await handleSendAndExecuteOnTerminals([terminalId], content, traceFlowId)
             break
           default:
             result = createTerminalBatchResult({

@@ -9,6 +9,7 @@ import { join, delimiter, basename } from 'path'
 import { execFileSync } from 'child_process'
 import { app } from 'electron'
 import { getApiPort } from './api-server'
+import { performanceTrace } from './performance-trace'
 
 export interface PtyOptions {
   cols?: number
@@ -120,28 +121,55 @@ export class PtyManager {
 
     const initialCwd = cwd || process.env.HOME || process.env.USERPROFILE || process.cwd()
 
-    const ptyProcess = pty.spawn(execCommand, execArgs, {
-      name: 'xterm-256color',
-      cols,
-      rows,
-      cwd: initialCwd,
-      env: {
-        ...this.getAugmentedEnv(env || process.env),
-        // Ensure correct UTF-8 locale (if not set on the system)
-        LANG: process.env.LANG || 'en_US.UTF-8',
-        LC_ALL: process.env.LC_ALL || '',
-        LC_CTYPE: process.env.LC_CTYPE || 'en_US.UTF-8',
-        // Git 2.32+ supports overriding configuration through environment variables
-        // Disable quotepath to correctly display non-ASCII characters such as Chinese
-        GIT_CONFIG_COUNT: '1',
-        GIT_CONFIG_KEY_0: 'core.quotepath',
-        GIT_CONFIG_VALUE_0: 'false',
-        // Shell integration for CWD tracking (cmd.exe)
-        ...shellIntegrationEnv,
-        // Onward Bridge API environment variables
-        ...bridgeEnv
-      } as { [key: string]: string }
-    })
+    const spawnStartUs = performanceTrace.nowUs()
+    let ptyProcess: pty.IPty
+    try {
+      ptyProcess = pty.spawn(execCommand, execArgs, {
+        name: 'xterm-256color',
+        cols,
+        rows,
+        cwd: initialCwd,
+        env: {
+          ...this.getAugmentedEnv(env || process.env),
+          // Ensure correct UTF-8 locale (if not set on the system)
+          LANG: process.env.LANG || 'en_US.UTF-8',
+          LC_ALL: process.env.LC_ALL || '',
+          LC_CTYPE: process.env.LC_CTYPE || 'en_US.UTF-8',
+          // Git 2.32+ supports overriding configuration through environment variables
+          // Disable quotepath to correctly display non-ASCII characters such as Chinese
+          GIT_CONFIG_COUNT: '1',
+          GIT_CONFIG_KEY_0: 'core.quotepath',
+          GIT_CONFIG_VALUE_0: 'false',
+          // Shell integration for CWD tracking (cmd.exe)
+          ...shellIntegrationEnv,
+          // Onward Bridge API environment variables
+          ...bridgeEnv
+        } as { [key: string]: string }
+      })
+      performanceTrace.recordComplete('pty.spawn', spawnStartUs, {
+        terminalId: id,
+        cols,
+        rows,
+        commandKind: command ? 'custom' : 'default-shell',
+        shellKind,
+        argsCount: execArgs.length,
+        cwdProvided: Boolean(cwd),
+        result: 'success'
+      }, 'pty')
+    } catch (error) {
+      performanceTrace.recordComplete('pty.spawn', spawnStartUs, {
+        terminalId: id,
+        cols,
+        rows,
+        commandKind: command ? 'custom' : 'default-shell',
+        shellKind,
+        argsCount: execArgs.length,
+        cwdProvided: Boolean(cwd),
+        result: 'error',
+        errorType: error instanceof Error ? error.name : typeof error
+      }, 'pty')
+      throw error
+    }
 
     // Store initial CWD for Windows shell-integration tracking
     this.cwdMap.set(id, initialCwd)
@@ -164,6 +192,7 @@ export class PtyManager {
 
     record.exitDisposable = ptyProcess.onExit((event) => {
       record.exited = true
+      performanceTrace.markTaskExited(id, event.exitCode, event.signal)
       resolveExit(event)
     })
 
@@ -174,13 +203,26 @@ export class PtyManager {
   write(id: string, data: string): boolean | Promise<boolean> {
     const record = this.instances.get(id)
     if (!record || record.disposed || record.exited) return false
+    const traceArgs = {
+      terminalId: id,
+      writeMode: data.length <= SMALL_WRITE_THRESHOLD ? 'direct' : 'queued',
+      includesEnter: data.includes('\r') || data.includes('\n'),
+      ...performanceTrace.summarizeText('payload', data)
+    }
 
     if (data.length <= SMALL_WRITE_THRESHOLD) {
+      const startUs = performanceTrace.nowUs()
       try {
         // Short input (keystrokes, short commands): pass through directly
         record.pty.write(data)
+        performanceTrace.recordComplete('pty.write', startUs, { ...traceArgs, result: 'success' }, 'pty')
         return true
       } catch (error) {
+        performanceTrace.recordComplete('pty.write', startUs, {
+          ...traceArgs,
+          result: 'error',
+          errorType: error instanceof Error ? error.name : typeof error
+        }, 'pty')
         console.warn('[PTY] write failed:', { id, error: String(error) })
         return false
       }
@@ -190,8 +232,19 @@ export class PtyManager {
     // ipcMain.handle() awaits the Promise, so the renderer's
     // `await terminal.write()` won't resolve until all chunks are written.
     // This prevents the follow-up '\r' from arriving mid-content.
+    const startUs = performanceTrace.nowUs()
     record.writeQueue = record.writeQueue.then(() => this.writeLargeData(record, data))
-    return record.writeQueue.then(() => true)
+    return record.writeQueue.then(() => {
+      performanceTrace.recordComplete('pty.write', startUs, { ...traceArgs, result: 'success' }, 'pty')
+      return true
+    }).catch((error) => {
+      performanceTrace.recordComplete('pty.write', startUs, {
+        ...traceArgs,
+        result: 'error',
+        errorType: error instanceof Error ? error.name : typeof error
+      }, 'pty')
+      throw error
+    })
   }
 
   async sendInputSequence(
@@ -207,6 +260,7 @@ export class PtyManager {
     let failedPhase: PtySequencePhase = 'content'
     let failedError: unknown = null
 
+    const startUs = performanceTrace.nowUs()
     const task = record.writeQueue.then(async () => {
       if (record.disposed || record.exited) {
         failedPhase = 'content'
@@ -245,9 +299,24 @@ export class PtyManager {
 
     try {
       await task
+      performanceTrace.recordComplete('pty.send_input_sequence', startUs, {
+        terminalId: id,
+        phase: 'complete',
+        enterDelayMs: enterDelayMs ?? null,
+        ...performanceTrace.summarizeText('payload', content),
+        result: 'success'
+      }, 'pty')
       return { ok: true }
     } catch (error) {
       const message = String(failedError ?? error)
+      performanceTrace.recordComplete('pty.send_input_sequence', startUs, {
+        terminalId: id,
+        phase: failedPhase,
+        enterDelayMs: enterDelayMs ?? null,
+        ...performanceTrace.summarizeText('payload', content),
+        result: 'error',
+        errorType: failedError instanceof Error ? failedError.name : error instanceof Error ? error.name : typeof error
+      }, 'pty')
       console.warn('[PTY] sendInputSequence failed:', { id, phase: failedPhase, error: message })
       return { ok: false, phase: failedPhase, error: message }
     }
@@ -276,10 +345,19 @@ export class PtyManager {
   resize(id: string, cols: number, rows: number): boolean {
     const record = this.instances.get(id)
     if (record && !record.disposed && !record.exited) {
+      const startUs = performanceTrace.nowUs()
       try {
         record.pty.resize(cols, rows)
+        performanceTrace.recordComplete('pty.resize', startUs, { terminalId: id, cols, rows, result: 'success' }, 'pty')
         return true
       } catch (error) {
+        performanceTrace.recordComplete('pty.resize', startUs, {
+          terminalId: id,
+          cols,
+          rows,
+          result: 'error',
+          errorType: error instanceof Error ? error.name : typeof error
+        }, 'pty')
         console.warn('[PTY] resize failed:', { id, cols, rows, error: String(error) })
         return false
       }
@@ -308,12 +386,15 @@ export class PtyManager {
   dispose(id: string): boolean {
     const record = this.instances.get(id)
     if (record) {
+      const startUs = performanceTrace.nowUs()
       record.disposed = true
       this.disposeExternalListeners(record)
       this.killRecord(record)
       record.exitDisposable.dispose()
       this.instances.delete(id)
       this.cwdMap.delete(id)
+      performanceTrace.markTaskIdle(id, 'dispose')
+      performanceTrace.recordComplete('pty.dispose', startUs, { terminalId: id, result: 'success' }, 'pty')
       return true
     }
     return false
@@ -412,8 +493,14 @@ export class PtyManager {
   }
 
   async shutdownAll(timeoutMs: number = 1500): Promise<{ total: number; closed: number; timedOut: number }> {
+    const startUs = performanceTrace.nowUs()
     const records = Array.from(this.instances.entries())
     if (records.length === 0) {
+      performanceTrace.recordComplete('pty.shutdown_all', startUs, {
+        total: 0,
+        closed: 0,
+        timedOut: 0
+      }, 'pty')
       return { total: 0, closed: 0, timedOut: 0 }
     }
 
@@ -435,7 +522,9 @@ export class PtyManager {
     }
 
     const closed = results.filter(Boolean).length
-    return { total: records.length, closed, timedOut: records.length - closed }
+    const summary = { total: records.length, closed, timedOut: records.length - closed }
+    performanceTrace.recordComplete('pty.shutdown_all', startUs, summary, 'pty')
+    return summary
   }
 
   private disposeExternalListeners(record: PtyRecord): void {

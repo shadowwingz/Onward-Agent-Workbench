@@ -7,6 +7,7 @@ import { useState, useEffect, useRef, memo } from 'react'
 import type { CSSProperties, KeyboardEvent, MouseEvent } from 'react'
 import type { TerminalBatchResult, TerminalInfo } from '../../types/prompt'
 import { useI18n } from '../../i18n/useI18n'
+import { performanceTrace } from '../../utils/performance-trace'
 
 interface PromptSenderProps {
   terminals: TerminalInfo[]
@@ -55,6 +56,16 @@ export const PromptSender = memo(function PromptSender({
   selectionNoticeRef.current = selectionNotice
   isSubmittingRef.current = isSubmitting
 
+  const recordTaskSelectionTrace = (id: string, selected: boolean, selectedCount: number) => {
+    if (!performanceTrace.enabled) return
+    performanceTrace.recordInstant('ui.prompt.task_select', {
+      terminalId: id,
+      selected,
+      selectedCount,
+      totalCount: terminalsRef.current.length
+    }, 'prompt')
+  }
+
   // When the terminal list changes, update the selected status (remove non-existing terminals)
   useEffect(() => {
     const terminalIds = new Set(terminals.map(t => t.id))
@@ -80,11 +91,14 @@ export const PromptSender = memo(function PromptSender({
   const handleToggle = (id: string) => {
     setSelectedTerminals(prev => {
       const newSet = new Set(prev)
+      let selected = false
       if (newSet.has(id)) {
         newSet.delete(id)
       } else {
         newSet.add(id)
+        selected = true
       }
+      recordTaskSelectionTrace(id, selected, newSet.size)
       return newSet
     })
   }
@@ -295,7 +309,10 @@ export const PromptSender = memo(function PromptSender({
         if (!terminalsRef.current.some(t => t.id === id)) return false
         setSelectedTerminals(prev => {
           const next = new Set(prev)
-          next.add(id)
+          if (!next.has(id)) {
+            next.add(id)
+            recordTaskSelectionTrace(id, true, next.size)
+          }
           return next
         })
         return true

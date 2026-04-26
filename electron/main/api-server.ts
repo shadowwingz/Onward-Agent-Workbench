@@ -11,6 +11,7 @@ import { getAppStateStorage } from './app-state-storage'
 import { getAppInfo } from './app-info'
 import { getTerminalBuffer, sendPromptViaBridge } from './ipc-handlers'
 import { getUpdateService } from './update-service'
+import { performanceTrace } from './performance-trace'
 
 interface ApiServerOptions {
   onRestartToApplyUpdate?: () => Promise<{ success: boolean; error?: string }>
@@ -218,6 +219,7 @@ export async function startApiServer(mainWindow: BrowserWindow, options: ApiServ
 
           // POST /api/terminal/:id/write
           if (method === 'POST' && termRoute.action === 'write') {
+            const requestStartUs = performanceTrace.nowUs()
             const body = await readBody(req)
             let payload: { text?: string; execute?: boolean }
 
@@ -235,9 +237,30 @@ export async function startApiServer(mainWindow: BrowserWindow, options: ApiServ
 
             // Take Prompt Bridge IPC, executed by the rendering process (including split-write and history)
             const action = payload.execute ? 'send-and-execute' : 'send'
-            const result = await sendPromptViaBridge(mainWindow, termRoute.id, payload.text, action)
+            const flowId = performanceTrace.createFlowId('api-terminal-write')
+            performanceTrace.recordFlowStart('api.terminal.write', flowId, {
+              terminalId: termRoute.id,
+              action,
+              ...performanceTrace.summarizeText('payload', payload.text)
+            }, 'api')
+            const result = await sendPromptViaBridge(mainWindow, termRoute.id, payload.text, action, { traceFlowId: flowId })
             const deliveredCount = result.successIds.length + result.sentOnlyIds.length
             const status = result.success ? 200 : deliveredCount > 0 ? 409 : 500
+            performanceTrace.recordComplete('api.request', requestStartUs, {
+              route: 'POST /api/terminal/:id/write',
+              terminalId: termRoute.id,
+              action,
+              status,
+              deliveredCount,
+              failedCount: result.failedIds.length
+            }, 'api')
+            performanceTrace.recordFlowStep('api.terminal.write.result', flowId, {
+              terminalId: termRoute.id,
+              action,
+              status,
+              deliveredCount,
+              failedCount: result.failedIds.length
+            }, 'api')
             sendJson(res, status, result)
             return
           }

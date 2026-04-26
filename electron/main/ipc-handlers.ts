@@ -66,6 +66,7 @@ import { FileWatchManager } from './file-watch-manager'
 import { ImageWatchManager } from './image-watch-manager'
 import { ProjectTreeWatchManager } from './project-tree-watch-manager'
 import { getUpdateService } from './update-service'
+import { performanceTrace, TraceContext } from './performance-trace'
 
 let gitWatchManager: GitWatchManager | null = null
 let ripgrepSearchManager: RipgrepSearchManager | null = null
@@ -77,6 +78,14 @@ let feedbackDebugLastOpenedUrl: string | null = null
 type TerminalInputSequencePayload = {
   kind: 'raw' | 'paste'
   content: string
+  traceContext?: TraceContext
+}
+
+type DebugApiTerminalWriteResult = {
+  ok: boolean
+  status: number
+  body?: string
+  error?: string
 }
 
 const BRACKETED_PASTE_ENABLE_RE = /\x1b\[\?2004h/g
@@ -203,15 +212,23 @@ class TerminalDataBuffer {
   }
 
   flush(): void {
+    const startUs = performanceTrace.nowUs()
     if (this.timer) {
       clearTimeout(this.timer)
       this.timer = null
     }
     if (this.chunks.length === 0) return
+    const chunkCount = this.chunks.length
+    const byteCount = this.totalBytes
     const merged = this.chunks.length === 1 ? this.chunks[0] : this.chunks.join('')
     this.chunks = []
     this.totalBytes = 0
     this.send(this.terminalId, merged)
+    performanceTrace.recordComplete('terminal.buffer.flush', startUs, {
+      terminalId: this.terminalId,
+      chunkCount,
+      bytes: byteCount
+    }, 'terminal')
   }
 
   dispose(): void {
@@ -260,6 +277,10 @@ let bufferRequestCounter = 0
 const promptBridgeCallbacks = new Map<string, {
   resolve: (result: PromptBridgeSendResult) => void
   timer: ReturnType<typeof setTimeout>
+  startUs: number
+  flowId: string
+  terminalId: string
+  action: PromptBridgeAction
 }>()
 
 let promptBridgeCounter = 0
@@ -267,6 +288,7 @@ let promptBridgeCounter = 0
 interface RegisterIpcHandlersOptions {
   onSettingsChanged?: (settings: SettingsState) => void
   onRestartToApplyUpdate?: () => Promise<{ success: boolean; error?: string }>
+  getApiPort?: () => number
 }
 
 /**
@@ -322,7 +344,8 @@ export function sendPromptViaBridge(
   mainWindow: BrowserWindow,
   terminalId: string,
   content: string,
-  action: PromptBridgeAction
+  action: PromptBridgeAction,
+  traceContext?: TraceContext
 ): Promise<PromptBridgeSendResult> {
   return new Promise((resolve) => {
     if (mainWindow.isDestroyed()) {
@@ -331,20 +354,36 @@ export function sendPromptViaBridge(
     }
 
     const requestId = `prompt-bridge-${++promptBridgeCounter}-${Date.now()}`
+    const flowId = traceContext?.traceFlowId || performanceTrace.createFlowId('prompt-bridge')
+    const startUs = performanceTrace.nowUs()
+    performanceTrace.recordFlowStep('prompt.bridge.send', flowId, {
+      requestId,
+      terminalId,
+      action,
+      ...performanceTrace.summarizeText('payload', content)
+    }, 'prompt')
 
     // 10 second timeout to cover prompt delivery plus any renderer-side coordination.
     const timer = setTimeout(() => {
       promptBridgeCallbacks.delete(requestId)
+      performanceTrace.recordComplete('prompt.bridge', startUs, {
+        requestId,
+        terminalId,
+        action,
+        result: 'timeout'
+      }, 'prompt')
+      performanceTrace.recordFlowEnd('prompt.bridge.timeout', flowId, { requestId, terminalId, action }, 'prompt')
       resolve({ success: false, successIds: [], sentOnlyIds: [], failedIds: [terminalId], error: 'Request timed out (10 seconds)' })
     }, 10000)
 
-    promptBridgeCallbacks.set(requestId, { resolve, timer })
+    promptBridgeCallbacks.set(requestId, { resolve, timer, startUs, flowId, terminalId, action })
 
     mainWindow.webContents.send('prompt:bridge-send', {
       requestId,
       terminalId,
       content,
-      action
+      action,
+      traceFlowId: flowId
     })
   })
 }
@@ -400,6 +439,23 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     if (pending) {
       clearTimeout(pending.timer)
       promptBridgeCallbacks.delete(requestId)
+      performanceTrace.recordComplete('prompt.bridge', pending.startUs, {
+        requestId,
+        terminalId: pending.terminalId,
+        action: pending.action,
+        successCount: result.successIds.length,
+        sentOnlyCount: result.sentOnlyIds.length,
+        failedCount: result.failedIds.length,
+        result: result.success ? 'success' : 'partial-or-failed'
+      }, 'prompt')
+      performanceTrace.recordFlowStep('prompt.bridge.response', pending.flowId, {
+        requestId,
+        terminalId: pending.terminalId,
+        action: pending.action,
+        successCount: result.successIds.length,
+        sentOnlyCount: result.sentOnlyIds.length,
+        failedCount: result.failedIds.length
+      }, 'prompt')
       pending.resolve(result)
     }
   })
@@ -439,6 +495,49 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   })
   ipcMain.handle('debug:get-git-runtime-metrics', () => {
     return gitRuntimeManager.getMetrics()
+  })
+  ipcMain.handle('debug:get-api-server-port', () => {
+    return options.getApiPort?.() ?? 0
+  })
+  ipcMain.handle('debug:post-api-terminal-write', async (
+    _event,
+    payload?: { terminalId?: unknown; text?: unknown; execute?: unknown }
+  ): Promise<DebugApiTerminalWriteResult> => {
+    const port = options.getApiPort?.() ?? 0
+    const terminalId = typeof payload?.terminalId === 'string' ? payload.terminalId : ''
+    const text = typeof payload?.text === 'string' ? payload.text : ''
+    const execute = payload?.execute === true
+
+    if (port <= 0) {
+      return { ok: false, status: 0, error: 'API server is not available.' }
+    }
+    if (!terminalId) {
+      return { ok: false, status: 0, error: 'Missing terminalId.' }
+    }
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/api/terminal/${encodeURIComponent(terminalId)}/write`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json; charset=utf-8' },
+        body: JSON.stringify({ text, execute })
+      })
+      return {
+        ok: response.ok,
+        status: response.status,
+        body: await response.text()
+      }
+    } catch (error) {
+      return { ok: false, status: 0, error: String(error) }
+    }
+  })
+  ipcMain.handle('performance-trace:record', (_event, payload) => {
+    performanceTrace.recordRendererEvent(payload)
+  })
+  ipcMain.handle('performance-trace:get-status', () => {
+    return performanceTrace.getStatus()
+  })
+  ipcMain.handle('performance-trace:flush', () => {
+    return performanceTrace.flush('debug-ipc')
   })
   ipcMain.handle('debug:feedback-reset', () => {
     feedbackDebugLastOpenedUrl = null
@@ -536,6 +635,11 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
         if (!mainWindow.isDestroyed()) {
           mainWindow.webContents.send('terminal:data', tid, mergedData)
         }
+        performanceTrace.recordInstant('terminal.ipc.send', {
+          terminalId: tid,
+          bytes: mergedData.length,
+          flowId: performanceTrace.getTaskFlowId(tid) ?? undefined
+        }, 'terminal')
         // Diagnostic counter
         if (shouldLog) {
           let c = ipcDataCounters.get(tid)
@@ -563,6 +667,13 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
         ptyManager.detectCwd(id, data)
         const bracketedPasteMode = terminalBracketedPasteState.get(id) ?? false
         terminalBracketedPasteState.set(id, updateBracketedPasteMode(bracketedPasteMode, data))
+        performanceTrace.markTaskOutput(id, data.length)
+        performanceTrace.recordInstant('pty.output', {
+          terminalId: id,
+          bytes: data.length,
+          bracketedPasteMode,
+          flowId: performanceTrace.getTaskFlowId(id) ?? undefined
+        }, 'pty')
         dataBuffer.push(data)
 
         // Notify git watch on PTY output (throttled) instead of on every keystroke
@@ -574,6 +685,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
       })
 
       const exitDisposable = ptyProcess.onExit(({ exitCode, signal }) => {
+        performanceTrace.markTaskExited(id, exitCode, signal)
         if (!mainWindow.isDestroyed()) {
           mainWindow.webContents.send('terminal:exit', id, exitCode, signal)
         }
@@ -733,26 +845,79 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
 
   // Create a new terminal
   ipcMain.handle('terminal:create', (_, id: string, options?: PtyOptions) => {
-    return createTerminalProcess(id, options)
+    return performanceTrace.timeSync('ipc.invoke', {
+      channel: 'terminal:create',
+      terminalId: id,
+      cols: options?.cols ?? null,
+      rows: options?.rows ?? null,
+      cwdProvided: Boolean(options?.cwd)
+    }, () => createTerminalProcess(id, options), 'ipc')
   })
 
   // Write data to terminal
-  ipcMain.handle('terminal:write', async (_, id: string, data: string) => {
+  ipcMain.handle('terminal:write', async (_, id: string, data: string, traceContext?: TraceContext) => {
     // Git activity notification moved to ptyProcess.onData with 500ms throttle
     // (user keystrokes don't change git state; PTY output means command execution)
-    return await ptyManager.write(id, data)
+    const flowId = traceContext?.traceFlowId
+    const includesEnter = data.includes('\r') || data.includes('\n')
+    performanceTrace.markTaskInput(id, flowId, {
+      inputKind: includesEnter ? 'execute' : 'input',
+      ...performanceTrace.summarizeText('payload', data)
+    })
+    if (includesEnter) {
+      performanceTrace.markTaskRunning(id, flowId, { reason: 'terminal-write-enter' })
+    }
+    if (flowId) {
+      performanceTrace.recordFlowStep('ipc.terminal.write', flowId, {
+        terminalId: id,
+        includesEnter,
+        ...performanceTrace.summarizeText('payload', data)
+      }, 'ipc')
+    }
+    return await performanceTrace.timeAsync('ipc.invoke', {
+      channel: 'terminal:write',
+      terminalId: id,
+      includesEnter,
+      flowId,
+      ...performanceTrace.summarizeText('payload', data)
+    }, async () => await ptyManager.write(id, data), 'ipc')
   })
 
   ipcMain.handle('terminal:send-input-sequence', async (_, id: string, payload: TerminalInputSequencePayload) => {
+    const flowId = payload.traceContext?.traceFlowId
+    performanceTrace.markTaskInput(id, flowId, {
+      inputKind: payload.kind,
+      ...performanceTrace.summarizeText('payload', payload.content)
+    })
+    if (flowId) {
+      performanceTrace.recordFlowStep('ipc.terminal.send_input_sequence', flowId, {
+        terminalId: id,
+        kind: payload.kind,
+        ...performanceTrace.summarizeText('payload', payload.content)
+      }, 'ipc')
+    }
     if (payload.kind === 'raw') {
-      const ok = await ptyManager.write(id, payload.content)
+      const ok = await performanceTrace.timeAsync('ipc.invoke', {
+        channel: 'terminal:send-input-sequence',
+        terminalId: id,
+        kind: payload.kind,
+        flowId,
+        ...performanceTrace.summarizeText('payload', payload.content)
+      }, async () => await ptyManager.write(id, payload.content), 'ipc')
       return ok ? { ok: true } : { ok: false, phase: 'content' as const, error: 'pty write failed' }
     }
 
     // 'paste' kind — send content without Enter
     const bracketedPasteEnabled = terminalBracketedPasteState.get(id) ?? false
     const prepared = wrapBracketedPaste(prepareTextForPaste(payload.content), bracketedPasteEnabled)
-    return await ptyManager.sendInputSequence(id, prepared)
+    return await performanceTrace.timeAsync('ipc.invoke', {
+      channel: 'terminal:send-input-sequence',
+      terminalId: id,
+      kind: payload.kind,
+      bracketedPasteEnabled,
+      flowId,
+      ...performanceTrace.summarizeText('payload', payload.content)
+    }, async () => await ptyManager.sendInputSequence(id, prepared), 'ipc')
   })
 
   ipcMain.handle('terminal:get-input-capabilities', (_, id: string) => {
@@ -780,11 +945,17 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
 
   // Resize terminal
   ipcMain.handle('terminal:resize', (_, id: string, cols: number, rows: number) => {
-    return ptyManager.resize(id, cols, rows)
+    return performanceTrace.timeSync('ipc.invoke', {
+      channel: 'terminal:resize',
+      terminalId: id,
+      cols,
+      rows
+    }, () => ptyManager.resize(id, cols, rows), 'ipc')
   })
 
   // Dispose terminal
   ipcMain.handle('terminal:dispose', (_, id: string) => {
+    const startUs = performanceTrace.nowUs()
     // Flush and dispose the data buffer
     const buf = terminalDataBuffers.get(id)
     if (buf) {
@@ -795,7 +966,13 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     terminalBracketedPasteState.delete(id)
     ipcDataCounters.delete(id)
     gitWatchManager?.unsubscribe(id)
-    return ptyManager.dispose(id)
+    const result = ptyManager.dispose(id)
+    performanceTrace.recordComplete('ipc.invoke', startUs, {
+      channel: 'terminal:dispose',
+      terminalId: id,
+      result: result ? 'success' : 'not-found'
+    }, 'ipc')
+    return result
   })
 
   // Prompt storage handlers
@@ -1054,7 +1231,10 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   })
 
   ipcMain.handle('coding-agent:prepare', async (_, command: string, executablePath?: string) => {
-    const info = await getCodingAgentRuntimeInfo(command || '', executablePath || undefined)
+    const info = await performanceTrace.timeAsync('coding_agent.prepare', {
+      commandKind: executablePath ? 'absolute-path' : 'path-lookup',
+      executablePathProvided: Boolean(executablePath)
+    }, async () => await getCodingAgentRuntimeInfo(command || '', executablePath || undefined), 'coding-agent')
     if (!info.success) {
       return { success: false, error: info.error }
     }
@@ -1062,18 +1242,37 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   })
 
   ipcMain.handle('coding-agent:launch', async (_, payload: { terminalId: string; config: CodingAgentConfigInput; cols?: number; rows?: number }) => {
+    const startUs = performanceTrace.nowUs()
     const terminalId = payload?.terminalId
     if (!terminalId) {
+      performanceTrace.recordComplete('coding_agent.launch', startUs, { result: 'error', reason: 'missing-terminal-id' }, 'coding-agent')
       return { success: false, error: 'Terminal ID missing' }
     }
 
     const config = payload.config
     if (!config || !config.command) {
+      performanceTrace.recordComplete('coding_agent.launch', startUs, { terminalId, result: 'error', reason: 'missing-config' }, 'coding-agent')
       return { success: false, error: 'Agent configuration missing' }
     }
+    const flowId = performanceTrace.createFlowId('coding-agent')
+    performanceTrace.recordFlowStart('coding_agent.launch', flowId, {
+      terminalId,
+      commandKind: config.executablePath ? 'absolute-path' : 'path-lookup'
+    }, 'coding-agent')
+    performanceTrace.markTaskRunning(terminalId, flowId, { reason: 'coding-agent-launch' })
 
     const runtimeInfo = await getCodingAgentRuntimeInfo(config.command, config.executablePath || undefined)
     if (!runtimeInfo.success || !runtimeInfo.executablePath) {
+      performanceTrace.recordComplete('coding_agent.launch', startUs, {
+        terminalId,
+        commandKind: config.executablePath ? 'absolute-path' : 'path-lookup',
+        result: 'error',
+        reason: 'runtime-unavailable'
+      }, 'coding-agent')
+      performanceTrace.recordFlowEnd('coding_agent.launch.error', flowId, {
+        terminalId,
+        reason: 'runtime-unavailable'
+      }, 'coding-agent')
       return { success: false, error: runtimeInfo.error || 'Agent not ready' }
     }
 
@@ -1128,7 +1327,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     ptyManager.dispose(terminalId)
 
     // Spawn the agent; on exit the renderer's global exit handler will prompt restart
-    return createTerminalProcess(terminalId, {
+    const result = createTerminalProcess(terminalId, {
       cols,
       rows,
       cwd: restartCwd,
@@ -1136,6 +1335,19 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
       command: runtimeInfo.executablePath,
       args: extraArgs
     })
+    performanceTrace.recordComplete('coding_agent.launch', startUs, {
+      terminalId,
+      commandKind: config.executablePath ? 'absolute-path' : 'path-lookup',
+      argsCount: extraArgs.length,
+      envVarCount: userEnvVars.length,
+      result: result.success ? 'success' : 'error'
+    }, 'coding-agent')
+    if (result.success) {
+      performanceTrace.recordFlowStep('coding_agent.pty.spawned', flowId, { terminalId }, 'coding-agent')
+    } else {
+      performanceTrace.recordFlowEnd('coding_agent.launch.error', flowId, { terminalId }, 'coding-agent')
+    }
+    return result
   })
 
   // App state storage handlers
@@ -1675,6 +1887,11 @@ export function cleanupIpcHandlers(): void {
   ipcMain.removeHandler('debug:get-app-metrics')
   ipcMain.removeHandler('debug:focus-window')
   ipcMain.removeHandler('debug:get-git-runtime-metrics')
+  ipcMain.removeHandler('debug:get-api-server-port')
+  ipcMain.removeHandler('debug:post-api-terminal-write')
+  ipcMain.removeHandler('performance-trace:record')
+  ipcMain.removeHandler('performance-trace:get-status')
+  ipcMain.removeHandler('performance-trace:flush')
   ipcMain.removeHandler('debug:read-telemetry-log')
   ipcMain.removeHandler('debug:quit')
   ipcMain.removeAllListeners('debug:log')

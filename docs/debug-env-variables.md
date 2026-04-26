@@ -66,6 +66,10 @@ set ONWARD_TELEMETRY_RESET_CONSENT=1
 | `ONWARD_TELEMETRY_RESET_CONSENT` | `1` | Reset telemetry consent on launch (autotest: set to true; manual: set to null for consent dialog) |
 | `ONWARD_TELEMETRY_FAST_HEARTBEAT` | `1` | Reduce heartbeat interval from 5 minutes to 5 seconds for telemetry testing |
 | `ONWARD_TELEMETRY_FORCE_UPLOAD` | `1` | Force daily summary upload on the next heartbeat cycle (skip 24h wait) |
+| `ONWARD_PERF_TRACE` | `1` | Enable local Perfetto / Chrome Trace JSON recording under the app user-data directory. Trace events are not sent through telemetry. |
+| `ONWARD_PERF_TRACE_CAPTURE_CONTENT` | `1` | Include bounded raw Prompt / terminal / render content previews in the local performance trace. Requires `ONWARD_PERF_TRACE=1`; sensitive content is omitted by default. |
+| `ONWARD_PERF_TRACE_FLUSH_SEC` | non-negative integer | Periodic flush-to-disk interval in seconds. Default `30`. Set to `0` to disable periodic flushing (final flush on app quit still runs). Requires `ONWARD_PERF_TRACE=1`. |
+| `ONWARD_PERF_TRACE_MAX_MB` | positive integer | Maximum in-memory size of the trace buffer in MB. Default `256`. When the cap is hit, new events are dropped and `droppedEvents` increments. Requires `ONWARD_PERF_TRACE=1`. |
 | `ONWARD_DIST_DEV_OPEN` | `0` / `1` / unset | Controls whether `pnpm dist:dev` opens the packaged app after a successful build: **unset** = open on local machines (skipped when `CI` is truthy); **`1`** = always open (including in CI); **`0`** = never open. |
 
 ## Adding a New Debug Variable

@@ -27,6 +27,7 @@ This directory contains reusable automation notes and validation procedures for 
 - Multi-submodule Git Diff staged loading
 - Terminal autofollow and viewport preservation
 - CPU and performance regression checks
+- Perfetto-compatible performance trace export, event schema, and default content redaction
 - Terminal focus restore and activation behavior
 - Stability when switching between Project Editor, Git Diff, and Git History
 - Change Log draft generation, manifest publishing, and in-app rendering
@@ -71,6 +72,7 @@ src/autotest/
 ├── test-settings-update.ts
 ├── test-change-log.ts
 ├── test-file-watch.ts
+├── test-performance-trace.ts
 ├── test-feedback.ts
 ├── test-feedback-ui.ts
 ├── test-feedback-persistence.ts
@@ -638,6 +640,27 @@ test/run-git-cross-platform-autotest.sh
 
 # Windows (PowerShell)
 test/run-git-cross-platform-autotest.ps1
+```
+
+### Phase 0.881: Performance Trace
+
+Source set: Perfetto / Chrome Trace export validation suite
+
+- `PT-01`: performance trace is enabled and initialized when `ONWARD_PERF_TRACE=1`
+- `PT-02`: sensitive content capture remains disabled unless `ONWARD_PERF_TRACE_CAPTURE_CONTENT=1`
+- `PT-03` to `PT-07`: golden user/API scenario covers Prompt editing, Task selection, Send, Execute, Send and Execute, API write, Prompt Bridge, PTY output, and renderer flush
+- `PT-08`: flushing writes a trace file with renderer, API, Prompt Bridge, IPC, PTY, Task state, and render events
+- `PT-09`: the trace writer reports no dropped events in the focused run
+- `test/validate-performance-trace-contract.mjs`: parses the JSON trace and validates the human-readable event contract (`TC-00` to `TC-24`), including visible args, flow continuity, and default raw-content redaction
+
+Launch:
+
+```bash
+# macOS / Linux
+test/run-performance-trace-autotest.sh
+
+# Windows (PowerShell)
+test/run-performance-trace-autotest.ps1
 ```
 
 ### Phase 5.48: Git Nested Submodules

@@ -19,7 +19,7 @@ import { getTrayManager } from './tray-manager'
 import { getAppInfo, initializeAppIdentity } from './app-info'
 import { ptyManager } from './pty-manager'
 import { isSameAppNavigation, openExternalUrlWithConfirm } from './external-link-guard'
-import { startApiServer, stopApiServer } from './api-server'
+import { startApiServer, stopApiServer, getApiPort } from './api-server'
 import { tMain } from './localization'
 import { getUpdateService, applyPendingUpdateOnStartup } from './update-service'
 import { getAppStateStorage } from './app-state-storage'
@@ -29,6 +29,7 @@ import { getWindowStateStorage } from './window-state-storage'
 import { getTelemetryService } from './telemetry/telemetry-service'
 import { TELEMETRY_RESET_CONSENT } from './telemetry/telemetry-constants'
 import { startSessionHeartbeat, stopSessionHeartbeat, getSessionDurationMs } from './telemetry/telemetry-session-tracker'
+import { performanceTrace } from './performance-trace'
 
 let mainWindow: BrowserWindow | null = null
 let isQuitting = false
@@ -123,6 +124,15 @@ async function shutdownTelemetry(): Promise<void> {
   await getTelemetryService().shutdown()
 }
 
+function flushPerformanceTrace(reason: string): void {
+  if (!performanceTrace.enabled) return
+  try {
+    performanceTrace.flush(reason)
+  } catch (error) {
+    console.warn('[PerfTrace] Failed to flush trace:', String(error))
+  }
+}
+
 // Exit the request entry in a unified manner to ensure that the confirmation box only pops up once
 export async function requestQuit(): Promise<void> {
   if (isQuitting) return
@@ -139,6 +149,7 @@ export async function requestQuit(): Promise<void> {
         `[PTY] shutdown timed out: ${shutdownResult.timedOut}/${shutdownResult.total}`
       )
     }
+    flushPerformanceTrace('quit')
     app.quit()
   }
 }
@@ -167,6 +178,7 @@ export async function requestRestartToApplyUpdate(): Promise<{ success: boolean;
     )
   }
 
+  flushPerformanceTrace('restart-to-update')
   app.quit()
   return { success: true }
 }
@@ -189,6 +201,7 @@ export async function requestQuitForDebug(): Promise<{ success: boolean; error?:
     )
   }
 
+  flushPerformanceTrace('debug-quit')
   app.quit()
   return { success: true }
 }
@@ -417,7 +430,8 @@ function createWindow(displayName: string): void {
     onSettingsChanged: () => {
       Menu.setApplicationMenu(Menu.buildFromTemplate(buildMenuTemplate(displayName)))
     },
-    onRestartToApplyUpdate: requestRestartToApplyUpdate
+    onRestartToApplyUpdate: requestRestartToApplyUpdate,
+    getApiPort
   })
 
   // Set up window shortcuts (before-input-event)
@@ -433,6 +447,7 @@ function createWindow(displayName: string): void {
 
 app.whenReady().then(() => {
   const appInfo = initializeAppIdentity()
+  performanceTrace.initialize()
 
   // Windows: check for a pending update that wasn't applied during the
   // previous quit (e.g. the helper script was killed by Job Object cleanup).

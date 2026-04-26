@@ -54,6 +54,7 @@ import { testFeedback } from './test-feedback'
 import { testFeedbackUi } from './test-feedback-ui'
 import { testFeedbackPersistenceSeed, testFeedbackPersistenceVerify } from './test-feedback-persistence'
 import { testTelemetry } from './test-telemetry'
+import { testPerformanceTrace } from './test-performance-trace'
 import { testSubpageViewstateRestore } from './test-subpage-viewstate-restore'
 import { testQuickFileUnit } from './test-quick-file-unit'
 import { testSidebarAutoscroll } from './test-sidebar-autoscroll'
@@ -315,6 +316,13 @@ export async function runAllTests(ctx: AutotestContext): Promise<void> {
       const results = await testTelemetry(ctx)
       collectSuiteResults('Telemetry', results)
       await sleep(400)
+    }
+
+    if (!ctx.cancelled() && shouldRun('performance-trace')) {
+      log('phase0.881:begin')
+      const results = await testPerformanceTrace(ctx)
+      collectSuiteResults('PerformanceTrace', results)
+      await sleep(300)
     }
 
     if (!ctx.cancelled() && shouldRun('file-watch')) {

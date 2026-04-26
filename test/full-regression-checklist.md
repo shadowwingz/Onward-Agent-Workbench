@@ -269,6 +269,7 @@ The full pass covers these areas:
 - Markdown LaTeX preview
 - Mermaid pan/zoom
 - PDF/EPUB preview, Diff, and History
+- Performance trace export and default content redaction
 - Preview Search ordering and active match centering
 - Project Editor file memory
 - Project Editor markdown navigation
@@ -309,6 +310,7 @@ Use the same pattern for:
 - `test/run-subpage-viewstate-restore-autotest.sh`
 - `test/run-git-diff-subdir-autotest.sh`
 - `test/run-preview-search-autotest.sh`
+- `test/run-performance-trace-autotest.sh`
 - `test/run-project-editor-markdown-session-restore-autotest.sh`
 - `test/run-prompt-integrity-autotest.sh`
 - `test/run-prompt-sender-autotest.sh`
