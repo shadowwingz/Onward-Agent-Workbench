@@ -264,6 +264,7 @@ is a short list of user-observable contracts the runner asserts on.
 | Runner | Key features covered |
 |---|---|
 | `run-trace-infra-self-check-autotest.sh` | T02 baseline. Launches app with `ONWARD_PERF_TRACE=1` for ~6 s, asserts `traces/perf/*.json` is produced, is valid Chrome trace JSON, and carries at least one `main:*` event. Optionally parse-verifies via `trace_processor_shell` when locally installed. |
+| `run-performance-trace-autotest.sh` *(new)* | Parallel `performance-trace` writer (codex stack). Verifies trace export to `traces/perf/`, default sensitive-content redaction, and the `performance-trace:record / get-status / flush` IPC contract. |
 
 **Per-operation trace coverage** — wired in the v0.3.x trace-expansion
 pass. Every Onward-initiated operation, child process, and renderer
@@ -289,7 +290,7 @@ below. Absence in a fresh trace is a regression:
 | Git Repository Snapshot Service | `main:git.snapshot.capture`, `main:git.snapshot.cache-hit`, `main:git.snapshot.invalidate` | `electron/main/git-repository-snapshot-service.ts` is the canonical place where ".gitmodules + git submodule status + getGitRepoMeta validation" converge. `loadGitDiff` (phase 1 migration) consumes the service; History / Editor scope / Quick Open remain on the legacy `detectSubmodulesRecursive` wrapper which now delegates to the service internally. Required by GDS-16. |
 | Background ops | `main:file-index.build/update`, `main:project-tree-watch.event/batch` | Project FS worker build and tree-watch coalesce. |
 
-**Total canonical runners in v0.3: 45** (+1 skipped on macOS →
+**Total canonical runners in v0.3: 46** (+1 skipped on macOS →
 `run-auto-update-windows-e2e.sh`, covered in §12).
 
 ## 7. Full macOS regression command
@@ -329,6 +330,7 @@ SCRIPTS=(
   test/run-pdf-epub-diff-autotest.sh
   test/run-pdf-epub-full-autotest.sh
   test/run-pdf-epub-preview-autotest.sh
+  test/run-performance-trace-autotest.sh
   test/run-preview-search-autotest.sh
   test/run-project-editor-file-memory-autotest.sh
   test/run-project-editor-markdown-navigation-autotest.sh
@@ -421,7 +423,7 @@ for a pointer.
 Baseline clean-run target for v0.3:
 
 ```text
-Passed: 45
+Passed: 46
 Failed: 0
 Skipped: 1
 ```

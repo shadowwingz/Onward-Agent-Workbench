@@ -101,6 +101,7 @@ export interface PromptBridgeSendRequest {
   terminalId: string
   content: string
   action: PromptBridgeAction
+  traceFlowId?: string
 }
 
 export interface PromptBridgeSendResult {
@@ -121,6 +122,39 @@ export interface PromptBridgeSendResult {
 export interface TerminalInputSequencePayload {
   kind: 'raw' | 'paste'
   content: string
+  traceContext?: PerformanceTraceContext
+}
+
+export interface PerformanceTraceContext {
+  traceFlowId?: string
+}
+
+export interface PerformanceTraceRendererEvent {
+  name: string
+  cat?: string
+  ph?: 'X' | 'i' | 'C' | 'M' | 's' | 't' | 'f'
+  ts?: number
+  dur?: number
+  tid?: number
+  id?: string
+  scope?: 'g' | 'p' | 't'
+  args?: Record<string, string | number | boolean | null | string[] | number[] | boolean[] | undefined>
+}
+
+export interface PerformanceTraceStatus {
+  enabled: boolean
+  captureContent: boolean
+  initialized: boolean
+  filePath: string | null
+  eventCount: number
+  droppedEvents: number
+}
+
+export interface DebugApiTerminalWriteResult {
+  ok: boolean
+  status: number
+  body?: string
+  error?: string
 }
 
 export type TerminalShellKind = 'posix' | 'powershell' | 'cmd' | 'unknown'
@@ -132,7 +166,7 @@ export interface TerminalInputCapabilities {
 
 export interface TerminalAPI {
   create: (id: string, options?: TerminalOptions) => Promise<{ success: boolean; id?: string; error?: string }>
-  write: (id: string, data: string) => Promise<boolean>
+  write: (id: string, data: string, traceContext?: PerformanceTraceContext) => Promise<boolean>
   resize: (id: string, cols: number, rows: number) => Promise<boolean>
   sendInputSequence: (
     id: string,
@@ -914,6 +948,7 @@ export interface DebugAPI {
   // submodule c/m/u filter suite needs both a "clean" and a "pointer-changed"
   // parent+submodule pair). Empty/null in normal runs.
   autotestFixtureExtra: string | null
+  perfTraceCaptureContent: boolean
   log: (message: string, data?: unknown) => void
   focusWindow: () => Promise<boolean>
   getAppMetrics: () => Promise<Record<string, unknown>[]>
@@ -922,6 +957,11 @@ export interface DebugAPI {
   getPerfTraceInfo: () => Promise<PerfTraceInfo>
   resetPerfTraceMetrics: () => Promise<EventLoopStallMetrics>
   perfTrace: (event: string, data?: Record<string, unknown>, terminalId?: string) => void
+  getApiServerPort: () => Promise<number>
+  postApiTerminalWrite: (payload: { terminalId: string; text: string; execute: boolean }) => Promise<DebugApiTerminalWriteResult>
+  recordPerfTrace: (event: PerformanceTraceRendererEvent) => void
+  getPerfTraceStatus: () => Promise<PerformanceTraceStatus>
+  flushPerfTrace: () => Promise<PerformanceTraceStatus>
   feedbackReset: () => Promise<void>
   feedbackSetMockIssues: (issues: FeedbackDebugRemoteIssue[]) => Promise<void>
   feedbackGetLastOpenedUrl: () => Promise<string | null>
@@ -1057,11 +1097,11 @@ const terminalAPI: TerminalAPI = {
     return ipcRenderer.invoke(IPC.TERMINAL_CREATE, id, options)
   },
 
-  write: (id: string, data: string) => {
+  write: (id: string, data: string, traceContext?: PerformanceTraceContext) => {
     return traceIpc(
       PERF_TRACE_EVENT.RENDERER_IPC_TERMINAL_WRITE,
       { terminalId: id, bytes: data.length },
-      () => ipcRenderer.invoke(IPC.TERMINAL_WRITE, id, data)
+      () => ipcRenderer.invoke(IPC.TERMINAL_WRITE, id, data, traceContext)
     )
   },
 
@@ -1629,6 +1669,7 @@ const debugAutotestCwd = process.env.ONWARD_AUTOTEST_CWD || null
 const debugAutotestSuite = process.env.ONWARD_AUTOTEST_SUITE || null
 const debugAutotestExit = process.env.ONWARD_AUTOTEST_EXIT === '1'
 const debugAutotestFixtureExtra = process.env.ONWARD_AUTOTEST_FIXTURE_EXTRA || null
+const perfTraceCaptureContent = process.env.ONWARD_PERF_TRACE_CAPTURE_CONTENT === '1'
 
 const debugAPI: DebugAPI = {
   enabled: debugEnabled,
@@ -1640,6 +1681,7 @@ const debugAPI: DebugAPI = {
   autotestSuite: debugAutotestSuite,
   autotestExit: debugAutotestExit,
   autotestFixtureExtra: debugAutotestFixtureExtra,
+  perfTraceCaptureContent,
   log: (message: string, data?: unknown) => {
     if (!debugEnabled) return
     ipcRenderer.send(IPC.DEBUG_LOG, { message, data })
@@ -1665,6 +1707,22 @@ const debugAPI: DebugAPI = {
   perfTrace: (event: string, data?: Record<string, unknown>, terminalId?: string) => {
     if (!perfTraceEnabled) return
     ipcRenderer.send(IPC.DEBUG_PERF_TRACE, { event, data, terminalId })
+  },
+  getApiServerPort: () => {
+    return ipcRenderer.invoke('debug:get-api-server-port') as Promise<number>
+  },
+  postApiTerminalWrite: (payload: { terminalId: string; text: string; execute: boolean }) => {
+    return ipcRenderer.invoke('debug:post-api-terminal-write', payload) as Promise<DebugApiTerminalWriteResult>
+  },
+  recordPerfTrace: (event: PerformanceTraceRendererEvent) => {
+    if (!perfTraceEnabled) return
+    void ipcRenderer.invoke('performance-trace:record', event).catch(() => {})
+  },
+  getPerfTraceStatus: () => {
+    return ipcRenderer.invoke('performance-trace:get-status') as Promise<PerformanceTraceStatus>
+  },
+  flushPerfTrace: () => {
+    return ipcRenderer.invoke('performance-trace:flush') as Promise<PerformanceTraceStatus>
   },
   feedbackReset: () => {
     return ipcRenderer.invoke(IPC.DEBUG_FEEDBACK_RESET)

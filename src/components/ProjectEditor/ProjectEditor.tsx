@@ -75,6 +75,7 @@ import {
   getParentPath
 } from './quickFileUtils'
 import { createThemedSetiFileIconResolver, sanitizeSetiSvgOnce } from './setiFileIconTheme'
+import { performanceTrace } from '../../utils/performance-trace'
 import './ProjectEditor.css'
 
 initializeFileIndexCacheBridge()
@@ -2457,6 +2458,7 @@ export function ProjectEditor({
       if (markdownWorkerOwnerRef.current !== activeFilePath) return
       const pending = markdownPendingPayloadRef.current
       if (!pending) return
+      const traceStartUs = performanceTrace.enabled ? performanceTrace.nowUs() : 0
       const start = performance.now()
       const safeHtml = DOMPurify.sanitize(pending.html || '', { ALLOWED_URI_REGEXP: DOMPURIFY_URI_POLICY })
       const sanitizeEnd = performance.now()
@@ -2488,6 +2490,18 @@ export function ProjectEditor({
           duration: Math.round(duration),
           htmlLength: safeHtml.length
         })
+      }
+      if (performanceTrace.enabled) {
+        performanceTrace.recordComplete(
+          'project_editor.render.apply',
+          traceStartUs,
+          {
+            outputLength: safeHtml.length,
+            imageCount: Array.isArray(pending.imagePaths) ? pending.imagePaths.length : 0,
+            dompurifyDurationMs: +duration.toFixed(3)
+          },
+          'markdown'
+        )
       }
     }
 
@@ -2533,9 +2547,12 @@ export function ProjectEditor({
       rootPath,
       baseDir,
       imageMap,
-      // Enable worker-side profiling whenever DEBUG or perf trace is on;
-      // `renderDuration` is what `worker.markdown:render-complete` reports.
-      profile: DEBUG_PROJECT_EDITOR || Boolean(window.electronAPI?.debug?.perfTraceEnabled)
+      // Enable worker-side profiling whenever DEBUG or either perf-trace
+      // system is on; `renderDuration` is what `worker.markdown:render-complete`
+      // reports.
+      profile: DEBUG_PROJECT_EDITOR
+        || Boolean(window.electronAPI?.debug?.perfTraceEnabled)
+        || performanceTrace.enabled
     })
   }, [])
 
@@ -2796,6 +2813,21 @@ export function ProjectEditor({
             duration: Math.round(payload.renderDuration),
             contentLength: payload.contentLength ?? 0
           })
+        }
+        if (performanceTrace.enabled && typeof payload.renderDuration === 'number') {
+          // Worker reports duration in ms; convert to a complete-event span ending now.
+          const durUs = Math.max(0, Math.round(payload.renderDuration * 1000))
+          performanceTrace.recordComplete(
+            'markdown.render.worker',
+            performanceTrace.nowUs() - durUs,
+            {
+              contentLength: payload.contentLength ?? 0,
+              outputLength: payload.html?.length ?? 0,
+              imageCount: Array.isArray(payload.imagePaths) ? payload.imagePaths.length : 0,
+              profileFlag: DEBUG_PROJECT_EDITOR || performanceTrace.enabled
+            },
+            'markdown'
+          )
         }
         scheduleMarkdownApply({
           html: payload.html || '',

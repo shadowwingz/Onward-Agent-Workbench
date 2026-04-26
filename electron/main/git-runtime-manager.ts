@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { performanceTrace } from './performance-trace'
+
 export type GitTaskPriority = 'high' | 'normal' | 'low'
 export type GitTaskKind = 'git' | 'cwd' | 'misc'
 
@@ -346,6 +348,18 @@ export class GitRuntimeManager {
 
 
     const startedAt = Date.now()
+    const traceStartUs = performanceTrace.enabled ? performanceTrace.nowUs() : 0
+    const traceArgs = performanceTrace.enabled
+      ? {
+          kind: task.options.kind,
+          priority: task.options.priority,
+          repoScoped: Boolean(task.options.repoKey),
+          ...(task.options.repoKey ? performanceTrace.summarizeText('repoKey', task.options.repoKey) : {}),
+          ...(task.options.label ? performanceTrace.summarizeText('label', task.options.label) : {}),
+          queueDepth: this.queue.length,
+          inflight: this.inflight,
+        }
+      : undefined
 
     Promise.resolve()
       .then(() => task.run())
@@ -353,14 +367,22 @@ export class GitRuntimeManager {
         this.totalCompleted += 1
         this.kindMetrics[task.options.kind].completed += 1
         recordLatency(this.kindMetrics[task.options.kind].latencies, Date.now() - startedAt)
-
+        if (performanceTrace.enabled) {
+          performanceTrace.recordComplete('git.runtime.task', traceStartUs, { ...traceArgs, result: 'success' }, 'git')
+        }
         task.resolve(value)
       })
       .catch((error) => {
         this.totalFailed += 1
         this.kindMetrics[task.options.kind].failed += 1
         recordLatency(this.kindMetrics[task.options.kind].latencies, Date.now() - startedAt)
-
+        if (performanceTrace.enabled) {
+          performanceTrace.recordComplete('git.runtime.task', traceStartUs, {
+            ...traceArgs,
+            result: 'error',
+            errorType: error instanceof Error ? error.name : typeof error,
+          }, 'git')
+        }
         task.reject(error)
       })
       .finally(() => {

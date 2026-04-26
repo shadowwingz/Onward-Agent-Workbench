@@ -12,6 +12,7 @@
 
 import { perfTrace } from './perf-trace'
 import { PERF_TRACE_EVENT } from './perf-trace-names'
+import { performanceTrace } from './performance-trace'
 
 export interface PerfSnapshot {
   ts: number
@@ -221,6 +222,23 @@ class PerfMonitor {
     for (const cb of this.onSnapshotCallbacks) {
       try { cb(snap) } catch { /* ignore */ }
     }
+
+    performanceTrace.recordCounter('perf.renderer.snapshot', {
+      fps: snap.fps,
+      frameDrops: snap.frameDrops,
+      longestFrameMs: snap.longestFrameMs,
+      xtermWriteCount: snap.xtermWriteCount,
+      xtermWriteMaxMs: snap.xtermWriteMaxMs,
+      ipcDataMsgCount: snap.ipcDataMsgCount,
+      ipcDataBytes: snap.ipcDataBytes,
+      hiddenTermWriteCount: snap.hiddenTermWriteCount,
+      hiddenTermWriteBytes: snap.hiddenTermWriteBytes,
+      webglContextCount: snap.webglContextCount,
+      reactRenderCount: snap.reactRenderCount,
+      inputLatencySamples: snap.inputLatencySamples,
+      inputLatencyAvgMs: snap.inputLatencyAvgMs,
+      inputLatencyMaxMs: snap.inputLatencyMaxMs
+    }, 'perf')
 
     // Reset per-interval counters
     this.frameCount = 0

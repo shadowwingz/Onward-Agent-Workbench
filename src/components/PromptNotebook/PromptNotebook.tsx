@@ -9,6 +9,7 @@ import type { TerminalBatchResult, TerminalInfo } from '../../types/prompt'
 import type { EditorDraft, PromptCleanupConfig, PromptSchedule } from '../../types/tab.d.ts'
 import { usePromptActions } from '../../contexts/PromptActionsContext'
 import { buildAccelerator } from '../../utils/keyboard'
+import { performanceTrace } from '../../utils/performance-trace'
 import type { ScheduleNotification } from '../../hooks/useScheduleEngine'
 import { PromptSearch } from './PromptSearch'
 import { PromptList } from './PromptList'
@@ -212,6 +213,25 @@ export const PromptNotebook = memo(function PromptNotebook({
 
   // Send history viewer state
   const [sendHistoryPrompt, setSendHistoryPrompt] = useState<Prompt | null>(null)
+
+  const recordPromptEdit = useCallback((field: 'title' | 'content', value: string) => {
+    if (!performanceTrace.enabled) return
+    performanceTrace.recordInstant('ui.prompt.edit', {
+      field,
+      mode: editingPrompt ? 'edit' : 'new',
+      ...performanceTrace.summarizeText('payload', value)
+    }, 'prompt')
+  }, [editingPrompt])
+
+  const handleEditorContentChange = useCallback((nextContent: string) => {
+    setEditorContent(nextContent)
+    recordPromptEdit('content', nextContent)
+  }, [recordPromptEdit])
+
+  const handleEditorTitleChange = useCallback((nextTitle: string) => {
+    setEditorTitle(nextTitle)
+    recordPromptEdit('title', nextTitle)
+  }, [recordPromptEdit])
 
   // Get the currently selected Prompt
   const selectedPrompt = useMemo(() => {
@@ -1141,8 +1161,8 @@ export const PromptNotebook = memo(function PromptNotebook({
           onCancelEdit={handleCancelEdit}
           appendContent={appendContent}
           onAppendContentUsed={handleAppendContentUsed}
-          onContentChange={setEditorContent}
-          onTitleChange={setEditorTitle}
+          onContentChange={handleEditorContentChange}
+          onTitleChange={handleEditorTitleChange}
           clearTrigger={clearEditorTrigger}
           promptEditorHeight={promptEditorHeight}
           onPromptEditorHeightChange={onPromptEditorHeightChange}
@@ -1586,6 +1606,28 @@ const PromptEditorWithAppend = memo(function PromptEditorWithAppend({
   // Parent content/title notifications are handled by the debounced
   // effect above — no separate immediate effects needed here.
 
+  const handleTitleChange = useCallback((value: string) => {
+    setTitle(value)
+    if (performanceTrace.enabled) {
+      performanceTrace.recordInstant('ui.prompt.edit', {
+        field: 'title',
+        mode: editingPrompt ? 'edit' : 'new',
+        ...performanceTrace.summarizeText('payload', value)
+      }, 'prompt')
+    }
+  }, [editingPrompt])
+
+  const handleContentChange = useCallback((value: string) => {
+    setContent(value)
+    if (performanceTrace.enabled) {
+      performanceTrace.recordInstant('ui.prompt.edit', {
+        field: 'content',
+        mode: editingPrompt ? 'edit' : 'new',
+        ...performanceTrace.summarizeText('payload', value)
+      }, 'prompt')
+    }
+  }, [editingPrompt])
+
   // Respond to clear triggers
   useEffect(() => {
     if (clearTrigger > 0) {
@@ -1664,14 +1706,14 @@ const PromptEditorWithAppend = memo(function PromptEditorWithAppend({
           className="prompt-editor-title"
           placeholder={t('promptEditor.titlePlaceholder')}
           value={title}
-          onChange={(e) => setTitle(e.target.value)}
+          onChange={(e) => handleTitleChange(e.target.value)}
         />
         <textarea
           ref={textareaRef}
           className="prompt-editor-content"
           placeholder={t('promptNotebook.editorPlaceholder')}
           value={content}
-          onChange={(e) => setContent(e.target.value)}
+          onChange={(e) => handleContentChange(e.target.value)}
         />
       </div>
 

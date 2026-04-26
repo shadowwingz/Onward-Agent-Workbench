@@ -24,6 +24,7 @@ import {
   type TerminalRendererPolicy,
   type TerminalRendererSurfaceEvent
 } from './terminal-renderer-lifecycle'
+import { performanceTrace } from '../utils/performance-trace'
 
 export type { TerminalRendererSurfaceEvent } from './terminal-renderer-lifecycle'
 
@@ -214,6 +215,23 @@ export class TerminalSessionManager {
       perfTraceTask(PERF_TRACE_EVENT.RENDERER_TERMINAL_DATA_IPC_RECV, {
         bytes: data.length
       }, termId)
+      const flowId = performanceTrace.getActiveTerminalFlow(termId)
+      if (flowId) {
+        performanceTrace.refreshTerminalFlow(termId)
+        performanceTrace.recordFlowStep('terminal.render.receive', flowId, {
+          terminalId: termId,
+          visible: session.visible,
+          bytes: data.length,
+          pendingBytes: session.pendingDataBytes
+        }, 'terminal')
+      }
+      performanceTrace.recordInstant('terminal.render.receive', {
+        terminalId: termId,
+        visible: session.visible,
+        bytes: data.length,
+        pendingBytes: session.pendingDataBytes,
+        flowId: flowId ?? undefined
+      }, 'terminal')
 
       const interactiveBoostActive = this.shouldUseInteractiveBoost(session)
       const outputActive = this.isOutputActive(session)
@@ -278,6 +296,11 @@ export class TerminalSessionManager {
       if (!outputActive) {
         this.trimPendingData(session, PENDING_DATA_MAX_BYTES)
         perfMonitor.recordHiddenTermWrite(data.length)
+        performanceTrace.recordCounter('terminal.render.hidden_buffer', {
+          terminalId: termId,
+          pendingBytes: session.pendingDataBytes,
+          pendingChunks: session.pendingData.length
+        }, 'terminal')
         return
       }
 
@@ -719,6 +742,11 @@ export class TerminalSessionManager {
         // Only track short inputs (keystrokes) — not pasted blocks
         ;(session as any)._lastKeystrokeTs = performance.now()
       }
+      performanceTrace.recordInstant('terminal.input', {
+        terminalId: id,
+        includesEnter: data.includes('\r') || data.includes('\n'),
+        ...performanceTrace.summarizeText('payload', data)
+      }, 'terminal')
       this.activateInteractiveBoost(id)
       window.electronAPI.terminal.write(id, data)
     })
@@ -1325,13 +1353,30 @@ export class TerminalSessionManager {
     // auto-follow: if the user is at the bottom we stay at the bottom; if they
     // scrolled up we keep their position. No programmatic scroll on output.
     const t0 = performance.now()
+    const traceStartUs = performanceTrace.nowUs()
+    const flowId = performanceTrace.getActiveTerminalFlow(session.id)
     session.terminal.write(data)
-    const dur = performance.now() - t0
-    perfMonitor.recordXtermWrite(dur)
+    const durationMs = performance.now() - t0
+    perfMonitor.recordXtermWrite(durationMs)
     perfTraceTask(PERF_TRACE_EVENT.RENDERER_TERMINAL_DATA_XTERM_WRITE, {
       bytes: data.length,
-      durationMs: +dur.toFixed(2)
+      durationMs: +durationMs.toFixed(2)
     }, session.id)
+    performanceTrace.recordComplete('terminal.render.flush', traceStartUs, {
+      terminalId: session.id,
+      visible: session.visible,
+      bytes: data.length,
+      pendingBytes: session.pendingDataBytes,
+      xtermDurationMs: +durationMs.toFixed(3),
+      flowId: flowId ?? undefined
+    }, 'terminal')
+    if (flowId) {
+      performanceTrace.recordFlowEnd('terminal.render.flush', flowId, {
+        terminalId: session.id,
+        bytes: data.length,
+        xtermDurationMs: +durationMs.toFixed(3)
+      }, 'terminal')
+    }
   }
 
   private activateInteractiveBoost(id: string): void {
