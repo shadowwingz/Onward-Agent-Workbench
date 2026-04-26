@@ -7,7 +7,12 @@ import { join, resolve } from 'path'
 import { Worker } from 'worker_threads'
 import { gitRuntimeManager, type GitTaskPriority } from './git-runtime-manager'
 import type { GitBranchAndStatus, TerminalGitInfo } from './git-utils'
-import { perfTraceLogger } from './perf-trace-logger'
+import {
+  perfTraceLogger,
+  isPerfTraceWorkerEvent,
+  replayPerfTraceWorkerEvent,
+  WORKER_TID
+} from './perf-trace-logger'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 
 type GitRepoMeta = {
@@ -125,8 +130,15 @@ class GitStatusWorkerClient {
 
     const workerPath = join(__dirname, 'git-status-worker-entry.js')
     this.worker = new Worker(workerPath)
-    this.worker.on('message', (message: WorkerResponse) => {
-      this.handleMessage(message)
+    this.worker.on('message', (message: WorkerResponse | unknown) => {
+      if (isPerfTraceWorkerEvent(message)) {
+        replayPerfTraceWorkerEvent(message, {
+          tid: WORKER_TID.GIT_STATUS,
+          threadName: 'git-status-worker'
+        })
+        return
+      }
+      this.handleMessage(message as WorkerResponse)
     })
     this.worker.on('error', (error) => {
       perfTraceLogger.record(PERF_TRACE_EVENT.WORKER_GIT_STATUS_ERROR, { error: String(error) })

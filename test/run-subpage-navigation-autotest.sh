@@ -18,10 +18,24 @@ fi
 
 rm -f "$LOG_FILE"
 
+# Per CLAUDE.md hard rule + full-regression-checklist.md §3, every runner
+# must point ONWARD_USER_DATA_DIR at a fresh mktemp dir so persisted state
+# (active tab/subpage, ProjectEditor scope state, prompt notebook, etc.)
+# from a previous run can't leak in. Without isolation the SubpageSwitcher
+# autotest ends up restoring `activeSubpage='diff'` from the previous run
+# while the autotest auto-open of the Editor races against it — surfacing
+# false negatives that aren't actually app regressions.
+USER_DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/onward-subpage-nav.XXXXXX")"
+cleanup() {
+  rm -rf "$USER_DATA_DIR" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
 echo "Starting subpage navigation autotest..."
-echo "  Binary: $APP_BIN"
-echo "  CWD:    $ROOT_DIR"
-echo "  Log:    $LOG_FILE"
+echo "  Binary:        $APP_BIN"
+echo "  CWD:           $ROOT_DIR"
+echo "  User data dir: $USER_DATA_DIR"
+echo "  Log:           $LOG_FILE"
 echo ""
 
 ONWARD_DEBUG=1 \
@@ -29,6 +43,7 @@ ONWARD_AUTOTEST=1 \
 ONWARD_AUTOTEST_SUITE=subpage-navigation \
 ONWARD_AUTOTEST_CWD="$ROOT_DIR" \
 ONWARD_AUTOTEST_EXIT=1 \
+ONWARD_USER_DATA_DIR="$USER_DATA_DIR" \
 "$APP_BIN" > "$LOG_FILE" 2>&1 || true
 
 echo ""

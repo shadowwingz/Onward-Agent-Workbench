@@ -1432,7 +1432,7 @@ export function GitDiffViewer({
     try {
       const stagedLoad = Boolean(options?.reset)
       const initialScope = stagedLoad ? 'root-only' : 'full'
-      const initialResult = await window.electronAPI.git.getDiff(cwd, { scope: initialScope })
+      const initialResult = await window.electronAPI.git.getDiff(cwd, { scope: initialScope, force: Boolean(options?.force) })
       if (loadTokenRef.current !== currentToken) return
 
       // When submodules are still loading, defer UI update to avoid an
@@ -1465,7 +1465,7 @@ export function GitDiffViewer({
       }
 
       if (deferForSubmodules) {
-        const fullResult = await window.electronAPI.git.getDiff(cwd, { scope: 'full' })
+        const fullResult = await window.electronAPI.git.getDiff(cwd, { scope: 'full', force: Boolean(options?.force) })
         if (loadTokenRef.current !== currentToken) return
         applyLoadedDiffResult(
           fullResult,
@@ -1560,14 +1560,47 @@ export function GitDiffViewer({
     }
   }, [cwdReadyAt, isOpen, openRequestedAt])
 
-  // Load data when opening (async, after paint)
+  // Load data when opening (async, after paint).
+  // Always pass force=true on entry so the subpage transition shows fresh
+  // data even when the request cache is still warm from a previous open
+  // (Bug 2 — "switch into Diff and don't see latest modifications"). The
+  // backend in-flight de-dup keeps this from spawning duplicate git work
+  // when the watcher already invalidated the cache moments before.
   useEffect(() => {
     if (isOpen) {
       const reset = resetDiffOnNextLoadRef.current
       resetDiffOnNextLoadRef.current = false
-      loadDiff({ reset, force: !reset })
+      loadDiff({ reset, force: true })
     }
   }, [isOpen, loadDiff])
+
+  // Backend FS-watcher invalidations: when an external file change under the
+  // current cwd's repo invalidates the cache, refetch silently so an open Diff
+  // panel reflects the new state (Bug 2 — the user expects external mutations
+  // to surface even when Diff is already open). The invalidator already
+  // debounces to 180 ms so this listener cannot fire faster than that.
+  useEffect(() => {
+    if (!isOpen || !cwd) return
+    const dispose = window.electronAPI.git.onDiffCacheInvalidated((invalidatedCwd) => {
+      if (!isOpenRef.current) return
+      // Match by prefix so a submodule mutation under the current cwd also
+      // counts. The invalidator normalises cwds via path.resolve, so a strict
+      // prefix check (with separator boundary) is correct on all platforms.
+      const normalizedSelf = cwd.replace(/[\\/]+$/, '')
+      const normalizedHit = invalidatedCwd.replace(/[\\/]+$/, '')
+      const matches =
+        normalizedHit === normalizedSelf ||
+        normalizedHit.startsWith(`${normalizedSelf}/`) ||
+        normalizedHit.startsWith(`${normalizedSelf}\\`) ||
+        normalizedSelf.startsWith(`${normalizedHit}/`) ||
+        normalizedSelf.startsWith(`${normalizedHit}\\`)
+      if (!matches) return
+      void loadDiff({ silent: true, force: true })
+    })
+    return () => {
+      dispose()
+    }
+  }, [isOpen, cwd, loadDiff])
 
   useEffect(() => {
     selectedFileRef.current = selectedFile

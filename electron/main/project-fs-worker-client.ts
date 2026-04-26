@@ -6,7 +6,12 @@
 import { join, resolve } from 'path'
 import { Worker } from 'worker_threads'
 import { mainWorkScheduler, type MainWorkLane } from './main-work-scheduler'
-import { perfTraceLogger } from './perf-trace-logger'
+import {
+  perfTraceLogger,
+  isPerfTraceWorkerEvent,
+  replayPerfTraceWorkerEvent,
+  WORKER_TID
+} from './perf-trace-logger'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 
 type ProjectFsWorkerMethod = 'listDirectory' | 'buildFileIndex' | 'searchFilenames' | 'invalidateFileIndex'
@@ -133,8 +138,15 @@ class ProjectFsWorkerClient {
     if (this.worker) return this.worker
     const workerPath = join(__dirname, 'project-fs-worker-entry.js')
     this.worker = new Worker(workerPath)
-    this.worker.on('message', (message: WorkerResponse) => {
-      this.handleMessage(message)
+    this.worker.on('message', (message: WorkerResponse | unknown) => {
+      if (isPerfTraceWorkerEvent(message)) {
+        replayPerfTraceWorkerEvent(message, {
+          tid: WORKER_TID.PROJECT_FS,
+          threadName: 'project-fs-worker'
+        })
+        return
+      }
+      this.handleMessage(message as WorkerResponse)
     })
     this.worker.on('error', (error) => {
       perfTraceLogger.record(PERF_TRACE_EVENT.WORKER_PROJECT_FS_ERROR, { error: String(error) })

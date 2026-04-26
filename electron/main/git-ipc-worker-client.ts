@@ -20,7 +20,12 @@ import type {
   GitHistoryResult,
   GitSubmoduleInfo
 } from './git-utils'
-import { perfTraceLogger } from './perf-trace-logger'
+import {
+  perfTraceLogger,
+  isPerfTraceWorkerEvent,
+  replayPerfTraceWorkerEvent,
+  WORKER_TID
+} from './perf-trace-logger'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 
 type GitIpcWorkerMethod =
@@ -228,6 +233,30 @@ class GitIpcWorkerClient {
     })
   }
 
+  /**
+   * One-way push: tell the worker to drop its `gitDiffRequestCache` /
+   * `singleRepoDiffCache` entries for `cwd`. Fires when main's FS watcher
+   * detects an external mutation. Side-effect only — no response is awaited.
+   *
+   * Why this exists: `getGitDiff` runs in the worker, so its cache lives in
+   * the worker's module instance. The watcher fires in main, where its own
+   * listener can only clear main's (usually empty) cache. Without this
+   * bridge the worker would return a stale cached result for up to
+   * `GIT_DIFF_REQUEST_TTL_MS` after an external file change.
+   *
+   * Defensive: if the worker hasn't been spawned yet, there is nothing to
+   * invalidate (the next `getDiff` call will start fresh anyway).
+   */
+  invalidateDiffCache(cwd: string, reason: string): void {
+    if (!this.worker) return
+    try {
+      this.worker.postMessage({ event: 'invalidate-diff-cache', cwd, reason })
+    } catch {
+      // Worker may have just exited / been replaced; the next getDiff will
+      // re-spawn with a fresh cache.
+    }
+  }
+
   dispose(): void {
     for (const [id, pending] of this.pending) {
       clearTimeout(pending.timer)
@@ -263,8 +292,17 @@ class GitIpcWorkerClient {
 
     const workerPath = join(__dirname, 'git-ipc-worker-entry.js')
     this.worker = new Worker(workerPath)
-    this.worker.on('message', (message: WorkerResponse) => {
-      this.handleMessage(message)
+    this.worker.on('message', (message: WorkerResponse | unknown) => {
+      // Trace events forwarded from the worker thread land on a dedicated
+      // tid lane so Perfetto UI shows "git-ipc-worker" as its own row.
+      if (isPerfTraceWorkerEvent(message)) {
+        replayPerfTraceWorkerEvent(message, {
+          tid: WORKER_TID.GIT_IPC,
+          threadName: 'git-ipc-worker'
+        })
+        return
+      }
+      this.handleMessage(message as WorkerResponse)
     })
     this.worker.on('error', (error) => {
       perfTraceLogger.record(PERF_TRACE_EVENT.WORKER_GIT_IPC_ERROR, { error: String(error) })

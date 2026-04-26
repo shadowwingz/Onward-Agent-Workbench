@@ -210,6 +210,7 @@ is a short list of user-observable contracts the runner asserts on.
 | `run-git-diff-submodules-autotest.sh` | Regular (non-recursive) submodule discovery, outline-before-full-load |
 | `run-git-diff-recursive-submodules-autotest.sh` | Recursive (≥ 2-level) submodule discovery and nested loading status |
 | `run-git-nested-submodules-autotest.sh` | History + Diff file filtering across deeply nested submodules |
+| `run-git-diff-staleness-and-submodule-autotest.sh` *(new)* | 🚧 GDS-01..GDS-16 — submodule `<c><m><u>` filter (parent must not surface clean submodule entries), staged-pointer must surface (GDS-14), uninitialized submodule must NOT surface (GDS-13), file-watcher driven cache invalidation, subdir-entry watches resolved repo root (GDS-15), force-on-entry freshness for Diff/Editor/History, GitRepositorySnapshotService canonical submodule discovery (GDS-16) |
 | `run-git-history-multi-terminal-scope-autotest.sh` | History view scoping to each terminal's repo |
 | `run-image-diff-autotest.sh` | Image diff in Diff, History, and ProjectEditor: swipe / onion / SVG text mode |
 | `run-pdf-epub-diff-autotest.sh` | Git compare view for PDF and EPUB files (side-by-side, chapter-level diff) |
@@ -283,6 +284,8 @@ below. Absence in a fresh trace is a regression:
 | **PTY data flow (end-to-end)** | `main:terminal-data.ipc-send`, `renderer:terminal-data.ipc-recv`, `renderer:terminal-data.fast-path`, `renderer:terminal-data.scheduler-enqueue`, `renderer:terminal-data.scheduler-flush`, `renderer:terminal-data.xterm-write`, `main:pty.write` | All Task-scoped — land on per-Task tid rows (`task-<shortId>` on main, `-rnd` suffix on renderer). Absence of any hop in a trace that otherwise shows `main:pty.spawn` is a regression. |
 | User-input hot paths | `renderer:prompt.editor.submit/cancel`, `renderer:prompt.sender.dispatch`, `renderer:terminal.focus-change`, `renderer:terminal.send-input`, `renderer:project.file-open`, `renderer:project.subpage-navigate`, `renderer:project.search.global` | Previously registered-but-unwired; now fire on their respective user gestures. `focus-change` / `send-input` / `split-add` are Task-scoped. |
 | GUI entries | `renderer:tab.create`, `renderer:tab.switch`, `renderer:terminal.split-add`, `renderer:gitdiff.open`, `renderer:githistory.open`, `renderer:settings.open`, `renderer:changelog.open` | TabBar + App.tsx. |
+| Git Diff cache & freshness | `main:git.diff.cache-hit`, `main:git.diff.cache-invalidate`, `main:git.diff.fs-watch-event`, `main:git.diff.submodule-filter`, `renderer:subpage.freshness-check` | `electron/main/git-utils.ts` `getGitDiff` cache path + `electron/main/git-diff-cache-invalidator.ts` watcher + `loadGitDiff` submodule `<c><m><u>` filter + `TerminalGrid.tsx` subpage entry force-fetch. Required by GDS-11/GDS-12. |
+| Git Repository Snapshot Service | `main:git.snapshot.capture`, `main:git.snapshot.cache-hit`, `main:git.snapshot.invalidate` | `electron/main/git-repository-snapshot-service.ts` is the canonical place where ".gitmodules + git submodule status + getGitRepoMeta validation" converge. `loadGitDiff` (phase 1 migration) consumes the service; History / Editor scope / Quick Open remain on the legacy `detectSubmodulesRecursive` wrapper which now delegates to the service internally. Required by GDS-16. |
 | Background ops | `main:file-index.build/update`, `main:project-tree-watch.event/batch` | Project FS worker build and tree-watch coalesce. |
 
 **Total canonical runners in v0.3: 44** (+1 skipped on macOS →
@@ -313,6 +316,7 @@ SCRIPTS=(
   test/run-file-watch-autotest.sh
   test/run-git-cross-platform-autotest.sh
   test/run-git-diff-recursive-submodules-autotest.sh
+  test/run-git-diff-staleness-and-submodule-autotest.sh
   test/run-git-diff-subdir-autotest.sh
   test/run-git-diff-submodules-autotest.sh
   test/run-git-history-multi-terminal-scope-autotest.sh
@@ -432,13 +436,17 @@ the test or the app.
 | `PFM-47-outline-scroll-restored-after-reopen` | same | Same root cause. | Same. |
 | `PMN-16-markdown-outline-restores-after-toggle` | `run-project-editor-markdown-navigation-autotest.sh` | Same class. | Same. |
 | `PMN-43-outline-restores-after-project-editor-reopen` | same | Same class. | Same. |
-| `SN-14-diff-deleted-file-does-not-override-editor` | `run-subpage-navigation-autotest.sh` | **App regression.** `handleOpenGitDiff` calls `resetActiveFileState()` which nulls `activeFilePath`; no restore on subpage-return because scope didn't change. | Keep test red. Fix app: on subpage-return, re-open last `activeFilePath` from persisted scope state, guarded so it does not clobber Diff's own captured view. |
+| ~~`SN-14-diff-deleted-file-does-not-override-editor`~~ | `run-subpage-navigation-autotest.sh` | **Fixed 2026-04-25** — SubpageSwitcher `current` now derives from `activeSubpage` directly (TerminalGrid.tsx) and the activeSubpage sync effect no longer overrides explicit user navigation when a panel auto-opens. The runner also now uses `mktemp ONWARD_USER_DATA_DIR` so persisted state from earlier runs doesn't leak in. | Keep removed from §8; verified passing across 3 consecutive runs. |
 | `SVR-06-editor-restored-from-diff` | `run-subpage-viewstate-restore-autotest.sh` | Same class as SN-14. | Same. |
 | `SN-13-history-deleted-file-does-not-override-editor` | `run-subpage-navigation-autotest.sh` | **App regression (separate).** History panel cannot select a deleted file (`selectedDeletedHistoryFile=false`). Unrelated to activeFilePath. | Keep test red. Fix app: History file list should include files that appeared in any commit in range, not just files present in working tree. |
 | `XP-09b-diff-split-ratio-applies` | `run-git-cross-platform-autotest.sh` | **App regression — trivial.** `dragDiffSplitRatio` debug helper at `GitDiffViewer.tsx:1141-1226` forgets to call `persistDiffSplitRatio` after a successful drag. | Keep test red. Fix app: one-line addition. |
 | `RSM-03-nested-outline-visible-before-full-load` | `run-git-diff-recursive-submodules-autotest.sh` | **Product decision needed.** The test asserts an "optimistic UX" (outline visible while submodules still load). Current app gates the whole render on `files.length > 0`. | Decide: is optimistic outline a product requirement? If yes, keep test and fix render gate. If no, delete the test. |
 | `DSM-03-outline-visible-before-full-load` | `run-git-diff-submodules-autotest.sh` | Same as RSM-03. | Same. |
 | `PL-11-save-as-new-button-label` | `run-prompt-list-autotest.sh` | **Test design flaw / ambiguous.** Selector hits `[data-prompt-editing="true"]`; result is `buttonLabels: []`. Either the attribute isn't set to the literal `"true"` at query time (timing race), or the button moved. | Investigate: add a pre-check `waitFor` for `[data-prompt-editing="true"]`. If still empty, the feature changed — update selector or rewrite against the observable contract. |
+| ~~`SN-05-diff-switcher-current`~~ | `run-subpage-navigation-autotest.sh` | **Fixed 2026-04-25**: SubpageSwitcher `current` now derives from `activeSubpage` directly. The activeSubpage sync effect was rewritten to never override an explicit user choice when another panel races to auto-open. | Removed from §8. |
+| ~~`SN-06-diff-to-editor-restores-editor-state`~~ | `run-subpage-navigation-autotest.sh` | **Fixed 2026-04-25** with the SN-05 effect rewrite. The persisted `activeFilePath` restore path was already correct; the bug was the activeSubpage state racing with autotest's auto-open of the Editor. | Removed from §8. |
+| ~~`SN-11-history-to-editor-restores-editor-state`~~ | `run-subpage-navigation-autotest.sh` | **Fixed 2026-04-25** — same fix as SN-05. | Removed from §8. |
+| ~~`SN-13-history-deleted-file-does-not-override-editor`~~ | `run-subpage-navigation-autotest.sh` | **Fixed 2026-04-25** — same fix as SN-05. | Removed from §8. |
 
 ## 9. Tests scheduled for removal
 

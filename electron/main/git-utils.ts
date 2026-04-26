@@ -15,6 +15,21 @@ import { gitRuntimeManager, type GitTaskKind, type GitTaskPriority } from './git
 import { MAX_IMAGE_FILE_SIZE, bufferToImageDataUrl, isSupportedImageFile } from './image-utils'
 import { perfTraceLogger } from './perf-trace-logger'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
+import { gitDiffCacheInvalidator } from './git-diff-cache-invalidator'
+// Static circular import is intentional and safe: every consumer below
+// reads `gitRepositorySnapshotService` / `snapshotToLegacySubmoduleInfos`
+// from inside async function bodies, never at module-eval time. ESM live
+// bindings + Rollup's circular-import support let both modules finish
+// evaluating before the first call lands. We previously used a dynamic
+// `require('./git-repository-snapshot-service')` to dodge the circular
+// dep, but the bundler renames output chunks (esbuild content-hashes)
+// and dynamic require paths don't survive that rename — production
+// builds threw "Cannot find module './git-repository-snapshot-service'"
+// at runtime.
+import {
+  gitRepositorySnapshotService,
+  snapshotToLegacySubmoduleInfos
+} from './git-repository-snapshot-service'
 
 const PDF_EXT = '.pdf'
 const EPUB_EXT = '.epub'
@@ -93,7 +108,7 @@ function classifyExecBinary(file: string): { binary: string; isGit: boolean } {
   return { binary, isGit: binary === 'git' }
 }
 
-async function execFileAsync(
+export async function execFileAsync(
   file: string,
   args: string[],
   options?: Parameters<typeof rawExecFileAsync>[2],
@@ -176,6 +191,15 @@ export interface GitFileStatus {
   repoRoot?: string
   repoLabel?: string
   isSubmoduleEntry?: boolean
+  // Parsed from porcelain v2 sub field S<c><m><u>. Populated only when
+  // isSubmoduleEntry is true. The parent's file list keeps the entry only
+  // when commitChanged is true; m/u-only state belongs to the submodule's
+  // own diff section, not the parent's.
+  submoduleFlags?: {
+    commitChanged: boolean
+    workTreeModified: boolean
+    untrackedContent: boolean
+  }
 }
 
 // Git Diff results
@@ -193,6 +217,11 @@ export interface GitDiffResult {
 
 export interface GitDiffLoadOptions {
   scope?: 'root-only' | 'full'
+  // When true, bypass the request-level cache (the watcher-driven
+  // invalidator is the primary freshness mechanism, but force is the
+  // deterministic backstop for subpage entry where the watcher may not
+  // yet have observed an FS event before the call lands).
+  force?: boolean
 }
 
 export interface GitCommitInfo {
@@ -303,9 +332,9 @@ export interface GitFileActionResult {
 }
 
 // Timeout for command execution (milliseconds)
-const EXEC_TIMEOUT = 10000
+export const EXEC_TIMEOUT = 10000
 const MAX_FILE_SIZE = 1024 * 1024  // 1MB
-const MAX_DIFF_OUTPUT = 10 * 1024 * 1024 // 10MB
+export const MAX_DIFF_OUTPUT = 10 * 1024 * 1024 // 10MB
 
 // Short TTL + in-flight reuse: avoid frequent forks (lsof/git) causing CPU spikes and cwd read failures.
 const TERMINAL_CWD_CACHE_TTL = 1200
@@ -329,15 +358,70 @@ const terminalInfoCache = new Map<string, { value: TerminalGitInfo; at: number }
 const terminalInfoInFlight = new Map<string, Promise<TerminalGitInfo>>()
 const gitMetaCache = new Map<string, { value: GitRepoMeta; at: number }>()
 const gitMetaInFlight = new Map<string, Promise<GitRepoMeta>>()
+// TTL shared by `detectSuperproject`'s cache; the legacy
+// `submoduleCache` was removed when `detectSubmodulesRecursive` migrated
+// to the snapshot service (which owns its own cache).
 const SUBMODULE_CACHE_TTL = 5000
-const submoduleCache = new Map<string, { value: GitSubmoduleInfo[]; at: number }>()
 const superprojectCache = new Map<string, { value: string | null; at: number }>()
 const singleRepoDiffCache = new Map<string, { value: { files: GitFileStatus[]; error?: string }; at: number }>()
 const singleRepoDiffInFlight = new Map<string, Promise<{ files: GitFileStatus[]; error?: string }>>()
 const gitDiffRequestCache = new Map<string, { value: GitDiffResult; at: number }>()
 const gitDiffRequestInFlight = new Map<string, Promise<GitDiffResult>>()
 
-function getExecEnv(): NodeJS.ProcessEnv {
+/**
+ * Clear every cached `getGitDiff` result for `cwd`:
+ *   - request-level cache (`gitDiffRequestCache`)
+ *   - per-repo file-list cache (`singleRepoDiffCache`)
+ *   - structural snapshot cache (`gitRepositorySnapshotService`)
+ * Returns the number of `gitDiffRequestCache` entries dropped — useful
+ * for the trace payload so an SQL query can correlate "watcher fired"
+ * with "cache actually held something."
+ *
+ * Exported because both the watcher listener (main thread) AND the
+ * git-ipc-worker need to call it. The watcher only fires in main, but
+ * `getGitDiff` (and the caches it owns) live in BOTH module instances —
+ * so when main's watcher invalidates, main's IPC handler explicitly
+ * forwards the event to the worker via
+ * `gitIpcWorkerClient.invalidateDiffCache`, and the worker entry calls
+ * this function on its own copies.
+ */
+export function invalidateGitDiffCache(cwd: string, reason: string): number {
+  const normalized = resolve(cwd)
+  let cleared = 0
+  for (const key of Array.from(gitDiffRequestCache.keys())) {
+    // Cache key shape is `${resolve(cwd)}::${scope}` — match by prefix.
+    if (key === `${normalized}::root-only` || key === `${normalized}::full`) {
+      gitDiffRequestCache.delete(key)
+      cleared += 1
+    }
+  }
+  clearSingleRepoDiffCache(normalized)
+  // Also drop the structural snapshot. We do this AFTER the diff caches
+  // because if a future regression causes the snapshot service to throw,
+  // at least the request/file caches have already been cleared and the
+  // user gets a fresh git invocation on the next call.
+  gitRepositorySnapshotService.invalidate(normalized)
+  perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_GIT_DIFF_CACHE_INVALIDATE, {
+    cwd: normalized,
+    reason,
+    entriesCleared: cleared
+  })
+  return cleared
+}
+
+// Lazily wire the watcher → cache invalidation chain. The first getGitDiff
+// call subscribes; subsequent calls just register a watcher for any new cwd.
+// We never unsubscribe — a single process-wide listener is correct.
+let gitDiffCacheInvalidatorWired = false
+function wireGitDiffCacheInvalidatorOnce(): void {
+  if (gitDiffCacheInvalidatorWired) return
+  gitDiffCacheInvalidatorWired = true
+  gitDiffCacheInvalidator.addListener((cwd, reason) => {
+    invalidateGitDiffCache(cwd, reason)
+  })
+}
+
+export function getExecEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env }
   const pathKey = Object.keys(env).find((key) => key.toLowerCase() === 'path') || 'PATH'
   const currentPath = env[pathKey] || ''
@@ -883,7 +967,7 @@ export async function detectSuperproject(cwd: string, gitExecutable: string): Pr
   }
 }
 
-function parseSubmoduleStatusOutput(output: string, repoRoot: string): GitSubmoduleInfo[] {
+export function parseSubmoduleStatusOutput(output: string, repoRoot: string): GitSubmoduleInfo[] {
   if (!output.trim()) return []
 
   const submodules: GitSubmoduleInfo[] = []
@@ -919,7 +1003,7 @@ function parseSubmoduleStatusOutput(output: string, repoRoot: string): GitSubmod
   return submodules
 }
 
-async function readGitmodulesSubmodulePaths(repoRoot: string): Promise<string[]> {
+export async function readGitmodulesSubmodulePaths(repoRoot: string): Promise<string[]> {
   try {
     const content = await readFile(join(repoRoot, '.gitmodules'), 'utf-8')
     const paths: string[] = []
@@ -941,104 +1025,6 @@ async function readGitmodulesSubmodulePaths(repoRoot: string): Promise<string[]>
   } catch {
     return []
   }
-}
-
-async function collectSubmodulesFromGitmodules(
-  repoRoot: string,
-  parentRoot: string,
-  depth: number,
-  prefix = ''
-): Promise<GitSubmoduleInfo[]> {
-  const directPaths = await readGitmodulesSubmodulePaths(repoRoot)
-  if (directPaths.length === 0) {
-    return []
-  }
-
-  const directSubmodules = await Promise.all(
-    directPaths.map(async (subPath) => {
-      const subRepoRoot = normalizeGitPath(resolve(repoRoot, subPath)) || resolve(repoRoot, subPath)
-      try {
-        await access(subRepoRoot, constants.F_OK)
-      } catch {
-        return null
-      }
-      return {
-        name: basename(subPath),
-        path: prefix ? `${prefix}/${subPath}` : subPath,
-        repoRoot: subRepoRoot,
-        depth,
-        parentRoot
-      } satisfies GitSubmoduleInfo
-    })
-  )
-
-  const activeSubmodules = directSubmodules.filter((submodule): submodule is GitSubmoduleInfo => Boolean(submodule))
-  const nestedResults = await Promise.allSettled(
-    activeSubmodules.map((submodule) => collectSubmodulesFromGitmodules(
-      submodule.repoRoot,
-      submodule.repoRoot,
-      depth + 1,
-      submodule.path
-    ))
-  )
-
-  const allSubmodules = [...activeSubmodules]
-  for (const result of nestedResults) {
-    if (result.status === 'fulfilled' && result.value.length > 0) {
-      allSubmodules.push(...result.value)
-    }
-  }
-  return allSubmodules
-}
-
-export async function detectSubmodulesRecursive(
-  repoRoot: string,
-  gitExecutable: string
-): Promise<GitSubmoduleInfo[]> {
-  const normalizedRoot = resolve(repoRoot)
-  const cached = submoduleCache.get(normalizedRoot)
-  const now = Date.now()
-  if (cached && now - cached.at < SUBMODULE_CACHE_TTL) {
-    return cached.value
-  }
-
-  try {
-    await access(join(repoRoot, '.gitmodules'), constants.F_OK)
-  } catch {
-    submoduleCache.set(normalizedRoot, { value: [], at: Date.now() })
-    return []
-  }
-
-  try {
-    const { stdout } = await execFileAsync(
-      gitExecutable,
-      ['-c', 'core.quotepath=false', 'submodule', 'status', '--recursive'],
-      {
-        cwd: repoRoot,
-        timeout: EXEC_TIMEOUT,
-        env: getExecEnv(),
-        maxBuffer: MAX_DIFF_OUTPUT
-      },
-      {
-        repoKey: repoRoot,
-        priority: 'normal',
-        dedupeKey: `repo:submodules:status:${normalizedRoot}`,
-        label: 'git submodule status --recursive'
-      }
-    )
-    const output = typeof stdout === 'string' ? stdout : stdout.toString('utf-8')
-    const statusSubmodules = parseSubmoduleStatusOutput(output, repoRoot)
-    if (statusSubmodules.length > 0) {
-      submoduleCache.set(normalizedRoot, { value: statusSubmodules, at: Date.now() })
-      return statusSubmodules
-    }
-  } catch {
-    // Fall through to .gitmodules parsing for partially initialized worktrees.
-  }
-
-  const allSubmodules = await collectSubmodulesFromGitmodules(repoRoot, repoRoot, 0)
-  submoduleCache.set(normalizedRoot, { value: allSubmodules, at: Date.now() })
-  return allSubmodules
 }
 
 async function getStatToken(path: string): Promise<string> {
@@ -1274,9 +1260,19 @@ function parseStatusPorcelainV2Z(output: string): GitFileStatus[] {
     const xy = record.slice(2, 4)
     const indexStatus = xy.charAt(0)
     const worktreeStatus = xy.charAt(1)
-    // Porcelain v2 sub field (positions 5-8): N... for non-submodule, S<c><m><u> for submodule
+    // Porcelain v2 sub field (positions 5-8): N... for non-submodule,
+    // S<c><m><u> for submodule. The c/m/u sub-flags are required for the
+    // parent-side filter (Bug 1 — only c=C should surface in the parent's
+    // file list; m/u belong to the submodule's own diff section).
     const sub = record.slice(5, 9)
     const isSubmoduleEntry = sub.charAt(0) === 'S'
+    const submoduleFlags = isSubmoduleEntry
+      ? {
+          commitChanged: sub.charAt(1) === 'C',
+          workTreeModified: sub.charAt(2) === 'M',
+          untrackedContent: sub.charAt(3) === 'U'
+        }
+      : undefined
     const filename = getFieldAfterSpaceCount(
       record,
       type === '1' ? 8 : type === '2' ? 9 : 10
@@ -1290,6 +1286,10 @@ function parseStatusPorcelainV2Z(output: string): GitFileStatus[] {
       continue
     }
 
+    const submoduleFields = isSubmoduleEntry && submoduleFlags
+      ? { isSubmoduleEntry: true as const, submoduleFlags }
+      : {}
+
     if (indexStatus && indexStatus !== '.') {
       files.push({
         filename,
@@ -1298,7 +1298,7 @@ function parseStatusPorcelainV2Z(output: string): GitFileStatus[] {
         additions: 0,
         deletions: 0,
         changeType: 'staged',
-        ...(isSubmoduleEntry ? { isSubmoduleEntry: true } : {})
+        ...submoduleFields
       })
     }
 
@@ -1310,7 +1310,7 @@ function parseStatusPorcelainV2Z(output: string): GitFileStatus[] {
         additions: 0,
         deletions: 0,
         changeType: 'unstaged',
-        ...(isSubmoduleEntry ? { isSubmoduleEntry: true } : {})
+        ...submoduleFields
       })
     }
 
@@ -1605,6 +1605,59 @@ function filterFilesOwnedByRepo(files: GitFileStatus[], childSubmodulePaths: str
   })
 }
 
+// Bug 1 — submodule false-positive filter.
+//
+// A parent repo's `git status --porcelain=2` surfaces a submodule entry when
+// any of c (commit pointer changed in the parent's index), m (submodule work
+// tree dirty), or u (submodule has untracked content) is set. Only c is a
+// change the user made TO THE PARENT; m/u are internal to the submodule and
+// already get a dedicated section in the diff result. Dropping m/u-only
+// entries from the parent's file list eliminates the duplicate "submodule
+// directory shows as modified" effect that prompted Bug 1.
+//
+// Emits one MAIN_GIT_DIFF_SUBMODULE_FILTER event per submodule entry decision
+// (kept or dropped) so a trace makes the filter outcome observable for SQL.
+function filterMeaninglessSubmoduleEntries(
+  files: GitFileStatus[],
+  repoRoot: string,
+  repoLabel: string
+): GitFileStatus[] {
+  const out: GitFileStatus[] = []
+  for (const file of files) {
+    if (!file.isSubmoduleEntry) {
+      out.push(file)
+      continue
+    }
+    const flags = file.submoduleFlags
+    const commitChanged = Boolean(flags?.commitChanged)
+    // After `git add modules/sub`, the parent index records the new submodule
+    // pointer and the submodule worktree HEAD now matches the index, so
+    // porcelain v2 reports `<c>=.` while X is non-`.` (the parent's index has
+    // the staged gitlink change). Drop those rows would hide a real
+    // parent-side change the user just staged — they could no longer review
+    // or unstage it from Git Diff. Keep submodule entries when EITHER the
+    // c-flag is set (HEAD diverged from index) OR the row carries a staged
+    // parent change. We still drop entries whose only signal is internal
+    // submodule noise (m=M / u=U with c=. and changeType !== 'staged') —
+    // those belong to the submodule's own diff section.
+    const stagedParentChange = file.changeType === 'staged'
+    const keep = commitChanged || stagedParentChange
+    const flagsLabel = flags
+      ? `${flags.commitChanged ? 'C' : '.'}${flags.workTreeModified ? 'M' : '.'}${flags.untrackedContent ? 'U' : '.'}`
+      : '???'
+    perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_GIT_DIFF_SUBMODULE_FILTER, {
+      repoRoot,
+      repoLabel,
+      path: file.filename,
+      flags: flagsLabel,
+      changeType: file.changeType,
+      kept: keep
+    })
+    if (keep) out.push(file)
+  }
+  return out
+}
+
 function clearSingleRepoDiffCache(repoRoot: string): void {
   const prefix = `${resolve(repoRoot)}::`
   for (const key of Array.from(singleRepoDiffCache.keys())) {
@@ -1753,16 +1806,43 @@ async function getSingleRepoDiff(
  * Get Git Diff information
  */
 export async function getGitDiff(cwd: string, options?: GitDiffLoadOptions): Promise<GitDiffResult> {
+  // Watcher registration happens in the main-process IPC handler; here we
+  // only wire the local listener (no-op when called inside the worker
+  // thread, since the worker's invalidator never receives FS events — but
+  // the listener wiring is still useful when getGitDiff is invoked from
+  // the main-process side for non-IPC callers).
+  wireGitDiffCacheInvalidatorOnce()
+
   const cacheKey = getGitDiffRequestKey(cwd, options)
+  const scope = options?.scope === 'root-only' ? 'root-only' : 'full'
+  const force = Boolean(options?.force)
   const now = Date.now()
   const cached = gitDiffRequestCache.get(cacheKey)
-  if (cached && now - cached.at < GIT_DIFF_REQUEST_CACHE_TTL) {
+  if (!force && cached && now - cached.at < GIT_DIFF_REQUEST_CACHE_TTL) {
+    perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_GIT_DIFF_CACHE_HIT, {
+      cwd: resolve(cwd),
+      scope,
+      ageMs: now - cached.at
+    })
     return cloneGitDiffResult(cached.value)
   }
 
+  // force=true while a request is in-flight joins the in-flight call rather
+  // than spawning a duplicate git status — the in-flight call started after
+  // the most recent watcher invalidation, so its result is fresh by
+  // construction.
   const inflight = gitDiffRequestInFlight.get(cacheKey)
   if (inflight) {
     return cloneGitDiffResult(await inflight)
+  }
+
+  if (force && cached) {
+    gitDiffRequestCache.delete(cacheKey)
+    perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_GIT_DIFF_CACHE_INVALIDATE, {
+      cwd: resolve(cwd),
+      reason: 'force',
+      entriesCleared: 1
+    })
   }
 
   const task = loadGitDiff(cwd, options)
@@ -1807,15 +1887,21 @@ async function loadGitDiff(cwd: string, options?: GitDiffLoadOptions): Promise<G
     const repoRoot = meta.repoRoot
     const repoName = basename(repoRoot)
     const loadScope = options?.scope === 'root-only' ? 'root-only' : 'full'
-    const hasGitmodules = await access(join(repoRoot, '.gitmodules'), constants.F_OK)
-      .then(() => true)
-      .catch(() => false)
-    const [submodules, superprojectRoot] = await Promise.all([
-      hasGitmodules
-        ? detectSubmodulesRecursive(repoRoot, gitExecutable)
-        : Promise.resolve([]),
+    // Phase 1 of the lesson #13 follow-up: discovery now goes through the
+    // snapshot service. The service owns ".gitmodules + git submodule
+    // status + getGitRepoMeta validation" as a single atomic structural
+    // answer. We pull the legacy `GitSubmoduleInfo[]` shape from the
+    // snapshot for downstream code (which still expects that shape) until
+    // History / Editor scope / Quick Open are migrated in subsequent
+    // phases. The `force` flag from the request flows into the snapshot
+    // capture too — when the user explicitly bypasses the diff request
+    // cache (subpage entry, etc.), they also want a fresh structural
+    // snapshot, not a 5-second-old one.
+    const [snapshot, superprojectRoot] = await Promise.all([
+      gitRepositorySnapshotService.getSnapshot(repoRoot, { force: options?.force === true }),
       detectSuperproject(repoRoot, gitExecutable)
     ])
+    const submodules = snapshotToLegacySubmoduleInfos(snapshot)
 
     const allRepos = [
       { root: repoRoot, gitDir: meta.gitDir, label: repoName, isSubmodule: false, depth: 0, parentRoot: undefined },
@@ -1874,6 +1960,7 @@ async function loadGitDiff(cwd: string, options?: GitDiffLoadOptions): Promise<G
           repoFiles,
           childSubmodulePathsByParent.get(resolve(repo.root)) ?? []
         )
+        repoFiles = filterMeaninglessSubmoduleEntries(repoFiles, repo.root, repo.label)
         files.push(...repoFiles)
         repos.push({
           root: repo.root,
@@ -1907,7 +1994,11 @@ async function loadGitDiff(cwd: string, options?: GitDiffLoadOptions): Promise<G
       files,
       repos: repos.length > 1 ? repos : undefined,
       superprojectRoot: superprojectRoot || undefined,
-      submodulesLoading: hasGitmodules && loadScope !== 'full'
+      // submodulesLoading reflects "there ARE submodules but we're only
+      // showing the root-level diff so far". The snapshot already knows
+      // whether any submodules exist (declared OR initialized) — we use
+      // its derived count rather than re-reading `.gitmodules`.
+      submodulesLoading: snapshot.submodules.length > 0 && loadScope !== 'full'
     }
   } catch (error) {
     console.error('Failed to get git diff:', error)
@@ -2004,17 +2095,26 @@ export async function getGitHistory(
     const output = typeof logResult.stdout === 'string' ? logResult.stdout : logResult.stdout.toString('utf-8')
     const commits = parseGitLogOutput(output)
     const repoName = basename(repoRoot)
-    const [submodules, superprojectRoot] = await Promise.all([
-      detectSubmodulesRecursive(repoRoot, gitExecutable),
+    // Phase 2 of the lesson #13 follow-up: read the structural snapshot
+    // directly instead of going through the `detectSubmodulesRecursive`
+    // compatibility wrapper. History only needs (path, absolutePath,
+    // depth, parentRoot) for each valid submodule — those map 1:1 to
+    // snapshot fields, so we skip the legacy `GitSubmoduleInfo` shape
+    // and one indirection. No `force` flag here: History reads are not
+    // user-input-blocking and the snapshot's TTL + watcher invalidation
+    // handle freshness correctly.
+    const [snapshot, superprojectRoot] = await Promise.all([
+      gitRepositorySnapshotService.getSnapshot(repoRoot),
       detectSuperproject(repoRoot, gitExecutable)
     ])
+    const validSubmodules = snapshot.submodules.filter((sub) => sub.isValidRepo)
 
     let repos: GitRepoContext[] | undefined
-    if (submodules.length > 0) {
+    if (validSubmodules.length > 0) {
       repos = [
         { root: repoRoot, label: repoName, isSubmodule: false, depth: 0, changeCount: -1 },
-        ...submodules.map((submodule) => ({
-          root: submodule.repoRoot,
+        ...validSubmodules.map((submodule) => ({
+          root: submodule.absolutePath,
           label: submodule.path,
           isSubmodule: true,
           depth: submodule.depth,

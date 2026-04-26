@@ -226,6 +226,16 @@ export interface GitFileStatus {
   repoRoot?: string
   repoLabel?: string
   isSubmoduleEntry?: boolean
+  // Parsed from `git status --porcelain=2` sub field (S<c><m><u>). Only
+  // populated when isSubmoduleEntry is true. The parent's file list keeps
+  // an entry only when commitChanged is true (the parent's index actually
+  // recorded a different submodule HEAD); m/u flags belong to the
+  // submodule's own section, not the parent's.
+  submoduleFlags?: {
+    commitChanged: boolean
+    workTreeModified: boolean
+    untrackedContent: boolean
+  }
 }
 
 // Git Diff results
@@ -243,6 +253,7 @@ export interface GitDiffResult {
 
 export interface GitDiffLoadOptions {
   scope?: 'root-only' | 'full'
+  force?: boolean
 }
 
 export interface GitCommitInfo {
@@ -544,6 +555,7 @@ export interface GitAPI {
   notifyTerminalGitUpdate: (terminalId: string) => Promise<{ success: true }>
   warmDiffCache: (cwd: string) => Promise<{ success: boolean }>
   onTerminalInfo: (callback: (terminalId: string, info: TerminalGitInfo) => void) => () => void
+  onDiffCacheInvalidated: (callback: (cwd: string, reason: 'watcher' | 'force' | 'lru' | 'manual') => void) => () => void
 }
 
 // Project Editor API
@@ -753,6 +765,7 @@ export interface DebugAPI {
   autotestCwd: string | null
   autotestSuite: string | null
   autotestExit: boolean
+  autotestFixtureExtra: string | null
   log: (message: string, data?: unknown) => void
   focusWindow: () => Promise<boolean>
   getAppMetrics: () => Promise<Record<string, unknown>[]>

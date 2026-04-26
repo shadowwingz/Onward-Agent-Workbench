@@ -208,7 +208,41 @@ export const PERF_TRACE_EVENT = {
   RENDERER_MARKDOWN_SANITIZE: 'renderer:markdown.dompurify-sanitize',
   RENDERER_MARKDOWN_MERMAID: 'renderer:markdown.mermaid-render',
   RENDERER_MONACO_VIEWSTATE_RESTORE: 'renderer:monaco.viewstate-restore',
-  RENDERER_XTERM_WEBGL_INIT: 'renderer:xterm.webgl-context-init'
+  RENDERER_XTERM_WEBGL_INIT: 'renderer:xterm.webgl-context-init',
+
+  // ───────── Main process — Git Diff cache & freshness ─────────
+  // Bug 1: parent-repo file list erroneously surfaces submodule entries when
+  // only the submodule's internal worktree (m/u flags) is dirty — the parent
+  // index has nothing to show. The filter event records each submodule entry
+  // decision at parse time so SQL can verify "kept iff c=C" against a trace.
+  // Bug 2: the 3-second request cache returned stale data after FS mutations
+  // because invalidation was time-based. The new fs-watcher driven invalidator
+  // emits cache-hit / cache-invalidate / fs-watch-event so cache health is
+  // observable, plus subpage.freshness-check on Diff/Editor/History entry to
+  // record the watcher-bypass path.
+  MAIN_GIT_DIFF_CACHE_HIT: 'main:git.diff.cache-hit',
+  MAIN_GIT_DIFF_CACHE_INVALIDATE: 'main:git.diff.cache-invalidate',
+  MAIN_GIT_DIFF_FS_WATCH_EVENT: 'main:git.diff.fs-watch-event',
+  MAIN_GIT_DIFF_SUBMODULE_FILTER: 'main:git.diff.submodule-filter',
+  RENDERER_SUBPAGE_FRESHNESS_CHECK: 'renderer:subpage.freshness-check',
+
+  // ───────── Main process — Git Repository Snapshot Service ─────────
+  // Lesson #13 follow-up: the read-side surface (Diff / History / Editor
+  // scope / Quick Open) had three independent code paths that each carried
+  // partial submodule semantics — `parseStatusPorcelainV2Z`,
+  // `collectSubmodulesFromGitmodules`, and `filterMeaninglessSubmoduleEntries`.
+  // The snapshot service is the canonical place where ".gitmodules + git
+  // submodule status + getGitRepoMeta validation" converge into one
+  // immutable structural answer. Every consumer that needs "what are the
+  // submodules of this cwd?" goes through this service.
+  //
+  // Phase 1 (this round) migrates loadGitDiff. Later phases will migrate
+  // History, Editor scope + Quick Open. The trace events let us observe
+  // cache health (capture vs hit) and detect stale-cache regressions long
+  // before they become user-visible bugs.
+  MAIN_GIT_SNAPSHOT_CAPTURE: 'main:git.snapshot.capture',
+  MAIN_GIT_SNAPSHOT_CACHE_HIT: 'main:git.snapshot.cache-hit',
+  MAIN_GIT_SNAPSHOT_INVALIDATE: 'main:git.snapshot.invalidate'
 } as const
 
 export type PerfTraceEventName = typeof PERF_TRACE_EVENT[keyof typeof PERF_TRACE_EVENT]

@@ -6,7 +6,6 @@
 import { parentPort } from 'worker_threads'
 import {
   checkGitInstalled,
-  detectSubmodulesRecursive,
   discardGitFile,
   getGitDiff,
   getGitFileContent,
@@ -14,6 +13,7 @@ import {
   getGitHistoryDiff,
   getGitHistoryFileContent,
   getGitRepoMeta,
+  invalidateGitDiffCache,
   resolveRepoRoot,
   saveGitFileContent,
   stageGitFile,
@@ -23,6 +23,10 @@ import {
   type GitHistoryDiffOptions,
   type GitHistoryFileContentOptions
 } from './git-utils'
+import {
+  gitRepositorySnapshotService,
+  snapshotToLegacySubmoduleInfos
+} from './git-repository-snapshot-service'
 
 type GitIpcWorkerMethod =
   | 'checkInstalled'
@@ -53,6 +57,20 @@ type WorkerResponse = {
   error?: string
 }
 
+/**
+ * One-way control envelope (no reply). Used by main → worker bridges that
+ * fan out a side-effect (cache invalidation, watcher events) without
+ * waiting for an ack. Distinguishable from `WorkerRequest` by the absence
+ * of a numeric `id` and the presence of a string `event` discriminator.
+ */
+type WorkerControlEnvelope =
+  | { event: 'invalidate-diff-cache'; cwd: string; reason: string }
+
+function isWorkerControlEnvelope(value: unknown): value is WorkerControlEnvelope {
+  if (!value || typeof value !== 'object') return false
+  return typeof (value as { event?: unknown }).event === 'string'
+}
+
 function stringPayload(payload: Record<string, unknown>, key: string): string {
   const value = payload[key]
   return typeof value === 'string' ? value : ''
@@ -66,7 +84,7 @@ async function dispatch(method: GitIpcWorkerMethod, payload: Record<string, unkn
     case 'resolveRepoRoot':
       return await resolveRepoRoot(cwd)
     case 'getDiff':
-      return await getGitDiff(cwd, payload.options as { scope?: 'root-only' | 'full' } | undefined)
+      return await getGitDiff(cwd, payload.options as { scope?: 'root-only' | 'full'; force?: boolean } | undefined)
     case 'getHistory':
       return await getGitHistory(cwd, Number(payload.limit) || undefined, Number(payload.skip) || undefined)
     case 'getHistoryDiff':
@@ -92,9 +110,15 @@ async function dispatch(method: GitIpcWorkerMethod, payload: Record<string, unkn
         typeof payload.repoRoot === 'string' ? payload.repoRoot : undefined
       )
     case 'getSubmodules': {
-      const meta = await getGitRepoMeta(cwd)
-      if (!meta.isRepo || !meta.repoRoot || !meta.gitExecutable) return []
-      return await detectSubmodulesRecursive(meta.repoRoot, meta.gitExecutable)
+      // Phase 3 of the lesson #13 follow-up: route the IPC handler
+      // through the snapshot service. Preserves the legacy
+      // `GitSubmoduleInfo[]` API surface (a few external consumers may
+      // depend on it via the preload bridge) while making the snapshot
+      // service the only path that runs `.gitmodules + git submodule
+      // status + getGitRepoMeta` discovery.
+      const snapshot = await gitRepositorySnapshotService.getSnapshot(cwd)
+      if (!snapshot.isRepo) return []
+      return snapshotToLegacySubmoduleInfos(snapshot)
     }
     case 'updateIndexContent':
       return await updateGitIndexContent(cwd, stringPayload(payload, 'filename'), stringPayload(payload, 'content'))
@@ -110,7 +134,26 @@ async function dispatch(method: GitIpcWorkerMethod, payload: Record<string, unkn
   }
 }
 
-parentPort?.on('message', async (request: WorkerRequest) => {
+parentPort?.on('message', async (incoming: WorkerRequest | WorkerControlEnvelope) => {
+  // One-way control envelopes (cache invalidation pushed by main when the
+  // FS watcher fires) are processed in-place — no response is sent. This
+  // path is intentionally synchronous-shaped: it must not allocate a
+  // pending request slot in the client, otherwise a watcher storm could
+  // exhaust the request id space.
+  if (isWorkerControlEnvelope(incoming)) {
+    if (incoming.event === 'invalidate-diff-cache') {
+      try {
+        invalidateGitDiffCache(incoming.cwd, incoming.reason)
+      } catch {
+        // Worker invalidation must never bring down the worker — if the
+        // cache delete throws (e.g. a future cache structure change), the
+        // worst case is one stale read until the next watcher fire.
+      }
+    }
+    return
+  }
+
+  const request = incoming as WorkerRequest
   const response: WorkerResponse = {
     id: request.id,
     ok: false

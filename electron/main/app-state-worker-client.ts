@@ -6,7 +6,12 @@
 import { join } from 'path'
 import { Worker } from 'worker_threads'
 import { mainWorkScheduler } from './main-work-scheduler'
-import { perfTraceLogger } from './perf-trace-logger'
+import {
+  perfTraceLogger,
+  isPerfTraceWorkerEvent,
+  replayPerfTraceWorkerEvent,
+  WORKER_TID
+} from './perf-trace-logger'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 
 type WorkerMethod = 'saveSnapshot'
@@ -70,8 +75,15 @@ class AppStateWorkerClient {
 
     const workerPath = join(__dirname, 'app-state-worker-entry.js')
     this.worker = new Worker(workerPath)
-    this.worker.on('message', (message: WorkerResponse) => {
-      this.handleMessage(message)
+    this.worker.on('message', (message: WorkerResponse | unknown) => {
+      if (isPerfTraceWorkerEvent(message)) {
+        replayPerfTraceWorkerEvent(message, {
+          tid: WORKER_TID.APP_STATE,
+          threadName: 'app-state-worker'
+        })
+        return
+      }
+      this.handleMessage(message as WorkerResponse)
     })
     this.worker.on('error', (error) => {
       perfTraceLogger.record(PERF_TRACE_EVENT.WORKER_APP_STATE_ERROR, { error: String(error) })

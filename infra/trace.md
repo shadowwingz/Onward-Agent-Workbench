@@ -168,6 +168,34 @@ append new names, never rename existing ones.
 | `MAIN_GITWATCH_SUMMARY` | `main:gitwatch-summary` | `i` (t) | `git-watch-manager.ts` 1 s roll-up |
 | `MAIN_TERMINAL_DATA_IPC_SUMMARY` | `main:terminal-data-ipc-summary` | `i` (t) | `ipc-handlers.ts` terminal IPC counter sampler |
 
+#### Git Diff cache & freshness (Bug 1 / Bug 2)
+
+| Constant | Name | Phase | Emitted at |
+|---|---|---|---|
+| `MAIN_GIT_DIFF_CACHE_HIT` | `main:git.diff.cache-hit` | `i` | `electron/main/git-utils.ts::getGitDiff` — request-level cache served without spawning git. Tagged `cwd`, `scope`, `ageMs`. |
+| `MAIN_GIT_DIFF_CACHE_INVALIDATE` | `main:git.diff.cache-invalidate` | `i` | Same file — cleared on watcher debounce, force=true entry, or LRU eviction. Tagged `cwd`, `reason: 'watcher' \| 'force' \| 'lru' \| 'manual'`, `entriesCleared`. |
+| `MAIN_GIT_DIFF_FS_WATCH_EVENT` | `main:git.diff.fs-watch-event` | `i` | `electron/main/git-diff-cache-invalidator.ts` — one event per 180 ms debounce window per watched cwd. Tagged `cwd`, `pendingMs`. |
+| `MAIN_GIT_DIFF_SUBMODULE_FILTER` | `main:git.diff.submodule-filter` | `i` | `electron/main/git-utils.ts::filterMeaninglessSubmoduleEntries` — one event per submodule entry decision (kept iff `<c>=C` OR `changeType==='staged'`). Tagged `repoRoot`, `repoLabel`, `path`, `flags`, `changeType`, `kept`. |
+
+#### Git Repository Snapshot Service (lesson #13 phase 1)
+
+The snapshot service is the canonical answer to "what are the parent +
+submodule structural facts for this cwd?" Phase 1 migrates `loadGitDiff`
+through it; History / Editor scope / Quick Open continue to call
+`detectSubmodulesRecursive`, which is now a thin compatibility wrapper
+that derives the legacy `GitSubmoduleInfo[]` shape from the snapshot.
+
+| Constant | Name | Phase | Emitted at |
+|---|---|---|---|
+| `MAIN_GIT_SNAPSHOT_CAPTURE` | `main:git.snapshot.capture` | `i` | `electron/main/git-repository-snapshot-service.ts` — first call for a cwd or `force: true`. Tagged `cwd`, `isRepo`, `submoduleCount`, `validSubmoduleCount`, `fingerprint`. |
+| `MAIN_GIT_SNAPSHOT_CACHE_HIT` | `main:git.snapshot.cache-hit` | `i` | Same file — cached snapshot returned without re-running git. Tagged `cwd`, `fingerprint`, `ageMs`, `submoduleCount`. |
+| `MAIN_GIT_SNAPSHOT_INVALIDATE` | `main:git.snapshot.invalidate` | `i` | Same file — entry dropped because `invalidateGitDiffCache(cwd)` was called (watcher fan-out, force, manual). Tagged `cwd`. |
+
+The snapshot service emits these events from BOTH main and the
+git-ipc-worker — the worker's events forward through the existing
+`PerfTraceWorkerEvent` envelope and land in the main trace on the
+`git-ipc-worker` tid lane (per lesson #10).
+
 #### Renderer lifecycle
 
 | Constant | Name | Phase | Emitted at |
@@ -225,12 +253,59 @@ Routed onto per-Task virtual tid (`task-<shortId>` on main, `-rnd` suffix on ren
 | `RENDERER_TERMINAL_DATA_SCHEDULER_FLUSH` | `renderer:terminal-data.scheduler-flush` | `X` (has `durationMs`) | `src/terminal/terminal-output-scheduler.ts::flush` — aggregate slice (no terminalId) + per-Task slice (with bytes consumed) |
 | `RENDERER_TERMINAL_DATA_XTERM_WRITE` | `renderer:terminal-data.xterm-write` | `X` (has `durationMs`) | `src/terminal/terminal-session-manager.ts::writeTerminalData` — actual `session.terminal.write()` cost |
 
-### 2.2 Worker threads (pid=1, tid=1 — emitted on main track)
+### 2.2 Worker threads (pid=1, dedicated tid lane per worker)
 
-For each worker (`app-state`, `git-ipc`, `git-status`, `project-fs`,
-`sqlite`, `ripgrep`) we emit the same four-event family from its
-client. `*-latency` is a completed span with `dur`; the others are
-instant.
+Each Node Worker thread now writes through the **same** main-side
+`perfTraceLogger` instance via a `parentPort.postMessage` envelope —
+there is exactly **one** trace JSON per process, and each worker shows
+up as its own `thread_name` track in Perfetto UI. The previous
+"per-worker tmpdir trace file + race for `latest.txt`" design was
+removed in 2026-04-25.
+
+Wire format (worker → main):
+
+```ts
+{ event: 'trace', name: string, data?: object, source?: { tid?, terminalId? } }
+```
+
+The shape mirrors the long-standing ripgrep precedent
+(`ripgrep-search-worker-entry.ts::postTrace`), generalised so every
+worker now uses it transparently — `perfTraceLogger.record(...)` inside
+a worker context auto-detects `!isMainThread` and forwards via
+`parentPort.postMessage(...)` instead of opening its own write stream.
+
+Receivers in each `*-worker-client.ts`:
+
+```ts
+this.worker.on('message', (message) => {
+  if (isPerfTraceWorkerEvent(message)) {
+    replayPerfTraceWorkerEvent(message, {
+      tid: WORKER_TID.GIT_IPC,           // stable per-worker tid
+      threadName: 'git-ipc-worker'       // human label for Perfetto UI
+    })
+    return
+  }
+  this.handleMessage(message as WorkerResponse)
+})
+```
+
+Worker tid lanes (defined in `electron/main/perf-trace-logger.ts`,
+exported as `WORKER_TID.*`). Main tid stays at `1`; per-task tids start
+at `MAIN_TASK_TID_BASE = 10000`; renderer per-task at `20000`. Worker
+tids occupy the gap 5000-5999 so all three coexist without overlap.
+
+| Constant | tid | thread_name in trace |
+|---|---|---|
+| `WORKER_TID.GIT_IPC` | 5001 | `git-ipc-worker` |
+| `WORKER_TID.GIT_STATUS` | 5002 | `git-status-worker` |
+| `WORKER_TID.PROJECT_FS` | 5003 | `project-fs-worker` |
+| `WORKER_TID.SQLITE` | 5004 | `sqlite-worker` |
+| `WORKER_TID.APP_STATE` | 5005 | `app-state-worker` |
+| `WORKER_TID.RIPGREP_SEARCH` | 5006 | (ripgrep already used its own pre-existing lane) |
+
+Worker-client latency / timeout / error / exit events still come from
+the main-thread side after a worker IPC round-trip, and stay on
+`tid=1`:
 
 | Constant | Name |
 |---|---|
@@ -243,9 +318,16 @@ instant.
 | `WORKER_RIPGREP_BINARY_MISSING` | `main:ripgrep-binary-missing` |
 | `WORKER_RIPGREP_START_ERROR` | `main:ripgrep-worker-start-error` |
 
-All are emitted in `electron/main/*-worker-client.ts`. Exact file:line
-is kept in the git log rather than pasted here (faster to trust `git
-grep PERF_TRACE_EVENT.WORKER_` than a stale markdown table).
+All worker-client events are emitted in `electron/main/*-worker-client.ts`.
+Exact file:line stays in the git log rather than pasted here (faster
+to trust `git grep PERF_TRACE_EVENT.WORKER_` than a stale markdown table).
+
+Important: do NOT static-import `electron` from `perf-trace-logger.ts`
+or any of its transitive importers (`git-utils.ts`, `git-runtime-
+manager.ts`, etc.). Worker threads inside Electron cannot resolve
+`require('electron')`, and a top-of-file import crashes the worker
+before any uncaughtException handler can register. Lazy-load via
+`require('electron')` gated on `worker_threads.isMainThread`.
 
 ### 2.3 Renderer (pid=2, tid=<WebContents.id>)
 
@@ -317,6 +399,7 @@ so every call through `window.electronAPI.<domain>.<method>()` gets a
 | `RENDERER_GITHISTORY_OPEN` | `renderer:githistory.open` | `i` | `src/App.tsx` dropdown `terminalGitHistory` branch |
 | `RENDERER_SETTINGS_OPEN` | `renderer:settings.open` | `i` | `src/App.tsx` panel switcher |
 | `RENDERER_CHANGELOG_OPEN` | `renderer:changelog.open` | `i` | `src/App.tsx::handleToggleChangeLog` |
+| `RENDERER_SUBPAGE_FRESHNESS_CHECK` | `renderer:subpage.freshness-check` | `i` | `src/components/TerminalGrid/TerminalGrid.tsx::handleViewGitDiff` / `handleViewGitHistory` — fires once per subpage activation. Tagged `subpage: 'diff' \| 'history' \| 'editor'`, `cwd`, `reason: 'open' \| 'switch'`. Pairs with `MAIN_GIT_DIFF_CACHE_INVALIDATE { reason: 'force' }` on the main side. |
 
 #### Background ops
 

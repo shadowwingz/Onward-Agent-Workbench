@@ -43,6 +43,7 @@ import { browserViewManager } from './browser-view-manager'
 import { FileWatchManager } from './file-watch-manager'
 import { ImageWatchManager } from './image-watch-manager'
 import { ProjectTreeWatchManager } from './project-tree-watch-manager'
+import { gitDiffCacheInvalidator } from './git-diff-cache-invalidator'
 import { getUpdateService } from './update-service'
 import { perfTraceLogger } from './perf-trace-logger'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
@@ -419,6 +420,20 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   fileWatchManager = new FileWatchManager(mainWindow)
   imageWatchManager = new ImageWatchManager(mainWindow)
   projectTreeWatchManager = new ProjectTreeWatchManager(mainWindow)
+
+  // When main's FS watcher detects an external mutation we need to:
+  //   (1) drop the cached diff inside the git-ipc-worker (where getGitDiff
+  //       and gitDiffRequestCache actually live in the normal IPC path), and
+  //   (2) tell the renderer so an open GitDiffViewer can re-fetch.
+  // Order matters: invalidate the worker cache BEFORE the renderer learns
+  // about the change, so any reactive refetch the renderer kicks off lands
+  // on a worker whose cache is already empty. The invalidator already
+  // debounces, so this never spams either side.
+  gitDiffCacheInvalidator.addListener((cwd, reason) => {
+    gitIpcWorkerClient.invalidateDiffCache(cwd, reason)
+    if (mainWindow.isDestroyed()) return
+    mainWindow.webContents.send(IPC.GIT_DIFF_CACHE_INVALIDATED, cwd, reason)
+  })
 
   ipcMain.on(IPC.DEBUG_LOG, (_event, payload: { message?: string; data?: unknown }) => {
     log('[RendererDebug]', payload?.message ?? '', payload?.data ?? '')
@@ -1260,8 +1275,24 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   })
 
   // Get Git diff for a directory
-  ipcMain.handle(IPC.GIT_GET_DIFF, async (_, cwd: string, options?: { scope?: 'root-only' | 'full' }) => {
-    return await gitIpcWorkerClient.getDiff(cwd, options)
+  ipcMain.handle(IPC.GIT_GET_DIFF, async (_, cwd: string, options?: { scope?: 'root-only' | 'full'; force?: boolean }) => {
+    const result = await gitIpcWorkerClient.getDiff(cwd, options)
+    // Register the FS watcher on the MAIN process side, scoped to the
+    // resolved repo root rather than the input cwd. When callers open Git
+    // Diff from a subdirectory (e.g. `myrepo/src/components/`), the diff
+    // covers the whole repo, but a watcher on the subdirectory would miss
+    // changes in sibling paths under the same repo. Registering on
+    // `result.cwd` (the resolved repoRoot returned by getGitDiff) keeps the
+    // watcher's surface aligned with the data surface, so external edits
+    // anywhere in the repo trigger the auto-refresh path. Cwds already
+    // watched are no-ops here, and `result.cwd` falls back to the input
+    // cwd when the path is not a git repo.
+    if (result?.cwd) {
+      gitDiffCacheInvalidator.registerWatch(result.cwd)
+    } else {
+      gitDiffCacheInvalidator.registerWatch(cwd)
+    }
+    return result
   })
 
   // Get Git history list
@@ -1683,6 +1714,7 @@ export function cleanupIpcHandlers(): void {
   imageWatchManager = null
   projectTreeWatchManager?.dispose()
   projectTreeWatchManager = null
+  gitDiffCacheInvalidator.dispose()
   ipcMain.removeHandler(IPC.APP_GET_INFO)
   ipcMain.removeHandler(IPC.FEEDBACK_LOAD)
   ipcMain.removeHandler(IPC.FEEDBACK_UPDATE_PREFERENCES)

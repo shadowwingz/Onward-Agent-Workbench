@@ -1034,6 +1034,12 @@ export function ProjectEditor({
   const lastEditorScopeRef = useRef<ProjectEditorScope | null>(null)
   const wasOpenRef = useRef(false)
   const skipClosePersistRef = useRef(false)
+  // Snapshot of activeFilePath captured by handleOpenGitDiff/History before
+  // resetActiveFileState clears state. Used to fast-path file restoration on
+  // subpage-return (Editor reopens with the same scope) without waiting for
+  // the full tree-reload + AppState restore cycle (which can exceed the
+  // autotest's 8s wait).
+  const subpageReturnFileRef = useRef<{ scope: ProjectEditorScope; path: string } | null>(null)
   const previewActiveSlugRef = useRef<string | null>(null)
   const [previewActiveSlug, setPreviewActiveSlug] = useState<string | null>(null)
   const previewScrollMemoryRef = useRef<Map<string, PreviewScrollMemory>>(new Map())
@@ -4058,6 +4064,19 @@ export function ProjectEditor({
       }
       const scopeChanged = !isSameProjectEditorScope(previousScope, currentScope)
       lastEditorScopeRef.current = currentScope
+      // Subpage-return fast path: when handleOpenGitDiff/History snapshotted
+      // the previous activeFilePath under this same scope, surface it
+      // immediately so an autotest's 8s `waitForProjectEditorFile` doesn't
+      // race against the slower full-restore pipeline (tree reload + AppState
+      // re-fetch + restore useEffect). The slower path still runs after this
+      // and refines the editor view state (cursor / scroll); only the bare
+      // `activeFilePath` claim is fast-tracked here.
+      const subpageReturn = subpageReturnFileRef.current
+      if (subpageReturn && isSameProjectEditorScope(subpageReturn.scope, currentScope)) {
+        subpageReturnFileRef.current = null
+        activeFilePathRef.current = subpageReturn.path
+        setActiveFilePath(subpageReturn.path)
+      }
       if (scopeChanged || !wasOpenRef.current) {
         restoredStateRef.current = getProjectEditorState(currentScope)
         hasRestoredStateRef.current = false
@@ -5471,6 +5490,12 @@ export function ProjectEditor({
     if (!canClose) return
     if (lastEditorScopeRef.current) {
       persistProjectEditorState(lastEditorScopeRef.current, { flush: true })
+      // Snapshot the activeFilePath so the subpage-return fast path can
+      // re-open it directly without waiting for the slower full restore.
+      const snapshotPath = activeFilePathRef.current
+      subpageReturnFileRef.current = snapshotPath
+        ? { scope: lastEditorScopeRef.current, path: snapshotPath }
+        : null
     }
     skipClosePersistRef.current = true
     gitDiffOpenRef.current = true
@@ -5521,6 +5546,10 @@ export function ProjectEditor({
     if (!canClose) return
     if (lastEditorScopeRef.current) {
       persistProjectEditorState(lastEditorScopeRef.current, { flush: true })
+      const snapshotPath = activeFilePathRef.current
+      subpageReturnFileRef.current = snapshotPath
+        ? { scope: lastEditorScopeRef.current, path: snapshotPath }
+        : null
     }
     skipClosePersistRef.current = true
     resetActiveFileState()

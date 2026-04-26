@@ -27,6 +27,7 @@ import { testWorkingDirectoryCopy } from './test-working-directory-copy'
 import { testGitDiffSubdir } from './test-git-diff-subdir'
 import { testGitDiffSubmodules } from './test-git-diff-submodules'
 import { testGitDiffRecursiveSubmodules } from './test-git-diff-recursive-submodules'
+import { testGitDiffStalenessAndSubmodule } from './test-git-diff-staleness-and-submodule'
 import { testGitNestedSubmodules } from './test-git-nested-submodules'
 import { testGitCrossPlatform } from './test-git-cross-platform'
 import { testProjectEditorMultiTerminalScope } from './test-project-editor-multi-terminal-scope'
@@ -495,6 +496,16 @@ export async function runAllTests(ctx: AutotestContext): Promise<void> {
       const results = await testGitNestedSubmodules(ctx)
       collectSuiteResults('GitNestedSubmodules', results)
       await ctx.reopenProjectEditor('phase5.48-cleanup')
+      await sleep(500)
+    }
+
+    if (!ctx.cancelled() && shouldRun('git-diff-staleness-and-submodule')) {
+      log('phase5.49:begin')
+      await ctx.reopenProjectEditor('phase5.49-setup')
+      await sleep(300)
+      const results = await testGitDiffStalenessAndSubmodule(ctx)
+      collectSuiteResults('GitDiffStalenessAndSubmodule', results)
+      await ctx.reopenProjectEditor('phase5.49-cleanup')
       await sleep(500)
     }
 

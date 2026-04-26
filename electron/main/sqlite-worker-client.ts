@@ -5,7 +5,12 @@
 
 import { join, resolve } from 'path'
 import { Worker } from 'worker_threads'
-import { perfTraceLogger } from './perf-trace-logger'
+import {
+  perfTraceLogger,
+  isPerfTraceWorkerEvent,
+  replayPerfTraceWorkerEvent,
+  WORKER_TID
+} from './perf-trace-logger'
 import { mainWorkScheduler } from './main-work-scheduler'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 
@@ -86,8 +91,15 @@ class SqliteWorkerClient {
 
     const workerPath = join(__dirname, 'sqlite-worker-entry.js')
     this.worker = new Worker(workerPath)
-    this.worker.on('message', (message: WorkerResponse) => {
-      this.handleMessage(message)
+    this.worker.on('message', (message: WorkerResponse | unknown) => {
+      if (isPerfTraceWorkerEvent(message)) {
+        replayPerfTraceWorkerEvent(message, {
+          tid: WORKER_TID.SQLITE,
+          threadName: 'sqlite-worker'
+        })
+        return
+      }
+      this.handleMessage(message as WorkerResponse)
     })
     this.worker.on('error', (error) => {
       perfTraceLogger.record(PERF_TRACE_EVENT.WORKER_SQLITE_ERROR, { error: String(error) })

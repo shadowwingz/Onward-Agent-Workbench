@@ -86,6 +86,7 @@ export const IPC = {
 
   // git
   GIT_CHECK_INSTALLED: 'git:check-installed',
+  GIT_DIFF_CACHE_INVALIDATED: 'git:diff-cache-invalidated',
   GIT_DISCARD_FILE: 'git:discard-file',
   GIT_GET_DIFF: 'git:get-diff',
   GIT_GET_FILE_CONTENT: 'git:get-file-content',

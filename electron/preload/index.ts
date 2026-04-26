@@ -345,6 +345,7 @@ export interface GitDiffResult {
 
 export interface GitDiffLoadOptions {
   scope?: 'root-only' | 'full'
+  force?: boolean
 }
 
 export interface GitCommitInfo {
@@ -631,6 +632,11 @@ export interface GitAPI {
   notifyTerminalGitUpdate: (terminalId: string) => Promise<{ success: true }>
   warmDiffCache: (cwd: string) => Promise<{ success: boolean }>
   onTerminalInfo: (callback: (terminalId: string, info: TerminalGitInfo) => void) => () => void
+  // Subscribe to backend cache invalidation events. Fires when an FS event
+  // under a watched cwd debounces (180 ms window), or when a force=true
+  // request lands. Use this to refetch an open Git Diff view rather than
+  // polling. Returns an unsubscribe function.
+  onDiffCacheInvalidated: (callback: (cwd: string, reason: 'watcher' | 'force' | 'lru' | 'manual') => void) => () => void
 }
 
 // Project Editor API
@@ -903,6 +909,11 @@ export interface DebugAPI {
   autotestCwd: string | null
   autotestSuite: string | null
   autotestExit: boolean
+  // Optional path to a JSON manifest written by a fixture builder. Used when
+  // a single autotest needs to operate on multiple pre-built repos (e.g. the
+  // submodule c/m/u filter suite needs both a "clean" and a "pointer-changed"
+  // parent+submodule pair). Empty/null in normal runs.
+  autotestFixtureExtra: string | null
   log: (message: string, data?: unknown) => void
   focusWindow: () => Promise<boolean>
   getAppMetrics: () => Promise<Record<string, unknown>[]>
@@ -1329,6 +1340,16 @@ const gitAPI: GitAPI = {
     return () => {
       ipcRenderer.removeListener(IPC.GIT_TERMINAL_INFO, listener)
     }
+  },
+
+  onDiffCacheInvalidated: (callback: (cwd: string, reason: 'watcher' | 'force' | 'lru' | 'manual') => void) => {
+    const listener = (_: Electron.IpcRendererEvent, cwd: string, reason: 'watcher' | 'force' | 'lru' | 'manual') => {
+      callback(cwd, reason)
+    }
+    ipcRenderer.on(IPC.GIT_DIFF_CACHE_INVALIDATED, listener)
+    return () => {
+      ipcRenderer.removeListener(IPC.GIT_DIFF_CACHE_INVALIDATED, listener)
+    }
   }
 }
 
@@ -1607,6 +1628,7 @@ const debugAutotestEnabled = process.env.ONWARD_AUTOTEST === '1'
 const debugAutotestCwd = process.env.ONWARD_AUTOTEST_CWD || null
 const debugAutotestSuite = process.env.ONWARD_AUTOTEST_SUITE || null
 const debugAutotestExit = process.env.ONWARD_AUTOTEST_EXIT === '1'
+const debugAutotestFixtureExtra = process.env.ONWARD_AUTOTEST_FIXTURE_EXTRA || null
 
 const debugAPI: DebugAPI = {
   enabled: debugEnabled,
@@ -1617,6 +1639,7 @@ const debugAPI: DebugAPI = {
   autotestCwd: debugAutotestCwd,
   autotestSuite: debugAutotestSuite,
   autotestExit: debugAutotestExit,
+  autotestFixtureExtra: debugAutotestFixtureExtra,
   log: (message: string, data?: unknown) => {
     if (!debugEnabled) return
     ipcRenderer.send(IPC.DEBUG_LOG, { message, data })

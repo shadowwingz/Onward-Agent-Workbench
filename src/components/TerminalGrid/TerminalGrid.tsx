@@ -25,6 +25,8 @@ import {
 import { focusCoordinator } from '../../terminal/focus-coordinator'
 import type { TerminalDebugApi } from '../../autotest/types'
 import { perfMonitor } from '../../utils/perf-monitor'
+import { perfTrace } from '../../utils/perf-trace'
+import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
 import { useI18n } from '../../i18n/useI18n'
 import { buildChangeDirectoryCommand, type TerminalShellKind } from '../../utils/terminal-command'
 import type { ProjectEditorOpenRequest, SubpageId, SubpageNavigateEventDetail } from '../../types/subpage'
@@ -188,7 +190,6 @@ export const TerminalGrid = memo(function TerminalGrid({
   // Terminal context menu state
   const [termCtxMenu, setTermCtxMenu] = useState<{ x: number; y: number; terminalId: string; hasSelection: boolean } | null>(null)
   const contextMenuListeners = useRef<Map<string, (e: MouseEvent) => void>>(new Map())
-  const previousSubpageOpenRef = useRef({ diff: false, history: false, editor: false })
   const previousActiveSubpageRef = useRef<SubpageId | null>(null)
   const subpageSwitchTimerRef = useRef<number | null>(null)
 
@@ -219,26 +220,26 @@ export const TerminalGrid = memo(function TerminalGrid({
     updatePanelShellState('history', state)
   }, [updatePanelShellState])
 
+  // Sync activeSubpage to the open-panel set, but never override a still-valid
+  // explicit user choice. The previous "transition-edge detector" had a race:
+  // when Diff opened first via user click and the autotest auto-open of Editor
+  // resolved its async cwd lookup AFTER, the editor branch fired with
+  // `!previous.editor === true` and clobbered activeSubpage='diff' with
+  // 'editor' (SN-05 reproduction). The new logic only picks a panel when the
+  // current activeSubpage points to a closed panel.
   useEffect(() => {
-    const previous = previousSubpageOpenRef.current
-    if (gitDiffOpen && !previous.diff) {
-      setActiveSubpage('diff')
-    }
-    if (gitHistoryOpen && !previous.history) {
-      setActiveSubpage('history')
-    }
-    if (projectEditorOpenInGrid && !previous.editor) {
-      setActiveSubpage('editor')
-    }
-    if (!gitDiffOpen && !gitHistoryOpen && !projectEditorOpenInGrid) {
-      setActiveSubpage(null)
-    }
-    previousSubpageOpenRef.current = {
-      diff: gitDiffOpen,
-      history: gitHistoryOpen,
-      editor: projectEditorOpenInGrid
-    }
-  }, [gitDiffOpen, gitHistoryOpen, projectEditorOpenInGrid])
+    const currentStillOpen = (
+      activeSubpage === 'diff' ? gitDiffOpen :
+      activeSubpage === 'history' ? gitHistoryOpen :
+      activeSubpage === 'editor' ? projectEditorOpenInGrid :
+      false
+    )
+    if (activeSubpage !== null && currentStillOpen) return
+    if (gitDiffOpen) setActiveSubpage('diff')
+    else if (gitHistoryOpen) setActiveSubpage('history')
+    else if (projectEditorOpenInGrid) setActiveSubpage('editor')
+    else if (activeSubpage !== null) setActiveSubpage(null)
+  }, [activeSubpage, gitDiffOpen, gitHistoryOpen, projectEditorOpenInGrid])
 
   const activePanelShellState = activeSubpage ? panelShellStates[activeSubpage] ?? null : null
   const lastPanelShellStateRef = useRef<SubpagePanelShellState | null>(null)
@@ -1193,6 +1194,11 @@ export const TerminalGrid = memo(function TerminalGrid({
     setGitDiffCwdPending(!initialCwd)
     setActiveSubpage('diff')
     setGitDiffOpen(true)
+    perfTrace(PERF_TRACE_EVENT.RENDERER_SUBPAGE_FRESHNESS_CHECK, {
+      subpage: 'diff',
+      cwd: initialCwd ?? null,
+      reason: closeOtherSubpages ? 'open' : 'switch'
+    })
     if (closeOtherSubpages) {
       setGitHistoryOpen(false)
     }
@@ -1230,6 +1236,11 @@ export const TerminalGrid = memo(function TerminalGrid({
     setGitHistoryCwd(initialCwd)
     setActiveSubpage('history')
     setGitHistoryOpen(true)
+    perfTrace(PERF_TRACE_EVENT.RENDERER_SUBPAGE_FRESHNESS_CHECK, {
+      subpage: 'history',
+      cwd: initialCwd ?? null,
+      reason: closeOtherSubpages ? 'open' : 'switch'
+    })
     if (closeOtherSubpages) {
       setGitDiffOpen(false)
     }
@@ -1683,7 +1694,13 @@ export const TerminalGrid = memo(function TerminalGrid({
         >
           {anySubpageOpen && renderedPanelShellState && (
             <SubpagePanelShell
-              current={renderedPanelShellState.current}
+              // SN-05: drive `current` from `activeSubpage` directly. Going
+              // through `renderedPanelShellState.current` lags by one render
+              // when the destination panel hasn't published its panel-shell
+              // state yet (each panel publishes via a useLayoutEffect after
+              // mount, so the switcher renders once with the source panel's
+              // 'current' value before the destination panel overwrites it).
+              current={activeSubpage ?? renderedPanelShellState.current}
               onSelect={renderedPanelShellState.onSelect}
               actions={renderedPanelShellState.actions}
               workingDirectoryLabel={renderedPanelShellState.workingDirectoryLabel}
