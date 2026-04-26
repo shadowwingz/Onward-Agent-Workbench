@@ -1,0 +1,76 @@
+/*
+ * SPDX-FileCopyrightText: 2026 OPPO
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+.terminal-title-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 220px;
+  max-width: calc(100vw - 16px);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 6px;
+  box-shadow: var(--shadow-1);
+  color: var(--text-2);
+  animation: terminal-title-menu-fade-in 0.15s ease;
+  contain: layout paint style;
+}
+
+@keyframes terminal-title-menu-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.terminal-title-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  width: 100%;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: var(--font-sm);
+  text-align: left;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.terminal-title-menu-item + .terminal-title-menu-item {
+  margin-top: 1px;
+}
+
+.terminal-title-menu-item:hover:not(:disabled) {
+  background-color: color-mix(in srgb, var(--accent) 15%, transparent);
+  color: var(--text-1);
+}
+
+.terminal-title-menu-item:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.terminal-title-menu-item:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.terminal-title-menu-item svg {
+  flex-shrink: 0;
+  color: var(--text-3);
+}
+
+.terminal-title-menu-item:hover:not(:disabled) svg {
+  color: var(--text-2);
+}

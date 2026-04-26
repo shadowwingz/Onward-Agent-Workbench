@@ -85,3 +85,23 @@ When implementing a new debug switch:
    ```
 3. **Document it** by adding a row to the table above.
 4. **Never ship user-facing behavior** behind a debug variable — these are developer-only switches.
+
+## Trace Event Reference
+
+Structured trace events emitted via `debugLog(...)` from the renderer when `ONWARD_DEBUG=1` is set. They land in both the browser console (prefixed `[TerminalGrid]`) and the main-process log via the `debug:log` IPC channel. Event names are append-only — never rename existing keys, only add new ones.
+
+### Title menu events
+
+Emitted from `src/components/TerminalGrid/TerminalGrid.tsx` for the Task Terminal title interaction (single-click dropdown + double-click rename + branch/folder snapshots).
+
+| Event | When | Payload |
+|-------|------|---------|
+| `titleMenu:open` | Single-click on the title commits to opening the menu (after the 220ms double-click guard) | `{ terminalId, source: 'click', branch, repoName, canUseBranch, canUseRepo }` |
+| `titleMenu:snapshot` | A quick-name menu item is chosen and the snapshot is written to `customName` | `{ terminalId, source: 'branch' \| 'repo', value, previousCustomName }` |
+| `titleMenu:rename` | Inline rename lifecycle | `{ stage: 'start', terminalId, source: 'menu' \| 'doubleClick', currentCustomName }` <br> `{ stage: 'commit', terminalId, newValue, previousCustomName }` <br> `{ stage: 'cancel', terminalId }` |
+
+Quick filter:
+
+```bash
+ONWARD_DEBUG=1 open "release/mac/Under Development <version>-<branch>.app" 2>&1 | grep "titleMenu:"
+```

@@ -7,6 +7,7 @@ import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo, mem
 import { createPortal } from 'react-dom'
 import { LayoutMode, TerminalInfo, TerminalShortcutAction, TerminalFocusRequest } from '../../types/prompt'
 import { TerminalDropdown } from '../TerminalDropdown'
+import { TerminalTitleMenu } from '../TerminalTitleMenu'
 import { GitDiffViewer } from '../GitDiffViewer'
 import { GitHistoryViewer } from '../GitHistoryViewer'
 import { ProjectEditor } from '../ProjectEditor'
@@ -77,6 +78,7 @@ interface TerminalGitInfo {
 const TERMINAL_PATH_SEGMENTS = 3
 const FOCUS_REQUEST_MAX_ATTEMPTS = 12
 const FOCUS_REQUEST_RETRY_MS = 50
+const TITLE_DBLCLICK_DELAY_MS = 220
 
 async function resolveTerminalShellKind(terminalId: string): Promise<TerminalShellKind | undefined> {
   try {
@@ -141,6 +143,11 @@ export const TerminalGrid = memo(function TerminalGrid({
   const [editingTitle, setEditingTitle] = useState('')
   const editInputRef = useRef<HTMLInputElement>(null)
   const editingIdRef = useRef<string | null>(null)
+  // Title dropdown menu (click anchor + delayed open to coexist with double-click rename)
+  const [titleMenuTerminalId, setTitleMenuTerminalId] = useState<string | null>(null)
+  const titleMenuTerminalIdRef = useRef<string | null>(null)
+  const pendingTitleClickRef = useRef<{ id: string; timer: number } | null>(null)
+  const titleAnchorsRef = useRef<Map<string, HTMLSpanElement | null>>(new Map())
   const focusRafRef = useRef<number | null>(null)
   const focusRetryTimerRef = useRef<number | null>(null)
   const latestFocusRequestRef = useRef<TerminalFocusRequest | null>(focusRequest)
@@ -318,6 +325,22 @@ export const TerminalGrid = memo(function TerminalGrid({
     editingIdRef.current = editingId
   }, [editingId])
 
+  const editingTitleRef = useRef<string>('')
+  useEffect(() => {
+    editingTitleRef.current = editingTitle
+  }, [editingTitle])
+
+  useEffect(() => {
+    titleMenuTerminalIdRef.current = titleMenuTerminalId
+  }, [titleMenuTerminalId])
+
+  const terminalInfosRef = useRef<Record<string, TerminalGitInfo>>({})
+  useEffect(() => {
+    terminalInfosRef.current = terminalInfos
+  }, [terminalInfos])
+
+  const visibleTerminalsRef = useRef<TerminalInfo[]>([])
+
   useEffect(() => {
     terminalIdsRef.current = terminals.map(t => t.id)
   }, [terminals])
@@ -371,6 +394,7 @@ export const TerminalGrid = memo(function TerminalGrid({
 
   useEffect(() => {
     visibleTerminalIdsRef.current = visibleTerminals.map(term => term.id)
+    visibleTerminalsRef.current = visibleTerminals
   }, [visibleTerminals])
 
   useEffect(() => {
@@ -525,25 +549,42 @@ export const TerminalGrid = memo(function TerminalGrid({
     return () => document.removeEventListener('mousedown', handleMouseDown)
   }, [termCtxMenu])
 
+  // Autotest-only sticky overrides so tests can pin branch / repoName without
+  // being clobbered by the main-process git watcher poll cycle.
+  const terminalInfoOverridesRef = useRef<Map<string, Partial<TerminalGitInfo>>>(new Map())
+
+  const mergeOverride = useCallback((terminalId: string, info: TerminalGitInfo): TerminalGitInfo => {
+    const override = terminalInfoOverridesRef.current.get(terminalId)
+    if (!override) return info
+    return {
+      cwd: override.cwd !== undefined ? override.cwd : info.cwd,
+      repoRoot: override.repoRoot !== undefined ? override.repoRoot : info.repoRoot,
+      branch: override.branch !== undefined ? override.branch : info.branch,
+      repoName: override.repoName !== undefined ? override.repoName : info.repoName,
+      status: override.status !== undefined ? override.status : info.status
+    }
+  }, [])
+
   const applyTerminalInfoUpdate = useCallback((terminalId: string, info: TerminalGitInfo | null) => {
     if (!info) return
     if (typeof info.cwd === 'string' && info.cwd.trim()) {
       onPersistTerminalCwd(terminalId, info.cwd)
     }
+    const effective = mergeOverride(terminalId, info)
     setTerminalInfos(prev => {
       const current = prev[terminalId]
       if (
-        current?.cwd === info.cwd &&
-        current?.repoRoot === info.repoRoot &&
-        current?.branch === info.branch &&
-        current?.repoName === info.repoName &&
-        current?.status === info.status
+        current?.cwd === effective.cwd &&
+        current?.repoRoot === effective.repoRoot &&
+        current?.branch === effective.branch &&
+        current?.repoName === effective.repoName &&
+        current?.status === effective.status
       ) {
         return prev
       }
-      return { ...prev, [terminalId]: info }
+      return { ...prev, [terminalId]: effective }
     })
-  }, [onPersistTerminalCwd])
+  }, [mergeOverride, onPersistTerminalCwd])
 
   const setTerminalStatus = useCallback((terminalId: string, status: TerminalSessionStatus) => {
     setTerminalStatuses(prev => {
@@ -1039,6 +1080,173 @@ export const TerminalGrid = memo(function TerminalGrid({
       remountTerminal: (terminalId) => {
         const resolved = resolveTerminalId(terminalId)
         return resolved ? terminalSessionManager.remount(resolved) : false
+      },
+      getTerminalTitle: (terminalId) => {
+        const resolved = resolveTerminalId(terminalId)
+        if (!resolved) return null
+        const match = visibleTerminalsRef.current.find((term) => term.id === resolved)
+        return match ? match.title : null
+      },
+      getTerminalCustomName: (terminalId) => {
+        const resolved = resolveTerminalId(terminalId)
+        if (!resolved) return null
+        const match = visibleTerminalsRef.current.find((term) => term.id === resolved)
+        return match ? match.customName : null
+      },
+      getTerminalGitInfo: (terminalId) => {
+        const resolved = resolveTerminalId(terminalId)
+        if (!resolved) return null
+        const info = terminalInfosRef.current[resolved]
+        if (!info) {
+          return { branch: null, repoName: null, cwd: null, repoRoot: null }
+        }
+        return {
+          branch: info.branch ?? null,
+          repoName: info.repoName ?? null,
+          cwd: info.cwd ?? null,
+          repoRoot: info.repoRoot ?? null
+        }
+      },
+      openTitleMenu: (terminalId) => {
+        const resolved = resolveTerminalId(terminalId)
+        if (!resolved) return false
+        if (pendingTitleClickRef.current) {
+          window.clearTimeout(pendingTitleClickRef.current.timer)
+          pendingTitleClickRef.current = null
+        }
+        setTitleMenuTerminalId(resolved)
+        return true
+      },
+      closeTitleMenu: () => {
+        setTitleMenuTerminalId(null)
+        return true
+      },
+      clickTitleMenuItem: (item, terminalId) => {
+        const resolved = resolveTerminalId(terminalId)
+        if (!resolved) return false
+        const info = terminalInfosRef.current[resolved]
+        const termEntry = visibleTerminalsRef.current.find((term) => term.id === resolved)
+        if (!termEntry) return false
+        if (item === 'rename') {
+          setTitleMenuTerminalId(null)
+          setEditingId(resolved)
+          setEditingTitle(termEntry.customName ?? '')
+          return true
+        }
+        if (item === 'use-branch') {
+          const branchValue = typeof info?.branch === 'string' ? info.branch.trim() : ''
+          if (!branchValue) return false
+          setTitleMenuTerminalId(null)
+          onTerminalRename(resolved, branchValue)
+          return true
+        }
+        if (item === 'use-repo') {
+          const repoValue = typeof info?.repoName === 'string' ? info.repoName.trim() : ''
+          if (!repoValue) return false
+          setTitleMenuTerminalId(null)
+          onTerminalRename(resolved, repoValue)
+          return true
+        }
+        return false
+      },
+      getTitleMenuState: (terminalId) => {
+        const resolved = resolveTerminalId(terminalId)
+        if (!resolved) return null
+        const info = terminalInfosRef.current[resolved]
+        const branch = info?.branch ?? null
+        const repoName = info?.repoName ?? null
+        return {
+          open: titleMenuTerminalIdRef.current === resolved,
+          branch,
+          repoName,
+          canUseBranch: typeof branch === 'string' && branch.trim().length > 0,
+          canUseRepo: typeof repoName === 'string' && repoName.trim().length > 0
+        }
+      },
+      simulateTitleSingleClick: (terminalId) => {
+        const resolved = resolveTerminalId(terminalId)
+        if (!resolved) return false
+        if (pendingTitleClickRef.current) {
+          window.clearTimeout(pendingTitleClickRef.current.timer)
+          pendingTitleClickRef.current = null
+        }
+        const timer = window.setTimeout(() => {
+          pendingTitleClickRef.current = null
+          setTitleMenuTerminalId(resolved)
+        }, TITLE_DBLCLICK_DELAY_MS)
+        pendingTitleClickRef.current = { id: resolved, timer }
+        return true
+      },
+      simulateTitleDoubleClick: (terminalId) => {
+        const resolved = resolveTerminalId(terminalId)
+        if (!resolved) return false
+        if (pendingTitleClickRef.current) {
+          window.clearTimeout(pendingTitleClickRef.current.timer)
+          pendingTitleClickRef.current = null
+        }
+        const termEntry = visibleTerminalsRef.current.find((term) => term.id === resolved)
+        setTitleMenuTerminalId(null)
+        setEditingId(resolved)
+        setEditingTitle(termEntry?.customName ?? '')
+        return true
+      },
+      finishInlineRename: (value) => {
+        const id = editingIdRef.current
+        if (!id) return false
+        const finalValue = ((value ?? editingTitleRef.current) || '').trim()
+        onTerminalRename(id, finalValue)
+        setEditingId(null)
+        setEditingTitle('')
+        return true
+      },
+      cancelInlineRename: () => {
+        if (!editingIdRef.current) return false
+        setEditingId(null)
+        setEditingTitle('')
+        return true
+      },
+      getInlineRenameState: () => ({
+        editingId: editingIdRef.current,
+        editingTitle: editingTitleRef.current
+      }),
+      closeAllSubpages: () => {
+        closeGitDiffPanelRef.current?.(false)
+        closeGitHistoryPanelRef.current?.(false)
+        onCloseProjectEditorRef.current?.()
+        return true
+      },
+      setTerminalGitInfoOverride: (terminalId, override) => {
+        if (!terminalId) return false
+        if (override === null) {
+          terminalInfoOverridesRef.current.delete(terminalId)
+        } else {
+          const existing = terminalInfoOverridesRef.current.get(terminalId) ?? {}
+          const next: Partial<TerminalGitInfo> = { ...existing }
+          if (override.cwd !== undefined) next.cwd = override.cwd
+          if (override.repoRoot !== undefined) next.repoRoot = override.repoRoot
+          if (override.branch !== undefined) next.branch = override.branch
+          if (override.repoName !== undefined) next.repoName = override.repoName
+          if (override.status !== undefined) next.status = override.status
+          terminalInfoOverridesRef.current.set(terminalId, next)
+        }
+        setTerminalInfos((prev) => {
+          const current = prev[terminalId]
+          if (override === null) {
+            if (!current) return prev
+            const next = { ...prev }
+            delete next[terminalId]
+            return next
+          }
+          const merged: TerminalGitInfo = {
+            cwd: override.cwd !== undefined ? override.cwd : current?.cwd ?? null,
+            repoRoot: override.repoRoot !== undefined ? override.repoRoot : current?.repoRoot ?? null,
+            branch: override.branch !== undefined ? override.branch : current?.branch ?? null,
+            repoName: override.repoName !== undefined ? override.repoName : current?.repoName ?? null,
+            status: override.status !== undefined ? override.status : current?.status ?? null
+          }
+          return { ...prev, [terminalId]: merged }
+        })
+        return true
       }
     }
 
@@ -1048,7 +1256,11 @@ export const TerminalGrid = memo(function TerminalGrid({
         delete debugWindow.__onwardTerminalDebug
       }
     }
-  }, [activeTerminalId, displayLayoutMode, terminals, visibleTerminals])
+  }, [activeTerminalId, displayLayoutMode, terminals, visibleTerminals, onTerminalRename])
+
+  const closeGitDiffPanelRef = useRef<((restoreFocus: boolean) => void) | null>(null)
+  const closeGitHistoryPanelRef = useRef<((restoreFocus: boolean) => void) | null>(null)
+  const onCloseProjectEditorRef = useRef<(() => void) | null>(null)
 
   // Start editing the title (editing the custom name part)
   const handleStartEdit = useCallback((id: string, currentCustomName: string | null) => {
@@ -1059,7 +1271,15 @@ export const TerminalGrid = memo(function TerminalGrid({
   // Finish editing (null value clears custom name)
   const handleFinishEdit = useCallback(() => {
     if (editingId) {
-      onTerminalRename(editingId, editingTitle.trim())
+      const trimmed = editingTitle.trim()
+      const previousCustomName = visibleTerminalsRef.current.find((t) => t.id === editingId)?.customName ?? null
+      debugLog('titleMenu:rename', {
+        stage: 'commit',
+        terminalId: editingId,
+        newValue: trimmed,
+        previousCustomName
+      })
+      onTerminalRename(editingId, trimmed)
     }
     setEditingId(null)
     setEditingTitle('')
@@ -1067,6 +1287,9 @@ export const TerminalGrid = memo(function TerminalGrid({
 
   // Cancel edit
   const handleCancelEdit = useCallback(() => {
+    if (editingIdRef.current) {
+      debugLog('titleMenu:rename', { stage: 'cancel', terminalId: editingIdRef.current })
+    }
     setEditingId(null)
     setEditingTitle('')
   }, [])
@@ -1117,6 +1340,12 @@ export const TerminalGrid = memo(function TerminalGrid({
       if (tid) terminalSessionManager.focusIfNeeded(tid)
     })
   }, [gitHistoryTerminalId])
+
+  useEffect(() => {
+    closeGitDiffPanelRef.current = closeGitDiffPanel
+    closeGitHistoryPanelRef.current = closeGitHistoryPanel
+    onCloseProjectEditorRef.current = onCloseProjectEditor ?? null
+  }, [closeGitDiffPanel, closeGitHistoryPanel, onCloseProjectEditor])
 
   // View Git Diff — open the shell immediately, then resolve the best cwd for diff loading
   const handleViewGitDiff = useCallback(async (
@@ -1449,6 +1678,74 @@ export const TerminalGrid = memo(function TerminalGrid({
     terminalSessionManager.focusIfNeeded(terminalId)
   }, [onTerminalFocus])
 
+  // Title single-click with delayed open so double-click can pre-empt it.
+  const handleTitleClick = useCallback((e: React.MouseEvent, id: string) => {
+    e.stopPropagation()
+    if (pendingTitleClickRef.current && pendingTitleClickRef.current.id === id) return
+    if (pendingTitleClickRef.current) {
+      window.clearTimeout(pendingTitleClickRef.current.timer)
+      pendingTitleClickRef.current = null
+    }
+    // Title click stops propagation; call focus logic explicitly to preserve activation.
+    handleTerminalFocus(id)
+    const timer = window.setTimeout(() => {
+      pendingTitleClickRef.current = null
+      const info = terminalInfosRef.current[id]
+      const branch = info?.branch ?? null
+      const repoName = info?.repoName ?? null
+      debugLog('titleMenu:open', {
+        terminalId: id,
+        source: 'click',
+        branch,
+        repoName,
+        canUseBranch: typeof branch === 'string' && branch.trim().length > 0,
+        canUseRepo: typeof repoName === 'string' && repoName.trim().length > 0
+      })
+      setTitleMenuTerminalId(id)
+    }, TITLE_DBLCLICK_DELAY_MS)
+    pendingTitleClickRef.current = { id, timer }
+  }, [handleTerminalFocus])
+
+  // Double-click cancels a pending single-click timer and enters inline rename immediately.
+  const handleTitleDoubleClick = useCallback((e: React.MouseEvent, id: string, currentCustomName: string | null) => {
+    e.stopPropagation()
+    if (pendingTitleClickRef.current) {
+      window.clearTimeout(pendingTitleClickRef.current.timer)
+      pendingTitleClickRef.current = null
+    }
+    setTitleMenuTerminalId(null)
+    debugLog('titleMenu:rename', {
+      stage: 'start',
+      terminalId: id,
+      source: 'doubleClick',
+      currentCustomName
+    })
+    handleStartEdit(id, currentCustomName)
+  }, [handleStartEdit])
+
+  // Snapshot helper: write a value into customName through the existing rename callback.
+  const handleTitleSnapshotRename = useCallback((id: string, value: string, source: 'branch' | 'repo') => {
+    const trimmed = value.trim()
+    const previousCustomName = visibleTerminalsRef.current.find((t) => t.id === id)?.customName ?? null
+    debugLog('titleMenu:snapshot', {
+      terminalId: id,
+      source,
+      value: trimmed,
+      previousCustomName
+    })
+    onTerminalRename(id, trimmed)
+  }, [onTerminalRename])
+
+  // Cleanup any pending title-click timer on unmount.
+  useEffect(() => {
+    return () => {
+      if (pendingTitleClickRef.current) {
+        window.clearTimeout(pendingTitleClickRef.current.timer)
+        pendingTitleClickRef.current = null
+      }
+    }
+  }, [])
+
   return (
     <>
       <div ref={gridWrapperRef} className={`terminal-grid-wrapper ${hidden ? 'terminal-grid-hidden' : ''}`}>
@@ -1504,16 +1801,38 @@ export const TerminalGrid = memo(function TerminalGrid({
                       />
                     ) : (
                       <span
-                        className="terminal-grid-title"
-                        onDoubleClick={(e) => {
-                          e.stopPropagation()
-                          handleStartEdit(termInfo.id, termInfo.customName)
+                        ref={(el) => {
+                          if (el) titleAnchorsRef.current.set(termInfo.id, el)
+                          else titleAnchorsRef.current.delete(termInfo.id)
                         }}
+                        className="terminal-grid-title"
+                        onClick={(e) => handleTitleClick(e, termInfo.id)}
+                        onDoubleClick={(e) => handleTitleDoubleClick(e, termInfo.id, termInfo.customName)}
                         title={t('terminalGrid.editTitle')}
                       >
                         {termInfo.title}
                       </span>
                     )}
+                    <TerminalTitleMenu
+                      open={titleMenuTerminalId === termInfo.id}
+                      onRequestClose={() => setTitleMenuTerminalId(null)}
+                      anchorEl={titleAnchorsRef.current.get(termInfo.id) ?? null}
+                      onRename={() => {
+                        debugLog('titleMenu:rename', {
+                          stage: 'start',
+                          terminalId: termInfo.id,
+                          source: 'menu',
+                          currentCustomName: termInfo.customName
+                        })
+                        handleStartEdit(termInfo.id, termInfo.customName)
+                      }}
+                      onUseBranch={() => handleTitleSnapshotRename(termInfo.id, terminalInfos[termInfo.id]?.branch ?? '', 'branch')}
+                      onUseRepoName={() => handleTitleSnapshotRename(termInfo.id, terminalInfos[termInfo.id]?.repoName ?? '', 'repo')}
+                      branch={terminalInfos[termInfo.id]?.branch ?? null}
+                      repoName={terminalInfos[termInfo.id]?.repoName ?? null}
+                      forceClose={hidden || globalOverlayActive}
+                    />
+
                     {branch && (
                       <span
                         className={`${branchClassName} terminal-grid-copyable`}

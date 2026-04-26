@@ -664,6 +664,39 @@ test/run-git-nested-submodules-autotest.sh
 test/run-git-nested-submodules-autotest.ps1
 ```
 
+### Phase 0.12: Terminal Title Rename Menu
+
+Source set: terminal title single-click dropdown menu and double-click inline rename regression suite
+
+- `TTM-00` / `TTM-00a`: debug API and terminal session are ready
+- `TTM-01`: single-click on the title delays menu open for ~220ms so a following double-click can pre-empt it
+- `TTM-02`: menu contains exactly three items in the order `rename`, `use-branch`, `use-repo`
+- `TTM-03`: clicking the "Rename" item enters the inline edit state for the current terminal
+- `TTM-04`: clicking "Use branch name" writes a one-shot snapshot of the current Git branch to `customName`
+- `TTM-05`: clicking "Use Git folder name" writes a one-shot snapshot of the repository folder name to `customName`
+- `TTM-06`: when both branch and repoName are unknown, both quick-name items are disabled with an explanatory tooltip
+- `TTM-07`: when only branch is known, only the "Use branch name" item is enabled
+- `TTM-08`: the quick-name result is a frozen snapshot — subsequent branch changes do not retroactively rewrite `customName`
+- `TTM-09`: very long branch names (>100 chars) are stored verbatim without layout breakage
+- `TTM-10`: disabled items cannot be triggered programmatically through the debug API
+- `TTM-11`: a double-click that arrives within 220ms cancels the pending menu and enters inline rename instead
+- `TTM-12`: a single-click that is not followed by a double-click within 220ms reliably opens the menu
+- `TTM-13`: two rapid single-clicks on different terminal titles only open the menu on the last one
+- `TTM-14`: a plain double-click on the title still enters inline rename directly (no menu flash)
+- `TTM-15`: the existing left-side `TerminalDropdown` trigger is still present and unaffected
+- `TTM-16`: inline rename finish (save) and cancel (discard) flows work via the debug API (ESC/ENTER/blur equivalents)
+- `TTM-17`: the menu can be closed through the `closeTitleMenu` debug API (stand-in for `forceClose`)
+- `TTM-18`: pressing Escape while the menu is open closes the menu
+- `TTM-19`: a mousedown outside the anchor and menu closes the menu
+- `TTM-20`: structured trace events `titleMenu:open` / `titleMenu:snapshot` / `titleMenu:rename` (stages start/commit/cancel) emit on the production code paths when `ONWARD_DEBUG=1`. Pins the event-name contract so future renames trip CI
+
+Launch:
+
+```bash
+# macOS / Linux
+test/run-terminal-title-rename-autotest.sh
+```
+
 ### Phase 5.7: Terminal Focus Activation
 
 Source set: terminal focus activation regression suite

@@ -10,6 +10,7 @@
  */
 import type { AutotestContext, TestResult, TestSuiteResult } from './types'
 import { testTerminalAutofollow } from './test-terminal-autofollow'
+import { testTerminalTitleRename } from './test-terminal-title-rename'
 import { testPromptSender } from './test-prompt-sender'
 import { testPromptList } from './test-prompt-list'
 import { testPromptIntegrity } from './test-prompt-integrity'
@@ -163,6 +164,13 @@ export async function runAllTests(ctx: AutotestContext): Promise<void> {
       const results = await testTerminalAutofollow(ctx)
       collectSuiteResults('TerminalAutofollow', results)
       await sleep(400)
+    }
+
+    if (!ctx.cancelled() && shouldRun('terminal-title-rename')) {
+      log('phase0.12:begin')
+      const results = await testTerminalTitleRename(ctx)
+      collectSuiteResults('TerminalTitleRename', results)
+      await sleep(300)
     }
 
     if (!ctx.cancelled() && shouldRun('feedback')) {

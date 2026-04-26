@@ -481,6 +481,40 @@ export interface TerminalDebugApi {
   scrollLinesAsUser: (terminalId?: string, lines?: number) => boolean
   forceFit: (terminalId?: string) => boolean
   remountTerminal: (terminalId?: string) => boolean
+  getTerminalTitle: (terminalId?: string) => string | null
+  getTerminalCustomName: (terminalId?: string) => string | null
+  getTerminalGitInfo: (terminalId?: string) => {
+    branch: string | null
+    repoName: string | null
+    cwd: string | null
+    repoRoot: string | null
+  } | null
+  openTitleMenu: (terminalId?: string) => boolean
+  closeTitleMenu: () => boolean
+  clickTitleMenuItem: (item: 'rename' | 'use-branch' | 'use-repo', terminalId?: string) => boolean
+  getTitleMenuState: (terminalId?: string) => {
+    open: boolean
+    branch: string | null
+    repoName: string | null
+    canUseBranch: boolean
+    canUseRepo: boolean
+  } | null
+  simulateTitleSingleClick: (terminalId?: string) => boolean
+  simulateTitleDoubleClick: (terminalId?: string) => boolean
+  finishInlineRename: (value?: string) => boolean
+  cancelInlineRename: () => boolean
+  getInlineRenameState: () => { editingId: string | null; editingTitle: string }
+  setTerminalGitInfoOverride: (
+    terminalId: string,
+    override: {
+      branch?: string | null
+      repoName?: string | null
+      cwd?: string | null
+      repoRoot?: string | null
+      status?: 'clean' | 'modified' | 'added' | 'unknown' | null
+    } | null
+  ) => boolean
+  closeAllSubpages: () => boolean
 }
 
 export interface SettingsDebugApi {

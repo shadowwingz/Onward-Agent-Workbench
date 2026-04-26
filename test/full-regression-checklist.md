@@ -193,6 +193,7 @@ SCRIPTS=(
   test/run-terminal-focus-activation-autotest.sh
   test/run-terminal-perf-autotest.sh
   test/run-terminal-stress-autotest.sh
+  test/run-terminal-title-rename-autotest.sh
 )
 
 printf 'Full regression log: %s\n' "$FULL_LOG" | tee -a "$FULL_LOG"
@@ -245,7 +246,7 @@ fi
 Expected summary for the macOS pass:
 
 ```text
-Passed: 39
+Passed: 40
 Failed: 0
 Skipped: 1
 ```
@@ -289,6 +290,7 @@ The full pass covers these areas:
 - Terminal focus activation
 - Terminal performance
 - Terminal stress
+- Terminal title menu (single-click dropdown + double-click rename + git-branch / git-folder quick naming snapshot)
 
 ## Focused Rerun Commands
 
@@ -312,6 +314,7 @@ Use the same pattern for:
 - `test/run-project-editor-markdown-session-restore-autotest.sh`
 - `test/run-prompt-integrity-autotest.sh`
 - `test/run-prompt-sender-autotest.sh`
+- `test/run-terminal-title-rename-autotest.sh`
 
 For Git Diff multi-submodule focused reruns:
 
