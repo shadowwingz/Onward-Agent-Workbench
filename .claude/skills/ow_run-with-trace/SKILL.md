@@ -1,5 +1,5 @@
 ---
-name: run-with-trace
+name: ow_run-with-trace
 description: Launch the Onward dev build with ONWARD_PERF_TRACE=1 so a Chrome Trace Event Format file is captured under `traces/perf/`. After the user quits the app, automatically open the trace in a local Perfetto UI (no prompt). If no dev build exists yet, build it first via `pnpm dist:dev`. Use when the user says "run with trace" / "抓取性能日志 / 打开性能追踪" / wants to inspect perf interactively. Development-only; never runs against a production build.
 ---
 

@@ -1,5 +1,5 @@
 ---
-name: push-daily-build
+name: ow_push-daily-build
 description: Push local commits, create a daily build tag, trigger GitHub Actions CI, and verify the entire release pipeline. Use this skill when the user asks to push and trigger a daily build, create a release tag, publish a daily build, or trigger a build.
 ---
 

@@ -1,5 +1,5 @@
 ---
-name: clean-test-data
+name: ow_clean-test-data
 description: One-click cleanup for ever-growing local test data — Chrome trace exports under `traces/perf/`, autotest logs under `traces/test-logs/`, full-regression run dirs under `test/full-regression-results/`, and renderer-side autotest scratch under `test/autotest/results/`. Use when the user wants to free disk space, clear stale runs before a fresh capture, or get a clean slate for `python3 test/autotest/run-full-regression.py`. Never touches committed fixtures, source code, or anything tracked in git.
 ---
 
@@ -30,7 +30,7 @@ delete.
 
 ## Argument routing
 
-The user's `args` (anything they typed after `/clean-test-data`) maps to
+The user's `args` (anything they typed after `/ow_clean-test-data`) maps to
 flags on `scripts/clean-test-data.py`:
 
 | User input                                  | Script invocation                                       |
