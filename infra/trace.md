@@ -476,7 +476,7 @@ and closes with `\n  {}\n]}` on any of `app.on('will-quit')` /
 (sudden crash), Perfetto UI still loads the truncated array; reading
 the file in Node requires `text.replace(/,\s*$/,"")+"]}"` before
 `JSON.parse`. The T02 self-check runner
-(`test/run-trace-infra-self-check-autotest.sh`) performs both
+(`test/autotest/run-trace-infra-self-check-autotest.sh`) performs both
 validations.
 
 ---
@@ -502,7 +502,7 @@ ONWARD_PERF_TRACE=1 pnpm dev
 
 **From an autotest** — set `ONWARD_PERF_TRACE=1` alongside
 `ONWARD_AUTOTEST=1` on the runner. Example template:
-`test/run-trace-infra-self-check-autotest.sh`.
+`test/autotest/run-trace-infra-self-check-autotest.sh`.
 
 Artefact: `<repoRoot>/traces/perf/perf-trace-<ISO>-<pid>.json`.
 `latest.txt` in the same directory points at the last session.
@@ -575,7 +575,7 @@ printf 'SELECT name, COUNT(*) FROM slice GROUP BY name;\n' > /tmp/q.sql
 
 ### 5.5 T02 self-check (regression)
 
-`test/run-trace-infra-self-check-autotest.sh` runs as part of the
+`test/autotest/run-trace-infra-self-check-autotest.sh` runs as part of the
 v0.3 full regression. It launches Onward with `ONWARD_PERF_TRACE=1`
 for ~6 s, asserts the file exists and parses, asserts at least one
 `main:*` slice, and (when `trace_processor_shell` is locally
@@ -601,8 +601,10 @@ Adding a new trace event — five steps, no step skipped:
 4. Update § 2 of this file — move rows from § 3 "Planned" to the
    appropriate § 2 subsection, or append a new row if it's brand new.
 5. If the event represents a user-visible performance signal, add a
-   corresponding TXX row in `test/full-regression-checklist.md` so
-   the signal is protected by regression.
+   corresponding runner under `test/autotest/run-<suite>-autotest.sh`
+   and append it to the `SCRIPTS` list in
+   `test/autotest/run-full-regression.py` so the signal is protected
+   by regression.
 
 Forbidden:
 
@@ -662,9 +664,8 @@ a JavaScript SDK or a protobuf alternative that is declared
 | `src/utils/perf-trace.ts` | Renderer emitter (IPC to main) |
 | `src/utils/perf-monitor.ts` | Renderer 1 s snapshot aggregator |
 | `infra/scripts/open_trace.sh` | One-liner trace opener (local tp_shell + pinned UI) |
-| `test/run-trace-infra-self-check-autotest.sh` | T02 baseline self-check |
-| `test/full-regression-checklist.md` | Regression index, § 11 "Trace infrastructure" |
+| `test/autotest/run-trace-infra-self-check-autotest.sh` | Trace baseline self-check |
+| `test/autotest/run-full-regression.py` | Regression orchestrator + canonical runner list |
 | `docs/debug-env-variables.md` | `ONWARD_PERF_TRACE`, `ONWARD_REPO_ROOT` flags |
 | `docs/Off-Renderer Threaded Design - Electron Refactor.md` | Architectural constraint for any perf change |
-| `docs/repo-wide-performance-architecture-migration-plan.md` | Ongoing perf-architecture migration plan |
 | `scripts/migrate-perf-trace-literals.mjs` | One-shot helper promoting literals to registry constants (kept for audit) |

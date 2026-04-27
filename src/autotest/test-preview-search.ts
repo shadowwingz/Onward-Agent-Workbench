@@ -6,7 +6,7 @@
 import type { AutotestContext, TestResult } from './types'
 import { buildChangeDirectoryCommand, type TerminalShellKind } from '../utils/terminal-command'
 
-const FIXTURE_FILE = 'test/preview-search-complex.md'
+const FIXTURE_FILE = 'test/autotest/fixtures/preview-search-complex.md'
 const SEARCH_KEYWORD = 'system'
 const SCROLL_SETTLE_MS = 600
 const CENTERING_TOLERANCE = 0.22

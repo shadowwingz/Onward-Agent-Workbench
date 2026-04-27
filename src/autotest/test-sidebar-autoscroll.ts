@@ -21,12 +21,12 @@
  */
 import type { AutotestContext, TestResult } from './types'
 
-const LONG_MD = 'test/sidebar-autoscroll-long.md'
-const DEEP_MD = 'test/fixtures/sidebar-deep/alpha/beta/gamma/delta/target-leaf.md'
+const LONG_MD = 'test/autotest/fixtures/sidebar-autoscroll-long.md'
+const DEEP_MD = 'test/autotest/fixtures/sidebar-deep/alpha/beta/gamma/delta/target-leaf.md'
 // Python fixture — the outline parser's regex strategy resolves Python
 // symbols synchronously, sidestepping Monaco's JS / TS language-service
 // cold-start flakiness in autotest runs.
-const CODE_FIXTURE = 'test/fixtures/sidebar-autoscroll-code.py'
+const CODE_FIXTURE = 'test/autotest/fixtures/sidebar-autoscroll-code.py'
 
 // Dead zone is 60% of viewport so the edge is at ratio 0.30; allow a small
 // cushion for 28 px row height so ratios up to ~0.32 mean "in dead zone".
@@ -349,11 +349,11 @@ export async function testSidebarAutoscroll(ctx: AutotestContext): Promise<TestR
   const expectedAncestors = [
     'test',
     'test/fixtures',
-    'test/fixtures/sidebar-deep',
-    'test/fixtures/sidebar-deep/alpha',
-    'test/fixtures/sidebar-deep/alpha/beta',
-    'test/fixtures/sidebar-deep/alpha/beta/gamma',
-    'test/fixtures/sidebar-deep/alpha/beta/gamma/delta'
+    'test/autotest/fixtures/sidebar-deep',
+    'test/autotest/fixtures/sidebar-deep/alpha',
+    'test/autotest/fixtures/sidebar-deep/alpha/beta',
+    'test/autotest/fixtures/sidebar-deep/alpha/beta/gamma',
+    'test/autotest/fixtures/sidebar-deep/alpha/beta/gamma/delta'
   ]
   const expanded = new Set(api.getFileBrowserExpandedDirs!())
   const missingAncestors = expectedAncestors.filter(p => !expanded.has(p))
@@ -438,8 +438,8 @@ export async function testSidebarAutoscroll(ctx: AutotestContext): Promise<TestR
   // the deep row *not* to be visible before clicking Locate.
   // Make sure sidebar-deep is collapsed (click to toggle if currently open).
   let expandedSnapshot = new Set(api.getFileBrowserExpandedDirs!())
-  if (expandedSnapshot.has('test/fixtures/sidebar-deep')) {
-    clickItemByPath('test/fixtures/sidebar-deep')
+  if (expandedSnapshot.has('test/autotest/fixtures/sidebar-deep')) {
+    clickItemByPath('test/autotest/fixtures/sidebar-deep')
     await sleep(250)
     expandedSnapshot = new Set(api.getFileBrowserExpandedDirs!())
   }
@@ -451,7 +451,7 @@ export async function testSidebarAutoscroll(ctx: AutotestContext): Promise<TestR
     await sleep(500)
     expandedSnapshot = new Set(api.getFileBrowserExpandedDirs!())
   }
-  const ancestorCollapsed = !expandedSnapshot.has('test/fixtures/sidebar-deep')
+  const ancestorCollapsed = !expandedSnapshot.has('test/autotest/fixtures/sidebar-deep')
   const unrelatedExpanded = expandedSnapshot.has('src')
   record('SA-09-setup-state', ancestorCollapsed && unrelatedExpanded, {
     ancestorCollapsed,
@@ -471,11 +471,11 @@ export async function testSidebarAutoscroll(ctx: AutotestContext): Promise<TestR
   log('SA-09:reveal-diag', revealDiag09)
   const expandedAfter = new Set(api.getFileBrowserExpandedDirs!())
   const ancestors09 = [
-    'test', 'test/fixtures', 'test/fixtures/sidebar-deep',
-    'test/fixtures/sidebar-deep/alpha',
-    'test/fixtures/sidebar-deep/alpha/beta',
-    'test/fixtures/sidebar-deep/alpha/beta/gamma',
-    'test/fixtures/sidebar-deep/alpha/beta/gamma/delta'
+    'test', 'test/fixtures', 'test/autotest/fixtures/sidebar-deep',
+    'test/autotest/fixtures/sidebar-deep/alpha',
+    'test/autotest/fixtures/sidebar-deep/alpha/beta',
+    'test/autotest/fixtures/sidebar-deep/alpha/beta/gamma',
+    'test/autotest/fixtures/sidebar-deep/alpha/beta/gamma/delta'
   ]
   const missingAfter = ancestors09.filter(p => !expandedAfter.has(p))
   record('SA-09-ancestors-reexpanded', missingAfter.length === 0, { missingAfter })
@@ -515,8 +515,8 @@ export async function testSidebarAutoscroll(ctx: AutotestContext): Promise<TestR
   await sleep(1400)
   const expandedSA11 = new Set(api.getFileBrowserExpandedDirs!())
   const ancestors11 = [
-    'test/fixtures/sidebar-deep',
-    'test/fixtures/sidebar-deep/alpha/beta/gamma/delta'
+    'test/autotest/fixtures/sidebar-deep',
+    'test/autotest/fixtures/sidebar-deep/alpha/beta/gamma/delta'
   ]
   const missingSA11 = ancestors11.filter(p => !expandedSA11.has(p))
   const bounds11 = api.getFileBrowserActiveRowBounds!()

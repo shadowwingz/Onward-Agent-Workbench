@@ -12,7 +12,7 @@ const TINY_PNG_ALT_BASE64 =
 const TEST_IMAGE_FILENAME = '__autotest_image_diff_test.png'
 const TEST_SVG_FILENAME = '__autotest_image_diff_test.svg'
 const TEST_EDITOR_PNG_PATH = 'resources/test-preview.png'
-const TEST_EDITOR_SVG_PATH = 'test/fixtures/markdown-preview-dot.svg'
+const TEST_EDITOR_SVG_PATH = 'test/autotest/fixtures/markdown-preview-dot.svg'
 const HISTORY_REPO_DIR = '__autotest_history_repo'
 const TINY_SVG_BASE64 =
   'PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxMCAxMCI+PHJlY3Qgd2lkdGg9IjEwIiBoZWlnaHQ9IjEwIiBmaWxsPSJyZWQiLz48L3N2Zz4K'

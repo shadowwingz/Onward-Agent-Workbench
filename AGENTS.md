@@ -27,19 +27,32 @@ For platform-related commands, always consider these three platforms:
     - Any new or modified UI copy must be integrated through the i18n module / dictionary and accessed by key. Do not continue hardcoding single-language strings inside components.
     - For multilingual changes that affect UI layout or interaction, you must also verify language-specific differences in text length, wrapping, truncation, alignment, button width, and dialog layout, to ensure every supported language remains usable and visually correct.
     - If a change affects language settings, persisted storage, main-process menus, the tray, system dialogs, or other non-renderer copy, you must also update the corresponding settings storage, main-process mappings, and fallback logic.
-- When the user explicitly asks for automated testing after describing the task requirements:
-    - You must create automated test scripts based on the user's requirements and code changes, and run them completely.
-    - Ensure the functionality, new features, or bug fixes mentioned by the user are fully resolved.
-    - Expand test cases from the requirements to cover different operation paths and entry points.
-    - Add as complete a set of test cases as possible and run them all; only report completion after all tests pass.
-    - Newly created test scripts must be stored under the `test` directory, and the relevant documentation must be updated for reuse.
-    - Fixture files must live on disk, not inlined. Any binary or non-trivial fixture a test constructs — PDF, EPUB, images, sample source files, sample git repos — must be written as a real file under `test/` (or `test/fixtures/<suite>/`). Do NOT embed base64 blobs inside `.ts` / `.js` test sources. Rationale: fixtures are reusable across tests, regenerable from a builder script, diffable, and inspectable by opening them directly. Tests should copy the fixture into their working directory via a terminal command (`cp` on POSIX, `Copy-Item` on Windows) so the flow mirrors what a real user would see.
-- Hard rule — Test fixture isolation: when running tests, construct a self-contained fixture set covering cases that range from simple to complex (including code structure and folder structure), materialize it under a dedicated test working directory, and use that directory as the test's `cwd`. Requirements:
-    1. Never read from or operate against the user's real data. Do not target the user's Home directory, root directory, or any other path outside the project. In particular, do not pass `$HOME`, `~`, `/`, or other system-level paths as the test working directory.
-    2. Tests must operate exclusively inside the dedicated test working directory you created for that suite.
-    3. If the target test working directory does not exist on the user's machine, create it before the test runs.
-    4. The test working directory must be committed as a reusable test asset under the `test/` directory (e.g. `test/fixtures/<suite-name>/`), so it ships with the repository and can be reused by future runs and by CI.
-- Hard rule — Automated-test scratch locations and cleanup: any directory or file you create while running automated tests must live either under this project tree (preferably `test/fixtures/<suite>/` or `test/` scratch paths) or under the OS global temporary directory (`${TMPDIR:-/tmp}` on macOS/Linux, `%TEMP%` on Windows). Never create scratch directories in the user's Home directory, on the desktop, or anywhere else outside these two roots. After the automated test finishes — pass or fail — delete every scratch file or directory you created for that run; committed reusable fixtures under `test/fixtures/**` are exempt and must be preserved. Deletion applies equally to success and failure paths, so wrap cleanup in a `trap` / `finally` / `Register-EngineEvent` so it still runs when a test aborts or is interrupted.
+- ## Automated tests — directory layout, fixture rules, cleanup
+    - **Repo layout** (single source of truth — never invent other paths):
+        - `test/autotest/` — every test program: `.sh` / `.ps1` runners, `run-full-regression.py` orchestrator, `run-with-timeout.mjs`, `resolve-dev-app-bin.sh` / `Resolve-DevAppBin.ps1`, `create-*-fixture.mjs` / `prepare-*-fixture.mjs`, E2E sources `test-*.{ts,mjs,js}`, validators / verifiers, stress harnesses.
+        - `test/autotest/fixtures/` — every reusable fixture: per-suite directories (`<suite>/`), the SQLite corpus (`sqlite/`), and content fixtures (`markdown-*.md`, `mermaid-*.md`, `outline-fixture.py`, `dl_math_foundations.md`, `preview-search-complex.md`, etc.).
+        - `test/autotest/results/` — runner-internal scratch output (gitignored).
+        - `test/unittest/` — Node test runner / `assert`-style unit harnesses (`*.test.{mjs,mts}`, `*-unit.mjs`).
+        - `test/full-regression-results/` — `run-full-regression.py` output (`summary.log`, `summary.json`, `logs/<suite>.log`); local-only, gitignored.
+        - `test/` top level holds **only** `README.md` plus the four directories above. Do not create new files at `test/` top level.
+    - **Hard rule — Test program / fixture placement:**
+        - Any new runner, orchestrator, fixture builder, or E2E test source goes under `test/autotest/`. Any new unit harness goes under `test/unittest/`. Reusable fixtures (binaries, sample repos, sample source files, content samples) go under `test/autotest/fixtures/<suite>/`.
+        - Fixture files MUST live on disk, not inlined. Do NOT embed base64 blobs inside `.ts` / `.js` test sources for PDFs, EPUBs, images, sample git repos, or sample source files. Tests should copy the fixture into their working directory via a terminal command (`cp` on POSIX, `Copy-Item` on Windows) so the flow mirrors what a real user would see.
+        - When the user asks for an automated test after describing requirements, you MUST: (a) create scripts that exercise common paths + high-frequency paths + stress paths, (b) materialise fixtures on disk under `test/autotest/fixtures/<suite>/`, (c) run every case, and (d) only report completion when every assertion is green.
+    - **Hard rule — Test fixture isolation (cwd):**
+        1. Never read from or operate against the user's real data. Do not target `$HOME`, `~`, `/`, or any path outside the project.
+        2. Tests must operate exclusively inside a dedicated test working directory you create for that suite.
+        3. If the working directory does not exist, create it before the test runs.
+        4. The committed reusable fixtures live under `test/autotest/fixtures/<suite>/` so they ship with the repo and CI can reuse them; a per-run scratch copy is materialised inside the OS temp dir (`${TMPDIR:-/tmp}` on macOS/Linux, `%TEMP%` on Windows) or under `test/autotest/results/<suite>/` (gitignored).
+    - **Hard rule — Scratch locations and cleanup:**
+        - Anything created during a test run must live either under the project tree (preferably `test/autotest/fixtures/<suite>/` for committed fixtures or `test/autotest/results/<suite>/` for scratch) or under the OS temp directory. Never under the user's Home, Desktop, or any system-level path.
+        - After the test finishes — pass or fail — delete every scratch file or directory you created. Committed reusable fixtures under `test/autotest/fixtures/**` are exempt and must be preserved.
+        - Deletion applies equally to success, failure, and signal paths: wrap cleanup in a `trap` (bash) / `finally` (Python / Node) / `Register-EngineEvent` (PowerShell) so it still runs when a test aborts or is interrupted.
+    - **Hard rule — Autotest fixture placement and `__autotest_*` sweep:**
+        - When designing a new TS autotest under `src/autotest/**`, fixtures it constructs at runtime must be created in the OS temp directory, NOT directly inside `rootPath` / `ONWARD_AUTOTEST_CWD` when that path is the repo root. Writing into the repo root pollutes the working tree and shows up in `git status` after every run, especially when the app crashes mid-test before TS-side cleanup runs.
+        - Existing autotests that still write `__autotest_*` entries into `rootPath` are legacy. Until they migrate, every runner that invokes them MUST install an `EXIT` trap (bash) / `finally` block (Python / Node) that sweeps direct repo-root children matching `__autotest_*` and removes them. The Python orchestrator `test/autotest/run-full-regression.py` performs the same sweep after every script as defence-in-depth — runner-level traps are still required, the orchestrator sweep does not replace them.
+        - The `__autotest_` filename prefix is reserved as a sentinel for "autotest-generated fixture, safe to delete on cleanup". Do not reuse it for any persistent file or for fixtures intended to live under `test/autotest/fixtures/**`. If `__autotest_*` entries persist in the repo root after a test run, that is a bug — fix the source autotest's cleanup OR the runner's EXIT trap; do not just `rm` and move on.
+        - Preferred long-term path: TS allocates a per-suite tempdir via main-process IPC (or accepts an explicit `ONWARD_AUTOTEST_FIXTURE_DIR`), constructs fixtures inside it, and the runner sets that env to a `mktemp -d` path it owns and removes on EXIT. This makes the leak class structurally impossible.
 - Icon sizing guidelines
     - The macOS app icon must follow the safe-area proportions from Apple Design Resources to avoid appearing oversized in the Dock / Mission Control.
     - Use `resources/icon.svg` as the single source of truth. After changes, fully regenerate `resources/icons/**`, `icon.icns`, `icon.ico`, and `icon.png`.
@@ -64,7 +77,7 @@ For platform-related commands, always consider these three platforms:
     2. For every path that is on a hot loop, is latency-sensitive from the user's point of view, or could regress silently under load, register an event name in `src/utils/perf-trace-names.ts` and instrument it (`perfTraceLogger.record(…)` main, `perfTrace(…)` renderer).
     3. Duration-bearing paths emit `ph='X'` spans (duration in ms in the payload); instantaneous events emit `ph='i'`.
     4. Update `infra/trace.md` § 2 "Implemented trace events" with the new rows, and move anything you implement off the § 3 "Planned" list.
-    5. Regression coverage: if the event represents a user-visible perf signal, add a matching TXX row in `test/full-regression-checklist.md`.
+    5. Regression coverage: if the event represents a user-visible perf signal, add a matching runner under `test/autotest/run-<suite>-autotest.sh` and append it to the `SCRIPTS` list in `test/autotest/run-full-regression.py`.
   `infra/trace.md` is the authoritative index — consult it before writing any perf-related code, and keep it current. This rule overrides any instinct to "add instrumentation later"; instrumentation is part of the feature's definition of done.
 - Debugging principles (performance / lag issues):
     - **Data-first**: no performance optimization, lag diagnosis, or "experience" tweak without a trace in hand. When data is missing, report that a capture is needed and take one; do not guess the bottleneck from reading code.
@@ -113,12 +126,11 @@ For platform-related commands, always consider these three platforms:
         3. **File-system operations**: path length limits, case sensitivity, reserved filenames (`CON`, `NUL`, etc. on Windows), symlink behavior, and file-locking semantics.
     - When writing or reviewing platform-related code, always ask: "Will this behave correctly on the other two platforms?" If unsure, add explicit handling or at minimum a `TODO(cross-platform)` comment explaining the risk.
     - Automated tests that touch any of the above areas should include platform-specific assertions or be clearly marked as platform-conditional.
-- Hard rule — New feature / bug-fix 5-step SOP:
-    1. Before writing code, add the FXX / TXX row to `test/full-regression-checklist.md` — even if it's just a `🚧 TODO` placeholder. No test registration, no implementation work.
-    2. Create `test/<suite>/` (for a new runner) or amend the existing suite. Every runner must carry an SPDX header and write its log to `<repoRoot>/traces/test-logs/<suite>.log`.
-    3. Fixtures go under `test/fixtures/<suite>/`. Reusable binaries live as real files, not base64 blobs in TS. Committed fixtures are excluded from the automated-test cleanup rule.
-    4. If the change has a perf dimension, add the new event name to `src/utils/perf-trace-names.ts` first, then instrument, then update `infra/trace.md` § 2.
-    5. Before reporting the task complete, run T01 smoke + T02 trace self-check (`test/run-trace-infra-self-check-autotest.sh`) + this feature's TXX, and confirm all three are green.
+- Hard rule — New feature / bug-fix 4-step SOP:
+    1. Create the runner under `test/autotest/run-<suite>-autotest.sh` (and the matching `.ps1` for Windows) or amend an existing one. Every runner must carry an SPDX header and write its log to `<repoRoot>/traces/test-logs/<suite>.log`. Append the new runner to the `SCRIPTS` list in `test/autotest/run-full-regression.py` so the orchestrator picks it up.
+    2. Fixtures go under `test/autotest/fixtures/<suite>/`. Reusable binaries live as real files, not base64 blobs in TS. Committed fixtures are excluded from the automated-test cleanup rule.
+    3. If the change has a perf dimension, add the new event name to `src/utils/perf-trace-names.ts` first, then instrument, then update `infra/trace.md` § 2.
+    4. Before reporting the task complete, run the trace self-check (`test/autotest/run-trace-infra-self-check-autotest.sh`) and the new runner via `python3 test/autotest/run-full-regression.py --only run-<suite>`; confirm both are green.
 - Every task completion report must include:
     1. What is the task goal of the code, and what solution / design approach was used?
     2. What changes were made to which files?
@@ -142,7 +154,7 @@ The app supports two update channels with different tag formats and auto-update 
 
 ## Full Regression Testing
 
-When the user asks for a full regression test, refer to `test/full-regression-checklist.md` for the standard checklist, coverage scope, and validation steps.
+When the user asks for a full regression run, execute `python3 test/autotest/run-full-regression.py`. That Python file is the single source of truth for the regression set, the per-runner timeout, the kill / cleanup contract, and the output layout. To add or remove a case, modify its `SCRIPTS` list directly — do not introduce a separate driver, checklist, or wrapper script. Output lands in `test/full-regression-results/<UTC-timestamp>/` (`summary.log`, `summary.json`, `logs/<suite>.log`); that directory is gitignored — share its contents by quoting the relevant excerpts back to the user, not by committing the run.
 
 ## Lessons Learned
 

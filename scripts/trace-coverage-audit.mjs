@@ -4,12 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  *
  * Performance-trace coverage audit. Three-way differential between:
- *   1. The Event Registry table in docs/performance-trace-update-plan.md
+ *   1. The canonical Event Registry in src/utils/perf-trace-names.ts
  *   2. Code grep — performanceTrace.<method>('name', ...) call sites,
  *      plus the implicit 'terminal.task.state' emitted by markTaskX.
  *   3. A trace JSON file (--latest finds the newest under userData).
  *
- * The contract test (test/validate-performance-trace-contract.mjs) proves
+ * The contract test (test/autotest/validate-performance-trace-contract.mjs) proves
  * THAT specific events fire under a scripted scenario; this auditor proves
  * THAT no event registered in the contract is silently un-emitted, no
  * code path emits an unregistered name, and no surprise event names slip
@@ -28,21 +28,21 @@ import { homedir, platform } from 'node:os'
 const __filename = fileURLToPath(import.meta.url)
 const ROOT = resolve(dirname(__filename), '..')
 
-// ---------- 1. Registry (markdown table in the plan doc) ----------
+// ---------- 1. Registry (canonical TS object in perf-trace-names.ts) ----------
 function readRegistry() {
-  const planPath = join(ROOT, 'docs/performance-trace-update-plan.md')
-  const raw = readFileSync(planPath, 'utf8')
-  // Capture the table after the "## Event Registry" heading until the next ## heading.
-  const start = raw.indexOf('## Event Registry')
-  if (start < 0) throw new Error(`No "## Event Registry" section in ${planPath}`)
-  const after = raw.slice(start)
-  const end = after.indexOf('\n## ', 1)
-  const block = end > 0 ? after.slice(0, end) : after
+  const registryPath = join(ROOT, 'src/utils/perf-trace-names.ts')
+  const raw = readFileSync(registryPath, 'utf8')
   const names = new Set()
-  // Match | `event.name` | ...
-  const re = /^\|\s*`([\w.\-]+)`\s*\|/gm
+  // Match `KEY: 'event.name',` lines inside the PERF_TRACE_EVENT object.
+  // Trace names follow the convention <prefix>:<dotted.subject> where prefix
+  // is `main`, `renderer`, or `worker.<kind>` — capture single-quoted strings
+  // that contain a colon so we ignore unrelated string literals in comments.
+  const re = /^\s*[A-Z][A-Z0-9_]*\s*:\s*'([\w.\-]*[:][\w.\-]+)'\s*,?\s*$/gm
   let m
-  while ((m = re.exec(block))) names.add(m[1])
+  while ((m = re.exec(raw))) names.add(m[1])
+  if (names.size === 0) {
+    throw new Error(`No event names found in ${registryPath}`)
+  }
   return names
 }
 
@@ -146,7 +146,7 @@ const traceContract = new Set([...traceContractRaw].filter(n => !n.startsWith('t
 console.log(`\n========================================================================`)
 console.log(`Performance-trace coverage audit`)
 console.log(`========================================================================`)
-console.log(`Registry  (docs/performance-trace-update-plan.md)  : ${registry.size} names`)
+console.log(`Registry  (src/utils/perf-trace-names.ts)          : ${registry.size} names`)
 console.log(`Code grep (performanceTrace.* call sites)          : ${codeEmits.size} names`)
 console.log(`Trace     (${tracePath.replace(homedir(), '~')})`)
 console.log(`         total events                              : ${trace.total}`)

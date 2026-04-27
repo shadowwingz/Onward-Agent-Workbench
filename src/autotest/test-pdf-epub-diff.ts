@@ -23,13 +23,13 @@
 import type { AutotestContext, TestResult } from './types'
 
 /**
- * Fixtures live on disk under `test/fixtures/pdf-epub/`. The setup command
+ * Fixtures live on disk under `test/autotest/fixtures/pdf-epub/`. The setup command
  * copies the base and "alt" variants into a temp repo via `cp` / `Copy-Item`,
  * avoiding inlined base64 blobs. Regenerate with
- * `node test/fixtures/pdf-epub-fixture-builder.mjs --write`.
+ * `node test/autotest/fixtures/pdf-epub-fixture-builder.mjs --write`.
  */
 
-const FIXTURE_REL_DIR = 'test/fixtures/pdf-epub'
+const FIXTURE_REL_DIR = 'test/autotest/fixtures/pdf-epub'
 const PDF_BASE_FIXTURE = 'onward-autotest.pdf'
 const PDF_ALT_FIXTURE = 'onward-autotest.alt.pdf'
 const EPUB_BASE_FIXTURE = 'onward-autotest.epub'

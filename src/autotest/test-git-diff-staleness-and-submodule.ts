@@ -8,7 +8,7 @@ import type { AutotestContext, TestResult } from './types'
 /**
  * Git Diff staleness + submodule c/m/u filter regression suite (GDS-01..GDS-12).
  *
- * The fixture builder (test/create-git-diff-staleness-fixture.mjs) creates two
+ * The fixture builder (test/autotest/create-git-diff-staleness-fixture.mjs) creates two
  * sibling repos under one tempRoot:
  *   - clean/root              parent + clean submodule, both work trees clean
  *   - pointer-changed/root    same shape but with the submodule HEAD advanced

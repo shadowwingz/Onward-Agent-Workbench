@@ -4,13 +4,20 @@ release/
 dist/
 .pnpm-store/
 *.log
-test/results/
-test/fixtures/*/user-data/
-test/fixtures/*/workdir/
-test/e2e-update-test/
+# Python bytecode caches — created at any depth by `python3 <script>.py`.
+# No leading slash so the pattern matches `__pycache__/` and `*.pyc` in the
+# repo root as well as any subdirectory (e.g. test/autotest/__pycache__/).
+__pycache__/
+*.pyc
+test/autotest/results/
+test/autotest/fixtures/*/user-data/
+test/autotest/fixtures/*/workdir/
 # Runtime output: Perfetto / Chrome trace JSON, autotest logs, profile
 # dumps. Never committed; the directory itself is kept via traces/.gitkeep.
 traces/*
 !traces/.gitkeep
 # Local scheduled-task lock and other .claude/*.lock files produced by skill runtimes.
 .claude/*.lock
+# Full regression run outputs from test/autotest/run-full-regression.py.
+# Kept locally for inspection but never committed.
+test/full-regression-results/

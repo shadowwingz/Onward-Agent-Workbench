@@ -17,15 +17,15 @@ const PREFERRED_MARKDOWN_PATHS = [
   'docs/api-reference.md',
   'docs/architecture.md',
   'test/README.md',
-  'test/dl_math_foundations.md',
+  'test/autotest/fixtures/dl_math_foundations.md',
   'README.md'
 ]
 
 const PREFERRED_MERMAID_PATHS = [
-  'test/mermaid-complex.md',
-  'test/mermaid-medium.md',
-  'test/preview-search-complex.md',
-  'test/mermaid-simple.md'
+  'test/autotest/fixtures/mermaid-complex.md',
+  'test/autotest/fixtures/mermaid-medium.md',
+  'test/autotest/fixtures/preview-search-complex.md',
+  'test/autotest/fixtures/mermaid-simple.md'
 ]
 
 function isGeneratedPath(path: string): boolean {

@@ -53,33 +53,27 @@ git log origin/{BRANCH}..HEAD --oneline
 
 **Applies to the `daily` channel only.** Skip this phase entirely when `CHANNEL=dev`.
 
-Before touching tags, commits, or CI, ask the user whether to run the full regression pass. The user must reply **explicitly** with one of the two literal answers — **"进行"** (proceed) or **"不进行"** (skip). Do not accept ambiguous, paraphrased, or implicit answers such as "yes", "ok", "好的", "算了", a thumbs-up, or silence. If the reply is anything else, ask again until one of the two literal answers is given.
+Before touching tags, commits, or CI, ask the user whether to run the full regression pass. The user must reply **explicitly** with one of the two literal answers — **"run"** or **"skip"**. Do not accept ambiguous, paraphrased, or implicit answers such as "yes", "ok", a thumbs-up, or silence. If the reply is anything else, ask again until one of the two literal answers is given.
 
 Prompt to show the user verbatim:
 
 > This is a **daily** build, which will be auto-delivered to all daily-channel users.
 > Do you want to run the full regression test first?
 >
-> - Reply **"进行"** to run the full regression suite in `test/full-regression-checklist.md`. The daily deploy will only continue after every script passes.
-> - Reply **"不进行"** to skip the regression gate and continue directly to Phase 3.
+> - Reply **"run"** to execute the full regression suite via `python3 test/autotest/run-full-regression.py`. The daily deploy will only continue after every script passes.
+> - Reply **"skip"** to skip the regression gate and continue directly to Phase 3.
 
-**If the user replies "进行":**
+**If the user replies "run":**
 
-1. Execute the full macOS regression pass exactly as documented in `test/full-regression-checklist.md` — follow the **Build And Static Checks**, **Startup Smoke Test**, and **Full macOS Regression Command** sections in order. Do not trim, substitute, or reorder scripts.
-2. Use the aggregate log path defined by the checklist (`FULL_LOG=/tmp/onward-full-regression-<timestamp>.log`) and follow the per-script PASS/FAIL reporting pattern from the checklist.
-3. The gate is considered **passed only when** every script reports PASS and the summary block matches the expected result from the checklist:
-   ```text
-   Passed: 39
-   Failed: 0
-   Skipped: 1
-   ```
-   (The single skipped script is the Windows-only auto-update E2E, which must be run separately on Windows.)
-4. If any script fails, **stop immediately**. Report the failed script names, the aggregate log path, and the individual per-script logs to the user. Do **not** advance to Phase 3 until either:
+1. Execute `python3 test/autotest/run-full-regression.py` from the repo root. That Python file is the single source of truth — runner list, per-script timeout, kill / cleanup contract, and output layout are all owned by it. Do not invoke individual `.sh` runners by hand or wrap them in a separate driver.
+2. Output lands in `test/full-regression-results/<UTC-timestamp>/` (`summary.log`, `summary.json`, `logs/<suite>.log`). The orchestrator already prints PASS / FAIL per runner and a final summary; quote that summary verbatim back to the user.
+3. The gate is considered **passed only when** the orchestrator's final summary reports `Failed: 0` and the per-script list contains no FAIL or TIMEOUT entries. The single skipped script is the Windows-only auto-update E2E, which must be run separately on Windows.
+4. If any script fails, **stop immediately**. Report the failed script names, the aggregate log path (`test/full-regression-results/<ts>/summary.log`), and the individual per-script logs (`test/full-regression-results/<ts>/logs/<suite>.log`) to the user. Do **not** advance to Phase 3 until either:
    - The user fixes the failures, you rerun the gate, and every script passes; or
    - The user explicitly instructs you to skip the remaining gate and continue.
 5. Once the gate passes, report the summary to the user and continue to Phase 3.
 
-**If the user replies "不进行":**
+**If the user replies "skip":**
 
 Acknowledge the decision, note in the session that the regression gate was skipped for this release, and continue to Phase 3 without running any regression scripts.
 
@@ -245,7 +239,7 @@ The `package.json` version field (`2.0.1`) is only used for development builds a
 
 - **Not on master**: Stop immediately. Do not push or tag from other branches.
 - **Dirty working tree**: Warn the user. They may want to commit first.
-- **Regression gate unanswered (Daily)**: Stop. Do not advance to Phase 3 until the user replies with the literal "进行" or "不进行".
+- **Regression gate unanswered (Daily)**: Stop. Do not advance to Phase 3 until the user replies with the literal "run" or "skip".
 - **Regression gate failure (Daily)**: Stop before Phase 3. Surface the failing script names, the aggregate log path, and the relevant per-script logs under `/tmp`. Only proceed after a clean rerun or an explicit user override.
 - **Change Log draft missing**: Stop. Generate `resources/changelog/**` first.
 - **Change Log not yet confirmed**: Stop. Wait for explicit user approval before Phase 5.

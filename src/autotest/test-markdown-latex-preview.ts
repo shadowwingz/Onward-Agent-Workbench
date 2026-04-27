@@ -8,7 +8,7 @@
  */
 import type { AutotestContext, TestResult } from './types'
 
-const SAMPLE_MARKDOWN_PATH = 'test/dl_math_foundations.md'
+const SAMPLE_MARKDOWN_PATH = 'test/autotest/fixtures/dl_math_foundations.md'
 const CJK_STRONG_SOURCE = '\u7528**\u5FAE\u89C2\u8FC7\u6EE4\u673A\u5236\uFF08Micro-Level Filtering\uFF09**\u6765'
 const CJK_STRONG_HTML = '\u7528<strong>\u5FAE\u89C2\u8FC7\u6EE4\u673A\u5236\uFF08Micro-Level Filtering\uFF09</strong>\u6765'
 const CJK_CODE_SPAN_SOURCE = '`\u7528**\u4EE3\u7801\uFF09**\u6765`'

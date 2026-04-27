@@ -19,7 +19,7 @@ export async function testTerminalAutofollow(ctx: AutotestContext): Promise<Test
   // Prefer the explicit ONWARD_AUTOTEST_CWD env — in some environments the
   // Project Editor's rootPath resolves to the user's HOME instead of the
   // repo root (seen in the worktree's autotest invocations), which would
-  // route the fixture lookup to ~/test/fixtures/... and fail immediately.
+  // route the fixture lookup to ~/test/autotest/fixtures/... and fail immediately.
   const fixtureRootPath = window.electronAPI.debug.autotestCwd || rootPath
   const fixturePath = `${fixtureRootPath}${separator}test${separator}fixtures${separator}terminal-autofollow-repro.mjs`
 

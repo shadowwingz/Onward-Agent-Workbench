@@ -5,13 +5,13 @@
 
 import type { AutotestContext, TestResult } from './types'
 
-const SAMPLE_MARKDOWN_PATH = 'test/dl_math_foundations.md'
+const SAMPLE_MARKDOWN_PATH = 'test/autotest/fixtures/dl_math_foundations.md'
 const HIGHLIGHT_FIXTURE_PATH = 'docs/api-reference.md'
 const OUTLINE_SCROLL_FIXTURE_PATH = 'docs/porting-diff-analysis.md'
 const OUTLINE_SCROLL_FIXTURE_TEXT = 'Porting Diff Analysis'
-const IMAGE_FIXTURE_PATH = 'test/markdown-image-preview.md'
-const CODE_WRAP_FIXTURE_PATH = 'test/markdown-code-wrap.md'
-const CODE_OUTLINE_FIXTURE_PATH = 'test/outline-fixture.py'
+const IMAGE_FIXTURE_PATH = 'test/autotest/fixtures/markdown-image-preview.md'
+const CODE_WRAP_FIXTURE_PATH = 'test/autotest/fixtures/markdown-code-wrap.md'
+const CODE_OUTLINE_FIXTURE_PATH = 'test/autotest/fixtures/outline-fixture.py'
 const SVG_DATA_URL_PREFIX = 'data:image/svg+xml;base64,'
 const PNG_DATA_URL_PREFIX = 'data:image/png;base64,'
 

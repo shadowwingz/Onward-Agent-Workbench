@@ -440,7 +440,7 @@ Lifecycle events used to verify cleanup is hermetic:
 
 ## Automated verification mapping
 
-`test/validate-performance-trace-contract.mjs` reads the trace JSON and
+`test/autotest/validate-performance-trace-contract.mjs` reads the trace JSON and
 checks the following contracts. It does NOT verify "logs exist" — it
 verifies "the trace can reconstruct critical behaviour."
 
@@ -463,7 +463,7 @@ The other Agent's three-way audit and narration tools complete the
 
 ```mermaid
 flowchart LR
-  registry["Event Registry<br/>docs/performance-trace-update-plan.md"]
+  registry["Event Registry<br/>src/utils/perf-trace-names.ts"]
   code["Code emits<br/>performanceTrace.* call sites"]
   trace["Actual trace JSON"]
   audit["trace-coverage-audit.mjs<br/>registry x code x trace"]
@@ -521,13 +521,13 @@ Common verification commands for the macOS development build:
 
 ```bash
 rm -rf out release && ONWARD_DIST_DEV_OPEN=0 pnpm dist:dev
-bash test/run-performance-trace-autotest.sh "release/mac/Under Development 2.0.1-event_trace_gate_0424_codex.app/Contents/MacOS/Under Development 2.0.1-event_trace_gate_0424_codex"
+bash test/autotest/run-performance-trace-autotest.sh "release/mac/Under Development 2.0.1-event_trace_gate_0424_codex.app/Contents/MacOS/Under Development 2.0.1-event_trace_gate_0424_codex"
 ```
 
 The script prints the trace file path and invokes:
 
 ```bash
-node test/validate-performance-trace-contract.mjs "<trace-file>"
+node test/autotest/validate-performance-trace-contract.mjs "<trace-file>"
 node scripts/trace-coverage-audit.mjs "<trace-file>"
 node scripts/trace-narrate.mjs "<trace-file>" | head -80
 ```

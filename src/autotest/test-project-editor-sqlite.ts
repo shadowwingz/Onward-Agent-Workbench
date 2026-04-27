@@ -76,9 +76,9 @@ export async function testProjectEditorSqlite(ctx: AutotestContext): Promise<Tes
   const getApi = () => window.__onwardProjectEditorDebug
   const dbPathA = `onward-autotest-sqlite-a-${Date.now()}.sqlite`
   const dbPathB = `onward-autotest-sqlite-b-${Date.now()}.db`
-  const shopFixturePath = 'test/sqlite-fixtures/shop-orders.sqlite'
-  const mixedFixturePath = 'test/sqlite-fixtures/mixed-types.sqlite3'
-  const stressFixturePath = 'test/sqlite-fixtures/stress-large.db'
+  const shopFixturePath = 'test/autotest/fixtures/sqlite/shop-orders.sqlite'
+  const mixedFixturePath = 'test/autotest/fixtures/sqlite/mixed-types.sqlite3'
+  const stressFixturePath = 'test/autotest/fixtures/sqlite/stress-large.db'
 
   const hasCopyMenuItems = (requirePinAction: boolean) => {
     const labels = getContextMenuLabels()

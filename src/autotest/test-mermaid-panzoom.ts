@@ -14,21 +14,21 @@
 import type { AutotestContext, TestResult } from './types'
 
 const FIXTURES = [
-  'test/fixtures/mermaid-panzoom/tiny.md',
-  'test/fixtures/mermaid-panzoom/medium.md',
-  'test/fixtures/mermaid-panzoom/wide.md',
-  'test/fixtures/mermaid-panzoom/tall.md',
-  'test/fixtures/mermaid-panzoom/huge.md',
-  'test/fixtures/mermaid-panzoom/mixed-types.md'
+  'test/autotest/fixtures/mermaid-panzoom/tiny.md',
+  'test/autotest/fixtures/mermaid-panzoom/medium.md',
+  'test/autotest/fixtures/mermaid-panzoom/wide.md',
+  'test/autotest/fixtures/mermaid-panzoom/tall.md',
+  'test/autotest/fixtures/mermaid-panzoom/huge.md',
+  'test/autotest/fixtures/mermaid-panzoom/mixed-types.md'
 ] as const
 
 const EXPECTED_DIAGRAMS_PER_FIXTURE: Record<string, number> = {
-  'test/fixtures/mermaid-panzoom/tiny.md': 1,
-  'test/fixtures/mermaid-panzoom/medium.md': 3,
-  'test/fixtures/mermaid-panzoom/wide.md': 1,
-  'test/fixtures/mermaid-panzoom/tall.md': 1,
-  'test/fixtures/mermaid-panzoom/huge.md': 1,
-  'test/fixtures/mermaid-panzoom/mixed-types.md': 10
+  'test/autotest/fixtures/mermaid-panzoom/tiny.md': 1,
+  'test/autotest/fixtures/mermaid-panzoom/medium.md': 3,
+  'test/autotest/fixtures/mermaid-panzoom/wide.md': 1,
+  'test/autotest/fixtures/mermaid-panzoom/tall.md': 1,
+  'test/autotest/fixtures/mermaid-panzoom/huge.md': 1,
+  'test/autotest/fixtures/mermaid-panzoom/mixed-types.md': 10
 }
 
 export async function testMermaidPanZoom(ctx: AutotestContext): Promise<TestResult[]> {

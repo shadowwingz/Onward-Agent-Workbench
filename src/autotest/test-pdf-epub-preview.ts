@@ -6,10 +6,10 @@
 import type { AutotestContext, TestResult } from './types'
 
 /**
- * Fixtures live on disk under `test/fixtures/pdf-epub/` (see CLAUDE.md rule
+ * Fixtures live on disk under `test/autotest/fixtures/pdf-epub/` (see CLAUDE.md rule
  * "fixture files must live on disk"). The test copies them into `rootPath`
  * via a terminal command so the flow mirrors what a user would see in the
- * Files panel. Regenerate with `node test/fixtures/pdf-epub-fixture-builder.mjs --write`.
+ * Files panel. Regenerate with `node test/autotest/fixtures/pdf-epub-fixture-builder.mjs --write`.
  */
 
 const TEST_PDF_FILENAME = '__autotest_pdf_preview.pdf'
@@ -17,7 +17,7 @@ const TEST_PDF_OUTLINE_FILENAME = '__autotest_pdf_preview_outlined.pdf'
 const TEST_EPUB_FILENAME = '__autotest_epub_preview.epub'
 const TEST_MARKER_FILENAME = '__autotest_pdf_epub_marker.txt'
 
-const FIXTURE_REL_DIR = 'test/fixtures/pdf-epub'
+const FIXTURE_REL_DIR = 'test/autotest/fixtures/pdf-epub'
 const PDF_FIXTURE_SRC = 'onward-autotest.pdf'
 const PDF_OUTLINE_FIXTURE_SRC = 'onward-autotest.outlined.pdf'
 const EPUB_FIXTURE_SRC = 'onward-autotest.epub'
