@@ -39,6 +39,20 @@ function loadScheduler(fakeInputLane) {
       if (specifier === './input-priority-lane') {
         return { inputPriorityLane: fakeInputLane }
       }
+      // The scheduler took on a perf-trace dependency in master commit
+      // c4625ef. The test sandbox mocks the imports so the scheduler can
+      // load without the real renderer-side trace stack.
+      if (specifier === '../utils/perf-trace') {
+        return {
+          perfTrace: () => {},
+          perfTraceTask: () => {}
+        }
+      }
+      if (specifier === '../utils/perf-trace-names') {
+        return {
+          PERF_TRACE_EVENT: new Proxy({}, { get: (_target, prop) => String(prop) })
+        }
+      }
       return requireFromTest(specifier)
     },
     performance,

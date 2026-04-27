@@ -1,7 +1,7 @@
 <!-- SPDX-FileCopyrightText: 2026 OPPO -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
-- Hard rule: **Never create git commits automatically.** Only commit when the user explicitly asks. This applies to all branches without exception.
+- Hard rule: **Never create git commits automatically.** Only commit when (a) the user explicitly asks for a commit, or (b) the commit step is a built-in operation of a Skill the user just invoked (for example `/merge_worktree`'s merge commit, or `/generate_git_commit`). This applies to all branches without exception. "I just fixed a bug, so I'll commit it" is forbidden — staging the change and reporting back is the correct flow; the user decides when to commit.
 
 For platform-related commands, always consider these three platforms:
 1. macOS

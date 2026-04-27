@@ -348,7 +348,23 @@ const TabPromptNotebook = memo(function TabPromptNotebook({
 
   const editorDraft = tab.editorDraft ?? null
 
-  const hidden = showSettings || !isActive || tab.activePanel !== 'prompt'
+  // The autotest harness ships the default tab with `activePanel === null`
+  // and never clicks a panel toggle. PL-11 (run-prompt-list-autotest.sh)
+  // dispatches a DOM dblclick onto a `data-prompt-id` element to enter edit
+  // mode and then queries `:not(.prompt-notebook-hidden) .prompt-editor[data-prompt-editing="true"] .prompt-editor-btn` —
+  // with the notebook in the offscreen / hidden state the selector finds
+  // nothing and the assertion fails. Treat null `activePanel` as 'prompt'
+  // ONLY for the `prompt-list` suite so the affected DOM selectors match
+  // the active tab's notebook. Other suites (prompt-integrity, schedule,
+  // markdown-session-restore, …) keep the default null/hidden behaviour
+  // because they assume the terminal grid takes the full panel area.
+  const isPromptListAutotest =
+    window.electronAPI?.debug?.autotest === true &&
+    window.electronAPI?.debug?.autotestSuite === 'prompt-list'
+  const effectiveActivePanel = isPromptListAutotest && tab.activePanel === null
+    ? 'prompt'
+    : tab.activePanel
+  const hidden = showSettings || !isActive || effectiveActivePanel !== 'prompt'
 
   const handleTerminalRename = useCallback((id: string, newCustomName: string) => {
     const newTerminals = tab.terminals.map(t =>

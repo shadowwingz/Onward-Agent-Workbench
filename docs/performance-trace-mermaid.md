@@ -3,36 +3,42 @@
 
 # Performance Trace Mermaid Map
 
-本文用 Mermaid 图说明当前 performance trace 的设计：用户操作、主线程 IPC、API/Prompt Bridge、PTY 子进程、Task 状态、renderer 渲染回流分别会产生哪些 trace point，以及自动化验证如何证明这些点确实可见。
+This document uses Mermaid diagrams to describe the current performance
+trace design: which trace points are produced by user actions, main-thread
+IPC, the API / Prompt Bridge, the PTY subprocess, Task state transitions,
+and the renderer paint pipeline — and how the automated checks prove
+these points are actually visible.
 
-trace 文件采用 Chrome Trace / Perfetto 兼容 JSON，启用方式：
+The trace file uses the Chrome Trace / Perfetto compatible JSON format.
+Enable it with:
 
 ```bash
 ONWARD_PERF_TRACE=1
 ```
 
-默认不记录原始输入内容，只记录长度、行数和 hash。需要人工调试内容时才开启：
+Raw input content is NOT recorded by default — only length, line count,
+and a hash. Opt in only when manually debugging payload content:
 
 ```bash
 ONWARD_PERF_TRACE_CAPTURE_CONTENT=1
 ```
 
-另外两个运行时控制：
+Two additional runtime knobs:
 
-| 环境变量 | 作用 |
+| Environment variable | Purpose |
 | --- | --- |
-| `ONWARD_PERF_TRACE_FLUSH_SEC` | 周期性写盘间隔，默认 `30` 秒，`0` 表示只在退出或手动 flush 时写盘 |
-| `ONWARD_PERF_TRACE_MAX_MB` | 内存中 trace buffer 上限，默认 `256` MB，超限后增加 `droppedEvents` |
+| `ONWARD_PERF_TRACE_FLUSH_SEC` | Periodic flush-to-disk interval, default `30` seconds; `0` means flush only on quit or manual flush |
+| `ONWARD_PERF_TRACE_MAX_MB` | In-memory trace buffer cap, default `256` MB; once exceeded, `droppedEvents` increments |
 
-## 事件类型
+## Event types
 
 ```mermaid
 flowchart LR
   start["ph=s<br/>flow start"] --> step["ph=t<br/>flow step"]
   step --> finish["ph=f<br/>flow end"]
-  complete["ph=X<br/>complete event<br/>含 dur 耗时"]
-  instant["ph=i<br/>instant event<br/>状态/点事件"]
-  counter["ph=C<br/>counter event<br/>周期快照"]
+  complete["ph=X<br/>complete event<br/>carries dur"]
+  instant["ph=i<br/>instant event<br/>state / point event"]
+  counter["ph=C<br/>counter event<br/>periodic snapshot"]
 
   file["trace JSON"] --- start
   file --- complete
@@ -40,41 +46,42 @@ flowchart LR
   file --- counter
 ```
 
-阅读 trace 时先看三类信息：
+When reading a trace, look at three categories first:
 
-| 类型 | 用途 | 示例 |
+| Type | Use | Example |
 | --- | --- | --- |
-| `ph=X` | 看耗时 | `ui.prompt.action`, `ipc.invoke`, `pty.write`, `terminal.render.flush` |
-| `ph=i` | 看状态和发生点 | `ui.prompt.edit`, `ui.prompt.task_select`, `pty.output`, `terminal.task.state` |
-| `ph=s/t/f` | 看一条用户操作如何跨进程流动 | `ui.prompt.action -> ipc.terminal.write -> terminal.render.flush` |
-| `ph=C` | 看 1 秒级性能计数 | `perf.renderer.snapshot` |
+| `ph=X` | Inspect duration | `ui.prompt.action`, `ipc.invoke`, `pty.write`, `terminal.render.flush` |
+| `ph=i` | Inspect state and point-in-time events | `ui.prompt.edit`, `ui.prompt.task_select`, `pty.output`, `terminal.task.state` |
+| `ph=s/t/f` | Trace how one user action flows across processes | `ui.prompt.action -> ipc.terminal.write -> terminal.render.flush` |
+| `ph=C` | Inspect 1-second-granularity performance counters | `perf.renderer.snapshot` |
 
-## 新增 Diff 评价
+## Diff review of newly-added trace coverage
 
-另一个 Coding Agent 在当前工作区新增了几类 trace 能力，我已按当前目录重新审阅：
+Another Coding Agent introduced several new trace capabilities in the
+working tree; reviewed against the current directory state:
 
-| 新增改动 | 评价 | 已处理事项 |
+| Change | Verdict | Action taken |
 | --- | --- | --- |
-| `git.runtime.task` | 有价值，补上了 Git 调度器队列、并发和耗时视角，能解释 Git polling / cwd probe 是否堆积 | 已修正隐私风险：不再写原始 `repoKey` / `label`，改为长度和 hash |
-| `markdown.render.worker` | 有价值，能看到 Markdown worker 真实渲染耗时，适合排查 Project Editor / preview 卡顿 | 保留，文档补充到 Project Editor 链路 |
-| `project_editor.render.apply` | 方向正确，但原实现只量到 apply 调度时间，不是实际 DOMPurify/apply 时间 | 已移动到 idle apply 回调内部，记录 DOMPurify/setState 调用耗时 |
-| `pty.dispose` / `pty.shutdown_all` | 有价值，能确认退出、重启 agent、关闭应用时 PTY 是否被收口 | 文档补充到 PTY 生命周期 |
-| `ONWARD_PERF_TRACE_FLUSH_SEC` / `ONWARD_PERF_TRACE_MAX_MB` | 有价值，补上 crash 场景写盘和内存上限控制 | 文档补充环境变量和 trace session 字段 |
-| `scripts/trace-coverage-audit.mjs` | 有价值，补上 registry / code / trace 的三方一致性自证 | 文档补充验证链路 |
-| `scripts/trace-narrate.mjs` | 有价值，能把 trace 转成按时间排序的人类可读叙述 | 文档补充阅读链路 |
+| `git.runtime.task` | Useful — exposes the Git scheduler queue, concurrency, and duration. Explains whether Git polling / cwd probing is piling up. | Privacy issue fixed: no longer writes raw `repoKey` / `label`; uses length + hash instead. |
+| `markdown.render.worker` | Useful — surfaces real Markdown worker render duration; good for diagnosing Project Editor / preview lag. | Kept; documentation extended on the Project Editor path. |
+| `project_editor.render.apply` | Right direction, but the original implementation only measured the apply *scheduling* time, not the actual DOMPurify / apply time. | Moved into the idle apply callback so it records DOMPurify / setState invocation time. |
+| `pty.dispose` / `pty.shutdown_all` | Useful — confirms that PTY teardown is hermetic on quit, agent restart, or app close. | Documentation extended on the PTY lifecycle. |
+| `ONWARD_PERF_TRACE_FLUSH_SEC` / `ONWARD_PERF_TRACE_MAX_MB` | Useful — adds disk-flush guarantees for crash scenarios and an in-memory cap. | Documentation extended on env vars and the `trace.session.start` payload. |
+| `scripts/trace-coverage-audit.mjs` | Useful — provides a registry / code / trace three-way self-consistency check. | Documentation extended on the verification path. |
+| `scripts/trace-narrate.mjs` | Useful — converts a trace into a human-readable, time-ordered narrative. | Documentation extended on the reading path. |
 
-## 总体链路
+## End-to-end map
 
 ```mermaid
 flowchart LR
   subgraph Renderer["Renderer"]
-    edit["用户编辑 Prompt<br/>ui.prompt.edit"]
-    select["选择 Task<br/>ui.prompt.task_select"]
-    action["点击 Send / Execute / Send and Execute<br/>ui.prompt.action"]
+    edit["User edits Prompt<br/>ui.prompt.edit"]
+    select["Selects Task<br/>ui.prompt.task_select"]
+    action["Clicks Send / Execute / Send and Execute<br/>ui.prompt.action"]
     project["Project Editor Markdown preview<br/>markdown.render.worker<br/>project_editor.render.apply"]
-    renderReceive["收到终端输出<br/>terminal.render.receive"]
-    renderFlush["写入 xterm<br/>terminal.render.flush"]
-    snapshot["周期性能快照<br/>perf.renderer.snapshot"]
+    renderReceive["Terminal output received<br/>terminal.render.receive"]
+    renderFlush["Written into xterm<br/>terminal.render.flush"]
+    snapshot["Periodic perf snapshot<br/>perf.renderer.snapshot"]
   end
 
   subgraph Main["Main Process"]
@@ -88,10 +95,10 @@ flowchart LR
 
   subgraph Task["Task / PTY Process"]
     state["Task state<br/>terminal.task.state"]
-    ptyWrite["写入 PTY<br/>pty.write / pty.send_input_sequence"]
-    ptyOutput["PTY 输出<br/>pty.output"]
-    ptyLife["PTY 生命周期<br/>pty.spawn / pty.dispose / pty.shutdown_all"]
-    spawn["创建 PTY<br/>pty.spawn"]
+    ptyWrite["Write PTY<br/>pty.write / pty.send_input_sequence"]
+    ptyOutput["PTY output<br/>pty.output"]
+    ptyLife["PTY lifecycle<br/>pty.spawn / pty.dispose / pty.shutdown_all"]
+    spawn["Create PTY<br/>pty.spawn"]
   end
 
   subgraph Tools["Self-proof Tools"]
@@ -121,9 +128,10 @@ flowchart LR
   audit --> narrate
 ```
 
-## 用户在 Prompt 面板发送命令
+## User sends a command from the Prompt panel
 
-对应用户行为：编辑 Prompt，选择 Task，点击 `Send`，再点击 `Execute`，或点击 `Send and Execute`。
+User actions covered: editing the Prompt, selecting a Task, clicking
+`Send`, then `Execute`, or clicking `Send and Execute`.
 
 ```mermaid
 sequenceDiagram
@@ -140,27 +148,27 @@ sequenceDiagram
   participant TS as TerminalSessionManager
   participant Xterm as xterm
 
-  User->>PN: 输入或修改 Prompt
+  User->>PN: Type or edit Prompt
   PN-->>PN: trace ui.prompt.edit<br/>field, mode, payloadLength, payloadHash
 
-  User->>PS: 选择目标 Task
+  User->>PS: Select target Task
   PS-->>PS: trace ui.prompt.task_select<br/>terminalId, selected, selectedCount
 
-  User->>PS: 点击 Send / Execute / Send and Execute
+  User->>PS: Click Send / Execute / Send and Execute
   PS->>App: onSend / onExecute / onSendAndExecute
   App-->>App: flow start ui.prompt.action<br/>action, terminalIds, flowId, payloadLength, payloadHash
   App-->>App: complete ui.prompt.action<br/>dur, result
 
-  App->>Preload: terminal.write 或 sendInputSequence
+  App->>Preload: terminal.write or sendInputSequence
   Preload->>IPC: ipcRenderer.invoke
   IPC-->>IPC: trace terminal.task.state input_pending
-  IPC-->>IPC: flow step ipc.terminal.write 或 ipc.terminal.send_input_sequence
+  IPC-->>IPC: flow step ipc.terminal.write or ipc.terminal.send_input_sequence
   IPC-->>IPC: complete ipc.invoke<br/>channel, terminalId, result, dur
 
-  IPC->>PTY: pty.write 或 pty.send_input_sequence
+  IPC->>PTY: pty.write or pty.send_input_sequence
   PTY-->>PTY: complete pty.write / pty.send_input_sequence<br/>writeMode, includesEnter, result, dur
-  PTY-->>PTY: trace terminal.task.state running<br/>includes Enter 时
-  PTY->>Proc: 真正写入 PTY
+  PTY-->>PTY: trace terminal.task.state running<br/>when input includes Enter
+  PTY->>Proc: Actual write into the PTY
 
   Proc-->>PTY: stdout / stderr
   PTY-->>PTY: trace pty.output<br/>terminalId, bytes, bracketedPasteMode
@@ -176,7 +184,8 @@ sequenceDiagram
   TS-->>TS: flow end terminal.render.flush
 ```
 
-这条链路的关键自证点是同一个 `flowId` 会同时出现在：
+The key self-proof on this path is that the same `flowId` simultaneously
+appears in:
 
 ```mermaid
 flowchart LR
@@ -185,11 +194,16 @@ flowchart LR
   c --> d["terminal.render.flush<br/>flow end"]
 ```
 
-如果验证脚本找不到同一个 `flowId` 横跨 UI、IPC 和 renderer，则说明 trace 没有证明“用户操作到界面可见输出”的闭环。
+If the validation script cannot find a single `flowId` spanning UI, IPC,
+and renderer, the trace has not proved the closed loop from "user action"
+to "user-visible output."
 
-## HTTP API 发送到 Task
+## HTTP API sending to a Task
 
-对应程序行为：外部或测试代码调用 `/api/terminal/:id/write`，Onward 主进程把请求转成 Prompt Bridge，让 renderer 复用同一套 Prompt 发送逻辑。
+Program behaviour covered: external clients or test code call
+`/api/terminal/:id/write`; the Onward main process forwards the request
+through the Prompt Bridge so the renderer can reuse the same Prompt-send
+logic.
 
 ```mermaid
 sequenceDiagram
@@ -209,7 +223,7 @@ sequenceDiagram
   Main-->>Main: flow step prompt.bridge.send<br/>requestId, terminalId, action
   Main->>Renderer: prompt:bridge-send
 
-  Renderer->>Renderer: handleSendToTerminals 或 handleSendAndExecuteOnTerminals
+  Renderer->>Renderer: handleSendToTerminals or handleSendAndExecuteOnTerminals
   Renderer-->>Renderer: ui.prompt.action<br/>action, terminalIds, flowId, dur
   Renderer->>IPC: terminal.write / sendInputSequence
   IPC->>PTY: pty.write / pty.send_input_sequence
@@ -222,18 +236,20 @@ sequenceDiagram
   API->>Client: JSON result
 ```
 
-验证时要看：
+What to look for during validation:
 
-| 行为 | 必须出现的 trace point |
+| Behaviour | Trace points that must appear |
 | --- | --- |
-| API 收到请求 | `api.terminal.write`, `api.request` |
-| 主进程转发给 renderer | `prompt.bridge.send`, `prompt.bridge` |
-| renderer 复用 Prompt 发送逻辑 | `ui.prompt.action` |
-| 最终进入 PTY 并渲染 | `pty.write`, `pty.output`, `terminal.render.flush` |
+| API received the request | `api.terminal.write`, `api.request` |
+| Main process forwarded to renderer | `prompt.bridge.send`, `prompt.bridge` |
+| Renderer reused Prompt-send logic | `ui.prompt.action` |
+| Eventually reached the PTY and rendered | `pty.write`, `pty.output`, `terminal.render.flush` |
 
-## Task 状态机
+## Task state machine
 
-`terminal.task.state` 是用来回答“这个 Task 现在是否在工作”的核心事件。它不是单独依赖某一个命令字符串，而是从输入、执行、输出和退出推导状态。
+`terminal.task.state` is the core event answering "is this Task currently
+working?" It does not depend on a particular command string — it derives
+state from input, execution, output, and exit signals.
 
 ```mermaid
 stateDiagram-v2
@@ -248,19 +264,21 @@ stateDiagram-v2
   idle --> exited: dispose / process exit
 ```
 
-状态对应字段：
+Per-state fields:
 
-| state | 何时产生 | 关键字段 |
+| state | When emitted | Key fields |
 | --- | --- | --- |
-| `input_pending` | renderer 或 API 把输入写给某个 Task | `terminalId`, `flowId`, `inputKind`, `payloadLength`, `payloadHash` |
-| `running` | 输入里包含 Enter，代表命令被执行 | `terminalId`, `flowId`, `reason` |
-| `output_active` | PTY 产生输出 | `terminalId`, `flowId`, `bytes` |
-| `idle` | 输出停止一小段时间 | `terminalId`, `flowId`, `reason` |
-| `exited` | PTY 进程退出 | `terminalId`, `flowId`, `exitCode`, `signal` |
+| `input_pending` | renderer or API wrote input to a Task | `terminalId`, `flowId`, `inputKind`, `payloadLength`, `payloadHash` |
+| `running` | input contained Enter, meaning the command was executed | `terminalId`, `flowId`, `reason` |
+| `output_active` | PTY produced output | `terminalId`, `flowId`, `bytes` |
+| `idle` | output stopped for a short window | `terminalId`, `flowId`, `reason` |
+| `exited` | PTY process exited | `terminalId`, `flowId`, `exitCode`, `signal` |
 
-## Coding Agent / 子进程启动
+## Coding Agent / subprocess startup
 
-对应程序行为：配置并启动 coding agent，Onward 会重建目标 Task 的 PTY，让它执行 agent 命令。
+Program behaviour covered: configuring and launching a coding agent.
+Onward rebuilds the target Task's PTY so it can execute the agent
+command.
 
 ```mermaid
 sequenceDiagram
@@ -286,14 +304,16 @@ sequenceDiagram
   IPC-->>IPC: flow step coding_agent.pty.spawned
 ```
 
-这里能证明两件事：
+This proves two things:
 
-1. `coding_agent.launch` 表示 Onward 确实发起了 agent 启动。
-2. `pty.spawn` 表示 Task 背后确实通过 PTY 创建了真实进程。
+1. `coding_agent.launch` confirms Onward actually initiated the agent launch.
+2. `pty.spawn` confirms the Task was backed by a real OS process via PTY.
 
-如果启动失败，会出现 `coding_agent.launch.error` flow end；如果重启已有 Task，会同时看到旧 PTY 的 `pty.dispose` 和新 PTY 的 `pty.spawn`。
+If launch fails, a `coding_agent.launch.error` flow end is emitted; if
+the launch restarts an existing Task, you'll see the old PTY's
+`pty.dispose` paired with the new PTY's `pty.spawn`.
 
-## 输出回流与渲染耗时
+## Output backflow and render duration
 
 ```mermaid
 flowchart LR
@@ -307,18 +327,19 @@ flowchart LR
   flush --> snapshot["perf.renderer.snapshot<br/>fps, xtermWriteCount, ipcDataMsgCount"]
 ```
 
-如果界面卡顿，优先看这些事件：
+When the UI feels laggy, look at these events first:
 
-| 问题 | 优先看 |
+| Symptom | Inspect |
 | --- | --- |
-| 主进程输出太频繁 | `pty.output`, `terminal.buffer.flush`, `terminal.ipc.send` |
-| renderer 写入 xterm 慢 | `terminal.render.flush.dur`, `xtermDurationMs` |
-| 隐藏终端仍在消耗资源 | `terminal.render.receive.visible`, `terminal.render.hidden_buffer` |
-| 1 秒粒度整体负载 | `perf.renderer.snapshot` |
+| Main process emitting output too frequently | `pty.output`, `terminal.buffer.flush`, `terminal.ipc.send` |
+| Renderer slow to write into xterm | `terminal.render.flush.dur`, `xtermDurationMs` |
+| Hidden terminal still consuming resources | `terminal.render.receive.visible`, `terminal.render.hidden_buffer` |
+| Overall load at 1-second granularity | `perf.renderer.snapshot` |
 
-## Git 与 Project Editor
+## Git and Project Editor
 
-另一个 Agent 新增的两条非终端性能链路，主要用于解释“终端没卡但界面仍卡”的场景。
+Two non-terminal performance paths added by the other Agent — primarily
+to explain "the terminal isn't slow but the UI still feels slow."
 
 ```mermaid
 flowchart TD
@@ -340,15 +361,15 @@ flowchart TD
   apply --> snapshot
 ```
 
-这两条链路的限制：
+Limits of these two paths:
 
-| Trace point | 能证明什么 | 不能证明什么 |
+| Trace point | Proves | Does NOT prove |
 | --- | --- | --- |
-| `git.runtime.task` | Git scheduler 中某个任务的排队深度、并发量、成功/失败和耗时 | 默认不显示原始 repo 路径或完整 Git 参数 |
-| `markdown.render.worker` | worker 侧 Markdown 渲染耗时 | 不直接包含 DOM apply 和浏览器 paint 时间 |
-| `project_editor.render.apply` | renderer 侧 DOMPurify 和 React setState 调用耗时 | 不等同于浏览器最终 paint 完成时间 |
+| `git.runtime.task` | A Git scheduler task's queue depth, concurrency, success / failure, and duration | Does not display the raw repo path or full Git arguments by default |
+| `markdown.render.worker` | Worker-side Markdown render duration | Does not include DOM apply or browser paint time |
+| `project_editor.render.apply` | Renderer-side DOMPurify and React setState invocation duration | Not equivalent to the browser's final paint completion time |
 
-## PTY 生命周期
+## PTY lifecycle
 
 ```mermaid
 stateDiagram-v2
@@ -362,64 +383,66 @@ stateDiagram-v2
   shutdown --> [*]
 ```
 
-生命周期事件用于验证清理是否完整：
+Lifecycle events used to verify cleanup is hermetic:
 
-| 场景 | 需要看到 |
+| Scenario | Must see |
 | --- | --- |
-| 创建 Task | `pty.spawn.result=success` |
-| 调整终端尺寸 | `pty.resize.result=success` |
-| 关闭单个 Task 或重启 agent | `pty.dispose.result=success` |
-| 应用退出 | `pty.shutdown_all.total`, `closed`, `timedOut` |
+| Create a Task | `pty.spawn.result=success` |
+| Resize the terminal | `pty.resize.result=success` |
+| Close a single Task or restart an agent | `pty.dispose.result=success` |
+| App quit | `pty.shutdown_all.total`, `closed`, `timedOut` |
 
 ## Trace Point Registry
 
-| Trace point | 类型 | 位置 | 说明 | 关键字段 |
+| Trace point | Type | Location | Description | Key fields |
 | --- | --- | --- | --- | --- |
-| `trace.session.start` | instant | main | trace 会话启动 | `schema`, `platform`, `appVersion`, `contentCaptured`, `flushIntervalSec`, `maxBufferMB` |
-| `trace.session.flush` | complete | main | 写出 trace JSON | `reason`, `eventCount`, `droppedEvents`, `dur` |
-| `ui.prompt.edit` | instant | renderer | Prompt 内容或标题变化 | `field`, `mode`, `payloadLength`, `payloadLineCount`, `payloadHash` |
-| `ui.prompt.task_select` | instant | renderer | 选择或取消选择 Task | `terminalId`, `selected`, `selectedCount`, `totalCount` |
+| `trace.session.start` | instant | main | Trace session started | `schema`, `platform`, `appVersion`, `contentCaptured`, `flushIntervalSec`, `maxBufferMB` |
+| `trace.session.flush` | complete | main | Trace JSON written | `reason`, `eventCount`, `droppedEvents`, `dur` |
+| `ui.prompt.edit` | instant | renderer | Prompt content or title changed | `field`, `mode`, `payloadLength`, `payloadLineCount`, `payloadHash` |
+| `ui.prompt.task_select` | instant | renderer | Task selection toggled | `terminalId`, `selected`, `selectedCount`, `totalCount` |
 | `ui.prompt.action` | complete + flow start | renderer | Send / Execute / Send and Execute | `action`, `terminalIds`, `flowId`, `result`, `dur` |
-| `ui.prompt.action.done` | flow end | renderer | Prompt action 完成 | `successCount`, `sentOnlyCount`, `failedCount` |
-| `ui.terminal.write` | flow step | renderer | renderer 决定写终端 | `terminalId`, `action`, `payloadLength`, `payloadHash` |
-| `ui.terminal.paste` | flow step | renderer | 粘贴模式发送内容 | `terminalId`, `shellKind`, `payloadLength`, `payloadHash` |
-| `ui.terminal.send_input_sequence` | flow step | renderer | 分阶段发送输入 | `terminalId`, `kind`, `ok`, `phase` |
-| `api.terminal.write` | flow start/result | main | API 写 Task 的 flow | `terminalId`, `action`, `payloadLength`, `payloadHash`, `status` |
-| `api.terminal.write.result` | flow step | main | API 写 Task 的结果 | `terminalId`, `action`, `status`, `deliveredCount`, `failedCount` |
-| `api.request` | complete | main | HTTP API 请求 | `route`, `terminalId`, `action`, `status`, `deliveredCount`, `failedCount`, `dur` |
-| `prompt.bridge.send` | flow step | main | 主进程请求 renderer 执行 Prompt 动作 | `requestId`, `terminalId`, `action` |
-| `prompt.bridge.response` | flow step | main | renderer 返回 Prompt Bridge 结果 | `requestId`, `terminalId`, `action`, `successCount`, `failedCount` |
-| `prompt.bridge.timeout` | flow end | main | Prompt Bridge 超时 | `requestId`, `terminalId`, `action` |
-| `prompt.bridge` | complete | main | Prompt Bridge 往返 | `requestId`, `terminalId`, `action`, `successCount`, `failedCount`, `result`, `dur` |
-| `ipc.invoke` | complete | main | IPC handler 耗时 | `channel`, `terminalId`, `result`, `dur` |
-| `ipc.terminal.write` | flow step | main | IPC 写终端 | `terminalId`, `includesEnter`, `payloadLength`, `payloadHash` |
-| `ipc.terminal.send_input_sequence` | flow step | main | IPC 分阶段输入 | `terminalId`, `kind`, `payloadLength`, `payloadHash` |
-| `pty.spawn` | complete | main / PTY | 创建真实 PTY 进程 | `terminalId`, `commandKind`, `shellKind`, `argsCount`, `cwdProvided`, `result`, `dur` |
-| `pty.write` | complete | main / PTY | 写入 PTY | `terminalId`, `writeMode`, `includesEnter`, `payloadLength`, `payloadHash`, `result`, `dur` |
-| `pty.send_input_sequence` | complete | main / PTY | 大文本/粘贴序列写入 PTY | `terminalId`, `phase`, `enterDelayMs`, `result`, `dur` |
-| `pty.resize` | complete | main / PTY | 调整 PTY 尺寸 | `terminalId`, `cols`, `rows`, `result`, `dur` |
-| `pty.dispose` | complete | main / PTY | 关闭单个 PTY | `terminalId`, `result`, `dur` |
-| `pty.shutdown_all` | complete | main / PTY | 应用退出时关闭全部 PTY | `total`, `closed`, `timedOut`, `dur` |
-| `pty.output` | instant | main / PTY | PTY 输出 | `terminalId`, `bytes`, `bracketedPasteMode`, `flowId` |
-| `terminal.task.state` | instant | main / task thread | Task 活动状态 | `terminalId`, `state`, `flowId`, `reason`, `bytes` |
-| `terminal.buffer.flush` | complete | main | 合并 PTY 输出并发送给 renderer | `terminalId`, `chunkCount`, `bytes`, `dur` |
-| `terminal.ipc.send` | instant | main | 发送 `terminal:data` 给 renderer | `terminalId`, `bytes`, `flowId` |
-| `terminal.render.receive` | instant + flow step | renderer | renderer 收到终端输出 | `terminalId`, `visible`, `bytes`, `pendingBytes`, `flowId` |
-| `terminal.render.flush` | complete + flow end | renderer | 写入 xterm | `terminalId`, `visible`, `bytes`, `xtermDurationMs`, `dur`, `flowId` |
-| `terminal.render.hidden_buffer` | counter | renderer | 隐藏终端缓冲 | `terminalId`, `pendingChunks`, `pendingBytes` |
-| `terminal.input` | instant | renderer | 用户在终端直接键入 | `terminalId`, `payloadLength`, `payloadHash`, `includesEnter` |
-| `perf.renderer.snapshot` | counter | renderer | 1 秒性能快照 | `fps`, `frameDrops`, `xtermWriteCount`, `ipcDataMsgCount`, `inputLatencyAvgMs` |
-| `coding_agent.prepare` | complete | main | 检查 agent runtime | `commandKind`, `executablePathProvided`, `result`, `dur` |
-| `coding_agent.launch` | complete + flow start | main | 启动 coding agent | `terminalId`, `commandKind`, `argsCount`, `envVarCount`, `result`, `dur` |
-| `coding_agent.launch.error` | flow end | main | agent 启动失败 | `terminalId`, `reason` |
-| `coding_agent.pty.spawned` | flow step | main | agent PTY 已创建 | `terminalId` |
-| `git.runtime.task` | complete | main | Git 调度器任务 | `kind`, `priority`, `repoScoped`, `repoKeyLength`, `repoKeyHash`, `labelLength`, `labelHash`, `queueDepth`, `inflight`, `result`, `dur` |
-| `markdown.render.worker` | complete | renderer worker result | Markdown worker 渲染 | `contentLength`, `outputLength`, `imageCount`, `profileFlag`, `dur` |
-| `project_editor.render.apply` | complete | renderer | Markdown 预览 DOMPurify / setState apply | `outputLength`, `imageCount`, `dompurifyDurationMs`, `dur` |
+| `ui.prompt.action.done` | flow end | renderer | Prompt action completed | `successCount`, `sentOnlyCount`, `failedCount` |
+| `ui.terminal.write` | flow step | renderer | Renderer decided to write to terminal | `terminalId`, `action`, `payloadLength`, `payloadHash` |
+| `ui.terminal.paste` | flow step | renderer | Send via paste mode | `terminalId`, `shellKind`, `payloadLength`, `payloadHash` |
+| `ui.terminal.send_input_sequence` | flow step | renderer | Send input in stages | `terminalId`, `kind`, `ok`, `phase` |
+| `api.terminal.write` | flow start/result | main | API write-to-Task flow | `terminalId`, `action`, `payloadLength`, `payloadHash`, `status` |
+| `api.terminal.write.result` | flow step | main | API write-to-Task result | `terminalId`, `action`, `status`, `deliveredCount`, `failedCount` |
+| `api.request` | complete | main | HTTP API request | `route`, `terminalId`, `action`, `status`, `deliveredCount`, `failedCount`, `dur` |
+| `prompt.bridge.send` | flow step | main | Main process asks renderer to perform a Prompt action | `requestId`, `terminalId`, `action` |
+| `prompt.bridge.response` | flow step | main | Renderer returns Prompt Bridge result | `requestId`, `terminalId`, `action`, `successCount`, `failedCount` |
+| `prompt.bridge.timeout` | flow end | main | Prompt Bridge timed out | `requestId`, `terminalId`, `action` |
+| `prompt.bridge` | complete | main | Prompt Bridge round-trip | `requestId`, `terminalId`, `action`, `successCount`, `failedCount`, `result`, `dur` |
+| `ipc.invoke` | complete | main | IPC handler duration | `channel`, `terminalId`, `result`, `dur` |
+| `ipc.terminal.write` | flow step | main | IPC write to terminal | `terminalId`, `includesEnter`, `payloadLength`, `payloadHash` |
+| `ipc.terminal.send_input_sequence` | flow step | main | IPC staged input | `terminalId`, `kind`, `payloadLength`, `payloadHash` |
+| `pty.spawn` | complete | main / PTY | Real PTY process created | `terminalId`, `commandKind`, `shellKind`, `argsCount`, `cwdProvided`, `result`, `dur` |
+| `pty.write` | complete | main / PTY | Write into PTY | `terminalId`, `writeMode`, `includesEnter`, `payloadLength`, `payloadHash`, `result`, `dur` |
+| `pty.send_input_sequence` | complete | main / PTY | Large-text / paste sequence written into PTY | `terminalId`, `phase`, `enterDelayMs`, `result`, `dur` |
+| `pty.resize` | complete | main / PTY | PTY resized | `terminalId`, `cols`, `rows`, `result`, `dur` |
+| `pty.dispose` | complete | main / PTY | Single PTY closed | `terminalId`, `result`, `dur` |
+| `pty.shutdown_all` | complete | main / PTY | All PTYs closed on app quit | `total`, `closed`, `timedOut`, `dur` |
+| `pty.output` | instant | main / PTY | PTY output | `terminalId`, `bytes`, `bracketedPasteMode`, `flowId` |
+| `terminal.task.state` | instant | main / task thread | Task activity state | `terminalId`, `state`, `flowId`, `reason`, `bytes` |
+| `terminal.buffer.flush` | complete | main | Coalesce PTY output and forward to renderer | `terminalId`, `chunkCount`, `bytes`, `dur` |
+| `terminal.ipc.send` | instant | main | Send `terminal:data` to renderer | `terminalId`, `bytes`, `flowId` |
+| `terminal.render.receive` | instant + flow step | renderer | Renderer received terminal output | `terminalId`, `visible`, `bytes`, `pendingBytes`, `flowId` |
+| `terminal.render.flush` | complete + flow end | renderer | Written into xterm | `terminalId`, `visible`, `bytes`, `xtermDurationMs`, `dur`, `flowId` |
+| `terminal.render.hidden_buffer` | counter | renderer | Hidden terminal buffer | `terminalId`, `pendingChunks`, `pendingBytes` |
+| `terminal.input` | instant | renderer | User typed directly into the terminal | `terminalId`, `payloadLength`, `payloadHash`, `includesEnter` |
+| `perf.renderer.snapshot` | counter | renderer | 1-second perf snapshot | `fps`, `frameDrops`, `xtermWriteCount`, `ipcDataMsgCount`, `inputLatencyAvgMs` |
+| `coding_agent.prepare` | complete | main | Check agent runtime | `commandKind`, `executablePathProvided`, `result`, `dur` |
+| `coding_agent.launch` | complete + flow start | main | Launch coding agent | `terminalId`, `commandKind`, `argsCount`, `envVarCount`, `result`, `dur` |
+| `coding_agent.launch.error` | flow end | main | Agent launch failed | `terminalId`, `reason` |
+| `coding_agent.pty.spawned` | flow step | main | Agent PTY created | `terminalId` |
+| `git.runtime.task` | complete | main | Git scheduler task | `kind`, `priority`, `repoScoped`, `repoKeyLength`, `repoKeyHash`, `labelLength`, `labelHash`, `queueDepth`, `inflight`, `result`, `dur` |
+| `markdown.render.worker` | complete | renderer worker result | Markdown worker render | `contentLength`, `outputLength`, `imageCount`, `profileFlag`, `dur` |
+| `project_editor.render.apply` | complete | renderer | Markdown preview DOMPurify / setState apply | `outputLength`, `imageCount`, `dompurifyDurationMs`, `dur` |
 
-## 自动化验证映射
+## Automated verification mapping
 
-`test/validate-performance-trace-contract.mjs` 会读取 trace JSON 并检查以下合同。它不是验证“有日志”，而是验证“可以凭 trace 复原关键行为”。
+`test/validate-performance-trace-contract.mjs` reads the trace JSON and
+checks the following contracts. It does NOT verify "logs exist" — it
+verifies "the trace can reconstruct critical behaviour."
 
 ```mermaid
 flowchart TD
@@ -435,7 +458,8 @@ flowchart TD
   trace --> privacy["TC-23/24<br/>raw marker and raw command are redacted"]
 ```
 
-另一个 Agent 新增的三方审计和叙述工具补上了“验证是否穷举”和“人能不能读懂”的证明：
+The other Agent's three-way audit and narration tools complete the
+"is the verification exhaustive" and "can a human read it" proofs:
 
 ```mermaid
 flowchart LR
@@ -456,51 +480,51 @@ flowchart LR
   narrative --> human["human-readable behavior proof"]
 ```
 
-| 合同 | 证明点 |
+| Contract | What it proves |
 | --- | --- |
-| TC-03/04 | 用户输入和选择目标 Task 可以被看到 |
-| TC-05/06/07 | 三类 Prompt 操作都有耗时和结果 |
-| TC-08/09 | 外部 API 到 renderer Prompt Bridge 的链路可见 |
-| TC-10/11 | 主线程 IPC 和 PTY 写入可见 |
-| TC-12 到 TC-16 | 子进程输出回到 renderer 并被写进界面的链路可见 |
-| TC-17 到 TC-20 | Task 是否工作、何时输出、何时 idle 可见 |
-| TC-22 | 同一用户动作的跨进程 flow 可串起来 |
-| TC-23/24 | 默认配置不会泄漏原始输入内容 |
-| Coverage audit | registry、代码 emit、实际 trace 三者一致，没有未登记事件或死登记 |
-| Trace narration | 可以按时间顺序读出 Onward 当时在做什么 |
+| TC-03/04 | User input and target Task selection are observable |
+| TC-05/06/07 | All three Prompt actions carry duration and result |
+| TC-08/09 | The external API → renderer Prompt Bridge path is visible |
+| TC-10/11 | Main-thread IPC and PTY writes are visible |
+| TC-12 .. TC-16 | The subprocess-output-back-to-screen path is visible |
+| TC-17 .. TC-20 | Whether a Task is working, when it outputs, when it idles, are visible |
+| TC-22 | The cross-process flow of the same user action stays linked |
+| TC-23/24 | The default configuration does not leak raw input content |
+| Coverage audit | Registry, code emit sites, and actual trace agree — no unregistered events or dead registrations |
+| Trace narration | The chronological story of what Onward was doing can be read out |
 
-## 常见行为到 Trace Point 的速查
+## Common-behaviour to trace-point cheat sheet
 
-| 你要验证的行为 | 需要看到的 trace point |
+| Behaviour you want to verify | Trace points to look for |
 | --- | --- |
-| 用户输入了什么规模的内容 | `ui.prompt.edit.payloadLength`, `payloadLineCount`, `payloadHash` |
-| 用户选择了哪个 Task | `ui.prompt.task_select.terminalId`, `selectedCount` |
-| Send 是否发生以及花多久 | `ui.prompt.action[action=send].dur` |
-| Execute 是否真的触发命令 | `ipc.terminal.write.includesEnter=true`, `terminal.task.state[state=running]` |
-| 命令是否真正写入 PTY | `pty.write.result=success` 或 `pty.send_input_sequence.result=success` |
-| Task 是否在后台工作 | `terminal.task.state` 从 `input_pending/running` 到 `output_active` |
-| Task 输出是否回到主进程 | `pty.output.bytes` |
-| 主进程是否把输出发给 renderer | `terminal.buffer.flush`, `terminal.ipc.send` |
-| 用户界面是否真正渲染输出 | `terminal.render.receive`, `terminal.render.flush` |
-| 渲染是否慢 | `terminal.render.flush.dur`, `xtermDurationMs`, `perf.renderer.snapshot` |
-| API 写入是否走通 | `api.request.status`, `prompt.bridge.result`, `ui.prompt.action` |
-| Coding Agent 是否以 PTY 方式启动 | `coding_agent.launch`, `pty.spawn`, `terminal.task.state[state=running]` |
-| Git polling / cwd probe 是否堆积 | `git.runtime.task.queueDepth`, `inflight`, `dur` |
-| Markdown preview 是否慢 | `markdown.render.worker.dur`, `project_editor.render.apply.dur` |
-| PTY 是否清理干净 | `pty.dispose`, `pty.shutdown_all.closed`, `timedOut` |
-| trace registry 是否和代码一致 | `node scripts/trace-coverage-audit.mjs --latest` |
-| trace 是否能被人读懂 | `node scripts/trace-narrate.mjs --latest` |
+| Size of user input | `ui.prompt.edit.payloadLength`, `payloadLineCount`, `payloadHash` |
+| Which Task the user selected | `ui.prompt.task_select.terminalId`, `selectedCount` |
+| Whether Send fired and how long it took | `ui.prompt.action[action=send].dur` |
+| Whether Execute actually triggered the command | `ipc.terminal.write.includesEnter=true`, `terminal.task.state[state=running]` |
+| Whether the command was actually written into the PTY | `pty.write.result=success` or `pty.send_input_sequence.result=success` |
+| Whether the Task is working in the background | `terminal.task.state` transitions from `input_pending/running` to `output_active` |
+| Whether Task output reached the main process | `pty.output.bytes` |
+| Whether the main process forwarded output to the renderer | `terminal.buffer.flush`, `terminal.ipc.send` |
+| Whether the UI actually rendered the output | `terminal.render.receive`, `terminal.render.flush` |
+| Whether rendering is slow | `terminal.render.flush.dur`, `xtermDurationMs`, `perf.renderer.snapshot` |
+| Whether API writes succeeded end-to-end | `api.request.status`, `prompt.bridge.result`, `ui.prompt.action` |
+| Whether the Coding Agent launched via PTY | `coding_agent.launch`, `pty.spawn`, `terminal.task.state[state=running]` |
+| Whether Git polling / cwd probing is piling up | `git.runtime.task.queueDepth`, `inflight`, `dur` |
+| Whether Markdown preview is slow | `markdown.render.worker.dur`, `project_editor.render.apply.dur` |
+| Whether PTY teardown is hermetic | `pty.dispose`, `pty.shutdown_all.closed`, `timedOut` |
+| Whether trace registry agrees with code | `node scripts/trace-coverage-audit.mjs --latest` |
+| Whether the trace is human-readable | `node scripts/trace-narrate.mjs --latest` |
 
-## 最小验证命令
+## Minimal verification commands
 
-macOS development build 的常用验证命令：
+Common verification commands for the macOS development build:
 
 ```bash
 rm -rf out release && ONWARD_DIST_DEV_OPEN=0 pnpm dist:dev
 bash test/run-performance-trace-autotest.sh "release/mac/Under Development 2.0.1-event_trace_gate_0424_codex.app/Contents/MacOS/Under Development 2.0.1-event_trace_gate_0424_codex"
 ```
 
-脚本会输出 trace 文件路径，并调用：
+The script prints the trace file path and invokes:
 
 ```bash
 node test/validate-performance-trace-contract.mjs "<trace-file>"
@@ -508,7 +532,7 @@ node scripts/trace-coverage-audit.mjs "<trace-file>"
 node scripts/trace-narrate.mjs "<trace-file>" | head -80
 ```
 
-通过标准是：
+Pass criterion:
 
 ```text
 Performance trace contract PASSED: 25 checks

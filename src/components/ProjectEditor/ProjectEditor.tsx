@@ -1040,7 +1040,22 @@ export function ProjectEditor({
   // subpage-return (Editor reopens with the same scope) without waiting for
   // the full tree-reload + AppState restore cycle (which can exceed the
   // autotest's 8s wait).
-  const subpageReturnFileRef = useRef<{ scope: ProjectEditorScope; path: string } | null>(null)
+  // Subpage-return snapshot. Carries enough state to repaint the editor
+  // immediately when the user returns from Diff / History without waiting
+  // for an async openFile() — most importantly the file CONTENT (otherwise
+  // Monaco's model would still be empty after root:effect's close branch
+  // wipes it on isOpen=false, and applyPendingViewState would clamp the
+  // restored cursor from line 60 to line 1).
+  const subpageReturnFileRef = useRef<{
+    scope: ProjectEditorScope
+    path: string
+    content: string
+    isBinary: boolean
+    isImage: boolean
+    isSqlite: boolean
+    isPdf: boolean
+    isEpub: boolean
+  } | null>(null)
   const previewActiveSlugRef = useRef<string | null>(null)
   const [previewActiveSlug, setPreviewActiveSlug] = useState<string | null>(null)
   const previewScrollMemoryRef = useRef<Map<string, PreviewScrollMemory>>(new Map())
@@ -2273,7 +2288,8 @@ export function ProjectEditor({
     return true
   }, [applyPendingCursorPosition, isEditorModelMatchingPath, scheduleEditorSyncFromPreview])
 
-  const resetActiveFileState = useCallback(() => {
+  const resetActiveFileState = useCallback((options?: { preserveContentForSubpageReturn?: boolean }) => {
+    const preserveContent = options?.preserveContentForSubpageReturn === true
     if (DEBUG_PROJECT_EDITOR) {
       debugLog('reset:begin', {
         activeFilePath: activeFilePathRef.current,
@@ -2283,7 +2299,8 @@ export function ProjectEditor({
         hasWorker: Boolean(markdownWorkerRef.current),
         workerInFlight: markdownWorkerInFlightRef.current,
         hasRenderTimer: Boolean(markdownRenderTimerRef.current),
-        hasIdleTask: markdownIdleHandleRef.current !== null
+        hasIdleTask: markdownIdleHandleRef.current !== null,
+        preserveContent
       })
     }
     if (projectStateSaveTimerRef.current) {
@@ -2328,9 +2345,20 @@ export function ProjectEditor({
     fileFirstVisibleLineRef.current.clear()
     originalContentRef.current = ''
     originalModelVersionRef.current = null
-    fileContentRef.current = ''
+    // Subpage navigation (Editor → Diff/History → Editor) keeps the same
+    // file open. Wiping `fileContentRef` and `setFileContent('')` here
+    // would empty Monaco's model, so the slow-restore branch's
+    // `applyPendingViewState` then has nothing to position cursor onto and
+    // clamps line 60 → 1. The `preserveContentForSubpageReturn` flag lets
+    // the subpage callers skip the wipe; full close / file switch keeps
+    // the original behaviour.
+    if (!preserveContent) {
+      fileContentRef.current = ''
+    }
     openFileTokenRef.current += 1
-    activeFilePathRef.current = null
+    if (!preserveContent) {
+      activeFilePathRef.current = null
+    }
     isBinaryRef.current = false
     isImageRef.current = false
     isSqliteRef.current = false
@@ -2340,7 +2368,9 @@ export function ProjectEditor({
     markdownWorkerInFlightRef.current = false
     markdownWorkerQueuedRef.current = false
     setSelectedPath(null)
-    setActiveFilePath(null)
+    if (!preserveContent) {
+      setActiveFilePath(null)
+    }
     // NOTE: pinnedFiles and recentFiles are persistent metadata scoped to the
     // editor session — they must NOT be cleared here.  Callers that genuinely
     // need to reset them (e.g. the root effect when cwd changes or when the
@@ -2349,7 +2379,9 @@ export function ProjectEditor({
     setDraggingQuickPath(null)
     setDraggingQuickSource(null)
     setDragOverPinnedPath(null)
-    setFileContent('')
+    if (!preserveContent) {
+      setFileContent('')
+    }
     setIsBinary(false)
     setIsImage(false)
     setIsSqlite(false)
@@ -4100,14 +4132,28 @@ export function ProjectEditor({
       // the previous activeFilePath under this same scope, surface it
       // immediately so an autotest's 8s `waitForProjectEditorFile` doesn't
       // race against the slower full-restore pipeline (tree reload + AppState
-      // re-fetch + restore useEffect). The slower path still runs after this
-      // and refines the editor view state (cursor / scroll); only the bare
-      // `activeFilePath` claim is fast-tracked here.
+      // re-fetch + restore useEffect). We also restore file content + media
+      // flags from the snapshot so Monaco's model is repopulated before the
+      // slow restore's applyPendingViewState runs — without the content the
+      // restored cursor would clamp from line 60 to line 1 against an empty
+      // model.
       const subpageReturn = subpageReturnFileRef.current
       if (subpageReturn && isSameProjectEditorScope(subpageReturn.scope, currentScope)) {
         subpageReturnFileRef.current = null
         activeFilePathRef.current = subpageReturn.path
         setActiveFilePath(subpageReturn.path)
+        fileContentRef.current = subpageReturn.content
+        setFileContent(subpageReturn.content)
+        isBinaryRef.current = subpageReturn.isBinary
+        setIsBinary(subpageReturn.isBinary)
+        isImageRef.current = subpageReturn.isImage
+        setIsImage(subpageReturn.isImage)
+        isSqliteRef.current = subpageReturn.isSqlite
+        setIsSqlite(subpageReturn.isSqlite)
+        isPdfRef.current = subpageReturn.isPdf
+        setIsPdf(subpageReturn.isPdf)
+        isEpubRef.current = subpageReturn.isEpub
+        setIsEpub(subpageReturn.isEpub)
       }
       if (scopeChanged || !wasOpenRef.current) {
         restoredStateRef.current = getProjectEditorState(currentScope)
@@ -5527,11 +5573,22 @@ export function ProjectEditor({
     if (!canClose) return
     if (lastEditorScopeRef.current) {
       persistProjectEditorState(lastEditorScopeRef.current, { flush: true })
-      // Snapshot the activeFilePath so the subpage-return fast path can
-      // re-open it directly without waiting for the slower full restore.
+      // Snapshot the activeFilePath + content so the subpage-return fast
+      // path can repaint the editor immediately. Without the content, the
+      // root:effect close branch wipes Monaco's model and the eventual
+      // restoreViewState lands cursor on line 1 instead of line 60.
       const snapshotPath = activeFilePathRef.current
       subpageReturnFileRef.current = snapshotPath
-        ? { scope: lastEditorScopeRef.current, path: snapshotPath }
+        ? {
+            scope: lastEditorScopeRef.current,
+            path: snapshotPath,
+            content: fileContentRef.current,
+            isBinary: isBinaryRef.current,
+            isImage: isImageRef.current,
+            isSqlite: isSqliteRef.current,
+            isPdf: isPdfRef.current,
+            isEpub: isEpubRef.current
+          }
         : null
     }
     skipClosePersistRef.current = true
@@ -5545,7 +5602,7 @@ export function ProjectEditor({
         hasIdleTask: markdownIdleHandleRef.current !== null
       })
     }
-    resetActiveFileState()
+    resetActiveFileState({ preserveContentForSubpageReturn: true })
     const terminalId = _terminalId
     if (DEBUG_PROJECT_EDITOR) {
       debugLog('gitdiff:open:dispatch', { terminalId })
@@ -5585,11 +5642,20 @@ export function ProjectEditor({
       persistProjectEditorState(lastEditorScopeRef.current, { flush: true })
       const snapshotPath = activeFilePathRef.current
       subpageReturnFileRef.current = snapshotPath
-        ? { scope: lastEditorScopeRef.current, path: snapshotPath }
+        ? {
+            scope: lastEditorScopeRef.current,
+            path: snapshotPath,
+            content: fileContentRef.current,
+            isBinary: isBinaryRef.current,
+            isImage: isImageRef.current,
+            isSqlite: isSqliteRef.current,
+            isPdf: isPdfRef.current,
+            isEpub: isEpubRef.current
+          }
         : null
     }
     skipClosePersistRef.current = true
-    resetActiveFileState()
+    resetActiveFileState({ preserveContentForSubpageReturn: true })
     const terminalId = _terminalId
     const detail: SubpageNavigateEventDetail = { terminalId, target: 'history' }
     perfTrace(PERF_TRACE_EVENT.RENDERER_PROJECT_SUBPAGE_NAVIGATE, {

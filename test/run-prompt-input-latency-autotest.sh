@@ -84,7 +84,11 @@ if [[ -z "$LINE" ]]; then
   exit 1
 fi
 
-JSON_PAYLOAD="${LINE#*$MARKER}"
+# Quote MARKER inside the parameter expansion so bash 3.x (the macOS system
+# bash) treats it as a literal string. Without the quotes, the `[..]` in the
+# marker is parsed as a glob character class and strips the wrong prefix
+# ("[R" is dropped because R is in the class), corrupting JSON_PAYLOAD.
+JSON_PAYLOAD="${LINE#*"$MARKER"}"
 printf '%s\n' "$JSON_PAYLOAD" | python3 -m json.tool > "$RESULT_FILE"
 
 echo "Prompt Input Latency autotest PASSED"

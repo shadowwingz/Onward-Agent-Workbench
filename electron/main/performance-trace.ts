@@ -3,12 +3,46 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// Do NOT static-import `electron` or `./app-info` here. This module is pulled
+// into the git-IPC / git-status / project-fs / sqlite / app-state worker
+// bundles via `git-runtime-manager.ts`. Electron's `worker_threads` runtime
+// cannot resolve the `electron` module — a synchronous `require('electron')`
+// hoisted to the top of the worker chunk crashes the worker with
+// "Cannot find module 'electron'" before any user-level uncaughtException
+// handler can register, killing every git operation on the daily build.
+// Master's `perf-trace-logger.ts` documents the same pitfall and uses a
+// guarded lazy-loader; we mirror that approach so this trace stack is
+// safe in worker contexts. `app-info` itself static-imports `electron`, so
+// we lazy-require it too — only `initialize()` (main-thread only) needs it.
 import { randomBytes, createHash } from 'crypto'
 import { existsSync, mkdirSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { performance } from 'perf_hooks'
-import { app } from 'electron'
-import { getAppInfo } from './app-info'
+import { isMainThread } from 'worker_threads'
+
+type ElectronApp = {
+  getPath: (name: string) => string
+}
+
+function loadElectronApp(): ElectronApp | null {
+  if (!isMainThread) return null
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    return (require('electron') as { app: ElectronApp }).app
+  } catch {
+    return null
+  }
+}
+
+function loadAppInfo(): { version: string; buildChannel: string } | null {
+  if (!isMainThread) return null
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    return require('./app-info').getAppInfo()
+  } catch {
+    return null
+  }
+}
 
 type TracePhase = 'X' | 'i' | 'C' | 'M' | 's' | 't' | 'f'
 type TraceScope = 'g' | 'p' | 't'
@@ -125,7 +159,14 @@ class PerformanceTrace {
     if (!this.enabled || this.initialized) return
     this.initialized = true
 
-    const dir = join(app.getPath('userData'), 'performance-traces')
+    const electronApp = loadElectronApp()
+    if (!electronApp) {
+      // initialize() should never run off the main thread; defensive guard so a
+      // future caller from a worker can't NPE on app.getPath().
+      this.initialized = false
+      return
+    }
+    const dir = join(electronApp.getPath('userData'), 'performance-traces')
     if (!existsSync(dir)) {
       mkdirSync(dir, { recursive: true })
     }
@@ -143,12 +184,12 @@ class PerformanceTrace {
     this.recordMetadata(this.rendererPid, RENDERER_THREAD_ID, 'thread_name', 'renderer-main')
     this.recordMetadata(this.taskPid, 0, 'process_name', 'Onward Tasks')
 
-    const appInfo = getAppInfo()
+    const appInfo = loadAppInfo()
     this.recordInstant('trace.session.start', {
       schema: 'onward.perf_trace.v1',
       platform: process.platform,
-      appVersion: appInfo.version,
-      buildChannel: appInfo.buildChannel,
+      appVersion: appInfo?.version ?? 'unknown',
+      buildChannel: appInfo?.buildChannel ?? 'unknown',
       contentCaptured: this.captureContent,
       flushIntervalSec: PERIODIC_FLUSH_SEC,
       maxBufferMB: Math.floor(MAX_TRACE_BYTES / (1024 * 1024))

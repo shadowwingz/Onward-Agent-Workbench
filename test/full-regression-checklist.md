@@ -579,14 +579,24 @@ ONWARD_USER_DATA_DIR="$(mktemp -d)" \
 
 ## 13. Windows-only follow-up
 
-Run this separately on Windows:
+**Off by default — even on Windows.** This runner is *opt-in only*; do not
+run it unless the user has explicitly asked for the Windows update-pipeline
+end-to-end check. The full regression in §7 deliberately skips it on every
+platform (the macOS pass logs a `SKIP` line for traceability and the
+Windows pass treats it the same way), and CI does not invoke it on its
+own. The runner takes several minutes, downloads update artefacts, and
+restarts the app — none of which should fire as a side effect of a
+"green checklist" pass.
+
+Trigger it manually only when the user requests it:
 
 ```bash
 bash test/run-auto-update-windows-e2e.sh
 ```
 
 Validates Windows pending-update recovery and update restart behavior.
-Intentionally excluded from the macOS full pass.
+Intentionally excluded from the macOS full pass and from the Windows full
+pass; both treat it as `SKIPPED`.
 
 ---
 
