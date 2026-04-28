@@ -334,6 +334,7 @@ export function OutlinePanel({
       const clampedTarget = Math.min(targetScrollTop, maxScrollTop)
       programmaticScrollUntilRef.current = performance.now() + PROGRAMMATIC_SCROLL_SETTLE_MS
       tree.scrollTop = clampedTarget
+      lastUserScrollAtRef.current = performance.now()
       const isApplied = Math.abs(tree.scrollTop - clampedTarget) <= 2
 
       if (isApplied || attempts >= maxAttempts) {

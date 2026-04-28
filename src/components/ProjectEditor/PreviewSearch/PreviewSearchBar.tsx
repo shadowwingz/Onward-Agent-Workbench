@@ -33,7 +33,17 @@ interface PreviewSearchBarProps {
 export const PreviewSearchBar = forwardRef<PreviewSearchHandle, PreviewSearchBarProps>(function PreviewSearchBar({ previewRef, isOpen, onClose, renderedHtml }, ref) {
   const { t } = useI18n()
   const inputRef = useRef<HTMLInputElement>(null)
-  const { query, setQuery, matchCount, currentIndex, goToNext, goToPrevious, getCachedMatchPositions } = usePreviewSearch({
+  const {
+    query,
+    setQuery,
+    matchCount,
+    currentIndex,
+    goToNext,
+    goToPrevious,
+    getCachedMatchPositions,
+    getMatchCount,
+    getCurrentIndex,
+  } = usePreviewSearch({
     previewRef,
     isOpen,
     renderedHtml,
@@ -43,10 +53,10 @@ export const PreviewSearchBar = forwardRef<PreviewSearchHandle, PreviewSearchBar
     setQuery,
     goToNext,
     goToPrevious,
-    getMatchCount: () => matchCount,
-    getCurrentIndex: () => currentIndex,
+    getMatchCount,
+    getCurrentIndex,
     getCachedMatchPositions,
-  }), [setQuery, goToNext, goToPrevious, matchCount, currentIndex, getCachedMatchPositions])
+  }), [setQuery, goToNext, goToPrevious, getMatchCount, getCurrentIndex, getCachedMatchPositions])
 
   useEffect(() => {
     if (!isOpen) return

@@ -221,14 +221,10 @@ export const EpubReader = forwardRef<EpubReaderHandle, EpubReaderProps>(function
       })
       renditionRef.current = rendition
 
-      // Apply the theme once the book is ready so we don't race with epub.js's
-      // internal startup sequence (which touches `book.package` in start()).
+      // Apply the theme and start display once the book is ready so we don't
+      // race with epub.js's internal startup sequence (which touches
+      // `book.package` in start()).
       const readyThen = (book.ready ?? book.opened) as Promise<unknown> | undefined
-      void (readyThen ?? Promise.resolve()).then(() => {
-        if (disposed) return
-        applyTheme()
-        bookReadyRef.current = true
-      })
 
       // Track display progress for autotest visibility. These refs get
       // surfaced via the debug hook below.
@@ -302,19 +298,26 @@ export const EpubReader = forwardRef<EpubReaderHandle, EpubReaderProps>(function
         window.requestAnimationFrame(tick)
       }
       let resolved = false
-      rendition.display(initialTarget).then(() => {
-        resolved = true
+      const startDisplay = () => {
+        const r = renditionRef.current
+        if (!r || disposed || resolved) return
         if (progress.__onwardEpubReaderProgress) {
-          progress.__onwardEpubReaderProgress.displayResolved = Date.now()
+          progress.__onwardEpubReaderProgress.displayStarted = Date.now()
         }
-        applySavedScroll()
-      }).catch((err: unknown) => {
-        if (disposed) return
-        if (progress.__onwardEpubReaderProgress) {
-          progress.__onwardEpubReaderProgress.displayRejected = String((err as { message?: string })?.message ?? err)
-        }
-        setError(String((err as { message?: string })?.message ?? err))
-      })
+        r.display(initialTarget).then(() => {
+          resolved = true
+          if (progress.__onwardEpubReaderProgress) {
+            progress.__onwardEpubReaderProgress.displayResolved = Date.now()
+          }
+          applySavedScroll()
+        }).catch((err: unknown) => {
+          if (disposed) return
+          if (progress.__onwardEpubReaderProgress) {
+            progress.__onwardEpubReaderProgress.displayRejected = String((err as { message?: string })?.message ?? err)
+          }
+          setError(String((err as { message?: string })?.message ?? err))
+        })
+      }
 
       // Persist precise scroll offset whenever the user scrolls. Debounced
       // to 250 ms the same way PdfReader debounces `onward:pdf:state`.
@@ -342,9 +345,9 @@ export const EpubReader = forwardRef<EpubReaderHandle, EpubReaderProps>(function
       // We handle (1) with an explicit `rendition.resize(width, height)` pass
       // against the current container dimensions, and (2) by re-issuing
       // display() until we actually see an <iframe> in the container.
-      // Retries are gated behind book.opened so we don't hit the
-      // 'book.package' undefined trap inside rendition.start().
-      const bookReady = (book?.opened ?? Promise.resolve(null)) as Promise<unknown>
+      // The initial display and retries are gated behind book readiness so we
+      // don't hit the 'book.package' undefined trap inside rendition.start().
+      const bookReady = (readyThen ?? book?.opened ?? Promise.resolve(null)) as Promise<unknown>
       // Retry cadence up to 12s — in heavier regression scenarios (e.g., the
       // `pdf-epub-full` suite where EPUB opens after a PDF preview teardown)
       // DefaultViewManager can take longer than the first 4 nudges to actually
@@ -352,6 +355,10 @@ export const EpubReader = forwardRef<EpubReaderHandle, EpubReaderProps>(function
       // is present, so the worst case is a few extra display() calls.
       const retryIntervals = [600, 1400, 2600, 4000, 6000, 8500, 11500]
       void bookReady.then(() => {
+        if (disposed) return
+        applyTheme()
+        bookReadyRef.current = true
+        startDisplay()
         for (const delay of retryIntervals) {
           window.setTimeout(() => {
             if (disposed) return
@@ -370,7 +377,7 @@ export const EpubReader = forwardRef<EpubReaderHandle, EpubReaderProps>(function
                 if (typeof resize === 'function') resize.call(r, w, h)
               }
             } catch { /* ignore */ }
-            try { void r.display(initialTarget) } catch { /* ignore */ }
+            try { startDisplay() } catch { /* ignore */ }
           }, delay)
         }
       }).catch(() => { /* ignore — nothing to retry */ })

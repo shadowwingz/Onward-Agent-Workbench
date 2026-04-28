@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, type MutableRefObject } from 'react'
 
 const MAX_HIGHLIGHTS = 1000
 const DEBOUNCE_MS = 150
@@ -28,6 +28,7 @@ interface UsePreviewSearchOptions {
 export interface PreviewSearchMatchPosition {
   top: number
   left: number
+  height: number
 }
 
 interface UsePreviewSearchResult {
@@ -44,6 +45,8 @@ interface UsePreviewSearchResult {
    * visual match, `matchCount - 1` is the last).
    */
   getCachedMatchPositions: () => PreviewSearchMatchPosition[]
+  getMatchCount: () => number
+  getCurrentIndex: () => number
 }
 
 function clearHighlights(container: HTMLElement): void {
@@ -109,12 +112,13 @@ function applyHighlights(
   const containerRect = container.getBoundingClientRect()
   const containerScrollTop = container.scrollTop
   const containerScrollLeft = container.scrollLeft
-  const rectByMark = new WeakMap<HTMLElement, { top: number; left: number }>()
+  const rectByMark = new WeakMap<HTMLElement, { top: number; left: number; height: number }>()
   for (const mark of marks) {
     const rect = mark.getBoundingClientRect()
     rectByMark.set(mark, {
       top: rect.top - containerRect.top + containerScrollTop,
       left: rect.left - containerRect.left + containerScrollLeft,
+      height: rect.height,
     })
   }
   marks.sort((a, b) => {
@@ -128,19 +132,44 @@ function applyHighlights(
     positionSink.length = 0
     for (const mark of marks) {
       const pos = rectByMark.get(mark)!
-      positionSink.push({ top: pos.top, left: pos.left })
+      positionSink.push({ top: pos.top, left: pos.left, height: pos.height })
     }
   }
 
   return marks
 }
 
-function setActiveHighlight(marks: HTMLElement[], index: number, scrollContainer: HTMLElement | null): void {
-  marks.forEach(mark => mark.classList.remove(ACTIVE_CLASS))
+function setActiveHighlight(
+  marks: HTMLElement[],
+  index: number,
+  scrollContainer: HTMLElement | null,
+  activeMarkRef?: MutableRefObject<HTMLElement | null>,
+  positions?: PreviewSearchMatchPosition[],
+): void {
+  const previousActive = activeMarkRef?.current
   if (index < 0 || index >= marks.length) return
   const activeMark = marks[index]
+  if (previousActive && previousActive !== activeMark) {
+    previousActive.classList.remove(ACTIVE_CLASS)
+  } else if (!previousActive) {
+    marks.forEach(mark => mark.classList.remove(ACTIVE_CLASS))
+  }
   activeMark.classList.add(ACTIVE_CLASS)
+  if (activeMarkRef) {
+    activeMarkRef.current = activeMark
+  }
   if (!scrollContainer) return
+  const cachedPosition = positions?.[index]
+  if (cachedPosition) {
+    const maxScroll = scrollContainer.scrollHeight - scrollContainer.clientHeight
+    const targetTop = Math.max(
+      0,
+      Math.min(maxScroll, cachedPosition.top - (scrollContainer.clientHeight - cachedPosition.height) / 2),
+    )
+    if (Math.abs(targetTop - scrollContainer.scrollTop) <= 5) return
+    scrollContainer.scrollTop = targetTop
+    return
+  }
   const containerRect = scrollContainer.getBoundingClientRect()
   const markRect = activeMark.getBoundingClientRect()
   const markMiddle = markRect.top + markRect.height / 2
@@ -165,7 +194,10 @@ export function usePreviewSearch({
   const [query, setQuery] = useState('')
   const [matchCount, setMatchCount] = useState(0)
   const [currentIndex, setCurrentIndex] = useState(-1)
+  const matchCountRef = useRef(0)
+  const currentIndexRef = useRef(-1)
   const marksRef = useRef<HTMLElement[]>([])
+  const activeMarkRef = useRef<HTMLElement | null>(null)
   const positionsRef = useRef<PreviewSearchMatchPosition[]>([])
   const debounceTimerRef = useRef<number | null>(null)
   const queryRef = useRef(query)
@@ -177,8 +209,11 @@ export function usePreviewSearch({
 
     clearHighlights(container)
     marksRef.current = []
+    activeMarkRef.current = null
     positionsRef.current = []
     if (!searchQuery) {
+      matchCountRef.current = 0
+      currentIndexRef.current = -1
       setMatchCount(0)
       setCurrentIndex(-1)
       return
@@ -188,12 +223,16 @@ export function usePreviewSearch({
     const marks = applyHighlights(container, searchQuery, positions)
     marksRef.current = marks
     positionsRef.current = positions
+    matchCountRef.current = marks.length
     setMatchCount(marks.length)
     if (marks.length > 0) {
+      currentIndexRef.current = 0
       setCurrentIndex(0)
-      setActiveHighlight(marks, 0, container)
+      setActiveHighlight(marks, 0, container, activeMarkRef, positionsRef.current)
       return
     }
+    matchCountRef.current = 0
+    currentIndexRef.current = -1
     setCurrentIndex(-1)
   }, [previewRef])
 
@@ -227,31 +266,54 @@ export function usePreviewSearch({
       clearHighlights(container)
     }
     marksRef.current = []
+    activeMarkRef.current = null
     positionsRef.current = []
     setQuery('')
+    matchCountRef.current = 0
     setMatchCount(0)
+    currentIndexRef.current = -1
     setCurrentIndex(-1)
   }, [isOpen, previewRef])
 
   const goToNext = useCallback(() => {
     const marks = marksRef.current
     if (marks.length === 0) return
-    const nextIndex = (currentIndex + 1) % marks.length
+    const nextIndex = (currentIndexRef.current + 1) % marks.length
+    currentIndexRef.current = nextIndex
     setCurrentIndex(nextIndex)
-    setActiveHighlight(marks, nextIndex, previewRef.current)
-  }, [currentIndex, previewRef])
+    setActiveHighlight(marks, nextIndex, previewRef.current, activeMarkRef, positionsRef.current)
+  }, [previewRef])
 
   const goToPrevious = useCallback(() => {
     const marks = marksRef.current
     if (marks.length === 0) return
-    const nextIndex = (currentIndex - 1 + marks.length) % marks.length
+    const nextIndex = (currentIndexRef.current - 1 + marks.length) % marks.length
+    currentIndexRef.current = nextIndex
     setCurrentIndex(nextIndex)
-    setActiveHighlight(marks, nextIndex, previewRef.current)
-  }, [currentIndex, previewRef])
+    setActiveHighlight(marks, nextIndex, previewRef.current, activeMarkRef, positionsRef.current)
+  }, [previewRef])
 
   const getCachedMatchPositions = useCallback((): PreviewSearchMatchPosition[] => {
     return positionsRef.current
   }, [])
 
-  return { query, setQuery, matchCount, currentIndex, goToNext, goToPrevious, getCachedMatchPositions }
+  const getMatchCount = useCallback((): number => {
+    return matchCountRef.current
+  }, [])
+
+  const getCurrentIndex = useCallback((): number => {
+    return currentIndexRef.current
+  }, [])
+
+  return {
+    query,
+    setQuery,
+    matchCount,
+    currentIndex,
+    goToNext,
+    goToPrevious,
+    getCachedMatchPositions,
+    getMatchCount,
+    getCurrentIndex,
+  }
 }

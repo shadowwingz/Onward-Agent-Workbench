@@ -51,9 +51,9 @@ echo "=== Test log (last 150 lines) ==="
 tail -150 "$LOG_FILE"
 echo ""
 
-if grep -q '\[AutoTest\] FAIL' "$LOG_FILE"; then
+if grep -Fq '[AutoTest] FAIL' "$LOG_FILE"; then
   echo "Terminal Stress autotest FAILED"
-  grep '\[AutoTest\] FAIL' "$LOG_FILE"
+  grep -F '[AutoTest] FAIL' "$LOG_FILE"
   exit 1
 fi
 

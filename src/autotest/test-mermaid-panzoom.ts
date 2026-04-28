@@ -283,7 +283,12 @@ export async function testMermaidPanZoom(ctx: AutotestContext): Promise<TestResu
     })
 
     // ESC closes fullscreen without closing the underlying project editor.
-    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    window.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'Escape',
+      code: 'Escape',
+      bubbles: true,
+      cancelable: true
+    }))
     await sleep(250)
     const fsStillClosed = getApi()?.isMermaidFullscreenActive?.() === false
     const editorStillOpen = getApi()?.isOpen?.() === true

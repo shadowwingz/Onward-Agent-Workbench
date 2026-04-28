@@ -59,10 +59,26 @@ function closeContextMenu() {
   document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))
 }
 
+function isVisibleElement(element: HTMLElement): boolean {
+  const rect = element.getBoundingClientRect()
+  const style = window.getComputedStyle(element)
+  return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden'
+}
+
 function findTreeItemByLabel(label: string): HTMLElement | null {
   const treeNames = Array.from(document.querySelectorAll<HTMLElement>('.project-editor-tree-item .project-editor-tree-name'))
-  const target = treeNames.find((node) => (node.textContent || '').trim() === label)
-  return target?.closest<HTMLElement>('.project-editor-tree-item') ?? null
+  const matches = treeNames
+    .filter((node) => (node.textContent || '').trim() === label)
+    .map((node) => node.closest<HTMLElement>('.project-editor-tree-item'))
+    .filter((node): node is HTMLElement => Boolean(node))
+  return matches.find(isVisibleElement) ?? matches[0] ?? null
+}
+
+function findTreeItemByPath(path: string): HTMLElement | null {
+  const matches = Array.from(document.querySelectorAll<HTMLElement>(
+    `.project-editor-tree-item[data-path="${CSS.escape(path)}"]`
+  ))
+  return matches.find(isVisibleElement) ?? matches[0] ?? null
 }
 
 export async function testProjectEditorSqlite(ctx: AutotestContext): Promise<TestResult[]> {
@@ -512,54 +528,26 @@ export async function testProjectEditorSqlite(ctx: AutotestContext): Promise<Tes
     )
     if (!folderMenuReady || cancelled()) return results
 
-    if (!findTreeItemByLabel('stress-large.db')) {
-      // Navigate the post-restructure tree: test → autotest → fixtures → sqlite.
-      // The sqlite corpus moved from test/sqlite-fixtures/ to test/autotest/fixtures/sqlite/
-      // in commit 864af6e; line 80–81 of this file already point at the new
-      // path, but the tree expansion below was missed during that migration.
-      const testDirItem = findTreeItemByLabel('test')
-      if (testDirItem && !findTreeItemByLabel('autotest')) {
-        dispatchClick(testDirItem)
-      }
-      await waitFor(
-        'sqlite-tree-autotest-dir-visible',
-        () => Boolean(findTreeItemByLabel('autotest')),
-        5000
-      )
-      const autotestDirItem = findTreeItemByLabel('autotest')
-      if (autotestDirItem && !findTreeItemByLabel('fixtures')) {
-        dispatchClick(autotestDirItem)
-      }
-      await waitFor(
-        'sqlite-tree-fixtures-dir-visible',
-        () => Boolean(findTreeItemByLabel('fixtures')),
-        5000
-      )
-      const fixturesDirItem = findTreeItemByLabel('fixtures')
-      if (fixturesDirItem && !findTreeItemByLabel('sqlite')) {
-        dispatchClick(fixturesDirItem)
-      }
-      await waitFor(
-        'sqlite-tree-sqlite-dir-visible',
-        () => Boolean(findTreeItemByLabel('sqlite')),
-        5000
-      )
-      const sqliteDirItem = findTreeItemByLabel('sqlite')
-      if (sqliteDirItem && !findTreeItemByLabel('stress-large.db')) {
-        dispatchClick(sqliteDirItem)
-      }
+    if (!findTreeItemByPath(stressFixturePath)) {
+      getApi()?.clickLocateFileButton?.()
     }
     const stressFileInTreeReady = await waitFor(
       'sqlite-tree-stress-file-visible',
-      () => Boolean(findTreeItemByLabel('stress-large.db')),
-      5000
+      () => {
+        const bounds = getApi()?.getFileBrowserActiveRowBounds?.()
+        return Boolean(
+          findTreeItemByPath(stressFixturePath) &&
+          bounds?.found &&
+          Math.abs(bounds.centerOffsetRatio) <= 0.6
+        )
+      },
+      8000
     )
     const fileMenuReady = await openContextMenuWithRetry(
       'sqlite-file-context-menu-copy-items',
       () => {
-        const stressFileItem = findTreeItemByLabel('stress-large.db')
+        const stressFileItem = findTreeItemByPath(stressFixturePath) ?? findTreeItemByLabel('stress-large.db')
         if (stressFileItem) {
-          dispatchClick(stressFileItem)
           dispatchContextMenu(stressFileItem)
         }
       },

@@ -609,6 +609,29 @@ function findMarkdownOutlineItemBySlug(items: OutlineItem[], targetSlug: string)
   return match
 }
 
+function normalizeEpubHrefForCompare(href: string | null | undefined): string {
+  if (!href) return ''
+  const fragmentless = href.split('#', 1)[0].split('?', 1)[0]
+  let decoded = fragmentless
+  try {
+    decoded = decodeURIComponent(fragmentless)
+  } catch {
+    decoded = fragmentless
+  }
+  return decoded
+    .replace(/\\/g, '/')
+    .replace(/^\.?\//, '')
+    .replace(/^\/+/, '')
+    .toLowerCase()
+}
+
+function epubHrefMatchesOutlineItem(itemHref: string, activeHref: string): boolean {
+  const item = normalizeEpubHrefForCompare(itemHref)
+  const active = normalizeEpubHrefForCompare(activeHref)
+  if (!item || !active) return false
+  return item === active || item.endsWith(`/${active}`) || active.endsWith(`/${item}`)
+}
+
 function getMarkdownRenderDelay(contentLength: number, lastDuration: number): number {
   let delay = MARKDOWN_RENDER_DEBOUNCE_MS
   if (contentLength > 200_000) {
@@ -1690,23 +1713,17 @@ export function ProjectEditor({
     return best ?? pdfOutlineSymbols[0] ?? null
   }, [isPdf, pdfActivePage, pdfOutlineSymbols])
 
-  // For EPUB: match at the chapter level. The outline may carry deep hrefs
-  // like `chapter1.xhtml#section-2` (preserved for precise navigation), while
-  // epub.js's `relocated` event reports a fragment-free chapter href. Strip
-  // the fragment on the item side at compare time so the right row is
-  // highlighted without losing the full href used for navigation.
+  // For EPUB: match at the chapter level. Navigation hrefs and relocated hrefs
+  // can disagree on root prefixes such as `OEBPS/`, so compare normalized
+  // suffixes while preserving the original href for precise navigation.
   const epubActiveItem = useMemo<OutlineItem | null>(() => {
     if (!isEpub || !epubActiveHref || epubOutlineSymbols.length === 0) return null
     const target = epubActiveHref
-    const chapterOf = (href: string): string => {
-      const idx = href.indexOf('#')
-      return idx === -1 ? href : href.slice(0, idx)
-    }
     let found: OutlineItem | null = null
     const walk = (list: OutlineItem[]) => {
       for (const item of list) {
         if (found) return
-        if (item.target?.kind === 'epub-href' && chapterOf(item.target.href) === target) {
+        if (item.target?.kind === 'epub-href' && epubHrefMatchesOutlineItem(item.target.href, target)) {
           found = item
           return
         }
