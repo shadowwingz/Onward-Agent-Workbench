@@ -38,7 +38,7 @@ For platform-related commands, always consider these three platforms:
     - **Hard rule — Test program / fixture placement:**
         - Any new runner, orchestrator, fixture builder, or E2E test source goes under `test/autotest/`. Any new unit harness goes under `test/unittest/`. Reusable fixtures (binaries, sample repos, sample source files, content samples) go under `test/autotest/fixtures/<suite>/`.
         - Fixture files MUST live on disk, not inlined. Do NOT embed base64 blobs inside `.ts` / `.js` test sources for PDFs, EPUBs, images, sample git repos, or sample source files. Tests should copy the fixture into their working directory via a terminal command (`cp` on POSIX, `Copy-Item` on Windows) so the flow mirrors what a real user would see.
-        - When the user asks for an automated test after describing requirements, you MUST: (a) create scripts that exercise common paths + high-frequency paths + stress paths, (b) materialise fixtures on disk under `test/autotest/fixtures/<suite>/`, (c) run every case, and (d) only report completion when every assertion is green.
+        - When the user asks for an automated test after describing requirements, you MUST: (0) start by surveying existing runners under `test/autotest/run-*-autotest.sh` and prefer amending one whose feature surface overlaps — see the 5-step SOP's Step 0 below for the decision rule, (a) create scripts that exercise common paths + high-frequency paths + stress paths, (b) materialise fixtures on disk under `test/autotest/fixtures/<suite>/`, (c) run every case, and (d) only report completion when every assertion is green.
     - **Hard rule — Test fixture isolation (cwd):**
         1. Never read from or operate against the user's real data. Do not target `$HOME`, `~`, `/`, or any path outside the project.
         2. Tests must operate exclusively inside a dedicated test working directory you create for that suite.
@@ -126,11 +126,16 @@ For platform-related commands, always consider these three platforms:
         3. **File-system operations**: path length limits, case sensitivity, reserved filenames (`CON`, `NUL`, etc. on Windows), symlink behavior, and file-locking semantics.
     - When writing or reviewing platform-related code, always ask: "Will this behave correctly on the other two platforms?" If unsure, add explicit handling or at minimum a `TODO(cross-platform)` comment explaining the risk.
     - Automated tests that touch any of the above areas should include platform-specific assertions or be clearly marked as platform-conditional.
-- Hard rule — New feature / bug-fix 4-step SOP:
-    1. Create the runner under `test/autotest/run-<suite>-autotest.sh` (and the matching `.ps1` for Windows) or amend an existing one. Every runner must carry an SPDX header and write its log to `<repoRoot>/traces/test-logs/<suite>.log`. Append the new runner to the `SCRIPTS` list in `test/autotest/run-full-regression.py` so the orchestrator picks it up.
+- Hard rule — New feature / bug-fix 5-step SOP:
+    0. **Discover before authoring.** Before creating any new runner, survey what already exists. Run `ls test/autotest/run-*-autotest.sh` and `grep -rl "<keyword>" test/autotest/` for the feature surface, subsystem name, or component you're touching (e.g. `markdown`, `git-diff`, `project-editor`, `outline`). Decision rule:
+        - **Amend an existing runner** when the new case exercises the same feature surface, the same subsystem, or the same component as one already on disk. Adding a 21st assertion to `run-project-editor-markdown-navigation-autotest.sh` is the right move; creating `run-project-editor-markdown-navigation-outline-arrow-autotest.sh` is not.
+        - **Create a new runner** only when the new case crosses a subsystem boundary, owns a distinct fixture / setup cost, or needs an independent timeout / kill scope.
+        - When in doubt, lean toward amend — the regression set is already 30+ runners, and one runner with N assertions is cheaper to maintain than N runners with one assertion each.
+        Quote the discovery result back to the user before authoring so they can redirect early ("found `run-X`, will amend" / "no adjacent runner — will create `run-Y`").
+    1. Create the runner under `test/autotest/run-<suite>-autotest.sh` (and the matching `.ps1` for Windows) **only if Step 0 found no adjacent runner**; otherwise amend the existing one. Every runner must carry an SPDX header and write its log to `<repoRoot>/traces/test-logs/<suite>.log`. If you created a new runner, append it to the `SCRIPTS` list in `test/autotest/run-full-regression.py` so the orchestrator picks it up. If you amended an existing runner, no `SCRIPTS` change is needed — it's already registered, and duplicating an entry would make the orchestrator run the same suite twice per regression.
     2. Fixtures go under `test/autotest/fixtures/<suite>/`. Reusable binaries live as real files, not base64 blobs in TS. Committed fixtures are excluded from the automated-test cleanup rule.
     3. If the change has a perf dimension, add the new event name to `src/utils/perf-trace-names.ts` first, then instrument, then update `infra/trace.md` § 2.
-    4. Before reporting the task complete, run the trace self-check (`test/autotest/run-trace-infra-self-check-autotest.sh`) and the new runner via `python3 test/autotest/run-full-regression.py --only run-<suite>`; confirm both are green.
+    4. Before reporting the task complete, run the trace self-check (`test/autotest/run-trace-infra-self-check-autotest.sh`) and the affected runner via `python3 test/autotest/run-full-regression.py --only run-<suite>`; confirm both are green.
 - Every task completion report must include:
     1. What is the task goal of the code, and what solution / design approach was used?
     2. What changes were made to which files?
@@ -155,6 +160,8 @@ The app supports two update channels with different tag formats and auto-update 
 ## Full Regression Testing
 
 When the user asks for a full regression run, execute `python3 test/autotest/run-full-regression.py`. That Python file is the single source of truth for the regression set, the per-runner timeout, the kill / cleanup contract, and the output layout. To add or remove a case, modify its `SCRIPTS` list directly — do not introduce a separate driver, checklist, or wrapper script. Output lands in `test/full-regression-results/<UTC-timestamp>/` (`summary.log`, `summary.json`, `logs/<suite>.log`); that directory is gitignored — share its contents by quoting the relevant excerpts back to the user, not by committing the run.
+
+**Note**: `SCRIPTS` only grows when Step 0 of the 5-step SOP concludes "no adjacent runner exists." Amending an existing runner does not require a `SCRIPTS` edit — the runner is already registered, and duplicating an entry will make the orchestrator run the same suite twice per regression.
 
 ## Lessons Learned
 
