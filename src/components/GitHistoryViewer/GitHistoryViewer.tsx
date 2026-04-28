@@ -1288,6 +1288,18 @@ export function GitHistoryViewer({
         }
         setSelectedShas(nextSelected)
         setSelectionAnchor(commit.sha)
+        // Direct dispatch: programmatic callers (autotest, keyboard nav,
+        // external nav) expect the file list to reflect the new commit
+        // before this method returns. The selection-watching useEffect at
+        // line ~1063 is too lazy for that contract — its dispatch can
+        // miss a frame after a close/reopen cycle. Triggering the load
+        // here makes `getFiles()` observe the new range synchronously
+        // (cache-hit) or as soon as the IPC returns (cache-miss). The
+        // effect remains in place for non-API selection paths and is
+        // idempotent for an already-loaded range.
+        const head = commit.sha
+        const base = commit.parents?.[0] ?? EMPTY_TREE_HASH
+        void loadFilesForRange(base, head)
         return true
       },
       selectFileByIndex: (index: number) => {

@@ -1,6 +1,6 @@
 ---
 name: ow_full_regression_test
-description: Run the Onward full automated-test regression via `python3 test/autotest/run-full-regression.py`, parse the run's summary + per-runner logs, then for any failure enter Plan Mode to root-cause the bug and propose a fix to PRODUCTION code (never the test). Use this whenever the user wants to "run the full regression", "run all autotests", "verify nothing is broken", "see what's failing", "triage / fix regression failures", or asks to repair recent autotest breakage. Default policy: tests are the contract, production code drifts — most fixes touch `src/` or `electron/`, not `test/autotest/`. Trigger this skill even when the user only asks for half of the loop ("run regression and tell me what failed", or "fix the markdown autotest"); the workflow handles partial scopes via `--only`.
+description: Run the Onward full automated-test regression — always preceded by a clean dev build (`--build` is mandatory on every invocation, no exceptions) — via `python3 test/autotest/run-full-regression.py --build`, parse the run's summary + per-runner logs, then for any failure enter Plan Mode to root-cause the bug and propose a fix to PRODUCTION code (never the test). Use this whenever the user wants to "run the full regression", "run all autotests", "verify nothing is broken", "see what's failing", "triage / fix regression failures", or asks to repair recent autotest breakage. Default policy: tests are the contract, production code drifts — most fixes touch `src/` or `electron/`, not `test/autotest/`. Trigger this skill even when the user only asks for half of the loop ("run regression and tell me what failed", or "fix the markdown autotest"); the workflow handles partial scopes via `--only`, and `--build` still runs first.
 ---
 
 # ow_full_regression_test
@@ -30,7 +30,7 @@ Touching a test file is reserved for two narrow exceptions:
 
 When in doubt: leave the test alone, fix production.
 
-## Phase 1 — Run the regression
+## Phase 1 — Run the regression (always with a fresh build)
 
 `test/autotest/run-full-regression.py` is the single source of truth
 for the runner list, the per-runner 5-minute timeout, the exact-name
@@ -38,29 +38,36 @@ kill / cleanup contract, and the output layout. Do not invoke
 individual `.sh` runners by hand or wrap the orchestrator in another
 driver.
 
+**Mandatory pre-build — no exceptions.** Every regression invocation
+in this skill MUST start with `--build`. The flag wipes `out/` and
+`release/` then runs `pnpm dist:dev` before the runner list executes,
+so the autotest is provably running against a package built from your
+current source tree. A stale `release/mac-arm64/Under Development …
+.app` is the single biggest source of "fixed it but the test still
+fails" / "didn't touch it but the test now fails" confusion in this
+project, so this is non-negotiable — even if you "just rebuilt" five
+minutes ago, build again. The only exception is `--list`, which
+doesn't run any test.
+
 ```bash
-python3 test/autotest/run-full-regression.py
+python3 test/autotest/run-full-regression.py --build
 ```
 
-Common scopes the user might want:
+Common scopes the user might want (every command keeps `--build`):
 
-| User intent                               | Invocation                                                                |
-|-------------------------------------------|---------------------------------------------------------------------------|
-| Full pass                                 | `python3 test/autotest/run-full-regression.py`                            |
-| Re-run a specific suite                   | `python3 test/autotest/run-full-regression.py --only run-<suite>`         |
-| Skip a known-broken runner this round     | `python3 test/autotest/run-full-regression.py --skip run-<suite>`         |
-| Fresh build before running                | `python3 test/autotest/run-full-regression.py --build`                    |
-| List planned scripts only                 | `python3 test/autotest/run-full-regression.py --list`                     |
+| User intent                               | Invocation                                                                          |
+|-------------------------------------------|-------------------------------------------------------------------------------------|
+| Full pass                                 | `python3 test/autotest/run-full-regression.py --build`                              |
+| Re-run a specific suite                   | `python3 test/autotest/run-full-regression.py --build --only run-<suite>`           |
+| Skip a known-broken runner this round     | `python3 test/autotest/run-full-regression.py --build --skip run-<suite>`           |
+| List planned scripts only (no build, no run) | `python3 test/autotest/run-full-regression.py --list`                            |
 
-If the dev app binary
-(`release/mac-arm64/Under Development <ver>-<branch>.app`) is missing,
-the orchestrator stops with a clear error. Ask whether to use
-`--build` (which runs `rm -rf out release && pnpm dist:dev` first) or
-to build manually before retrying.
-
-A full pass typically takes 20–60 minutes. Run it in the background
-when feasible so the rest of the conversation stays usable; the
-orchestrator prints `PASS` / `FAIL` per runner and a final summary.
+A full pass typically takes 25–70 minutes (≈ 5–10 min build + 20–60
+min runners). Run it in the background when feasible so the rest of
+the conversation stays usable; the orchestrator prints `PASS` /
+`FAIL` per runner and a final summary. If `pnpm dist:dev` itself
+fails, the orchestrator stops before the runner list executes — read
+the build error and fix it before re-running.
 
 ## Phase 2 — Read the results
 
@@ -129,28 +136,30 @@ After the user approves and you exit Plan Mode:
 2. **Do not** modify any file under `test/autotest/**`,
    `test/unittest/**`, or `src/autotest/**` unless the plan explicitly
    declared a test-fix exception and the user approved it.
-3. Per the CLAUDE.md "After modifying code, trigger a build" rule,
-   rebuild the dev app once edits are done:
-   ```bash
-   rm -rf out release && pnpm dist:dev
-   ```
-   The `rm -rf` and `pnpm dist:dev` MUST be chained with `&&` in a
-   single command — the autotest runs the packaged `.app`, never
-   `electron-vite dev`, so a stale `release/` produces a misleading
-   re-run.
+3. **Do not** run `pnpm dist:dev` manually here. Phase 5 always uses
+   `--build`, which performs the clean dev build (`rm -rf out release
+   && pnpm dist:dev`) immediately before the targeted re-run. Doing
+   it twice wastes 5–10 minutes per cycle and adds nothing — letting
+   the orchestrator own the build keeps "package built" and "test
+   ran" provably adjacent in time, which is the property that makes
+   the verification trustworthy.
 
-## Phase 5 — Verify
+## Phase 5 — Verify (always with a fresh build)
 
-Re-run only the affected runner(s) through the orchestrator:
+Re-run only the affected runner(s) through the orchestrator. `--build`
+is required here just like in Phase 1: it rebuilds your fix and runs
+the targeted suites against that fresh package in one command, so the
+verification can never drift from the source you just edited.
 
 ```bash
-python3 test/autotest/run-full-regression.py --only run-<suite>
+python3 test/autotest/run-full-regression.py --build --only run-<suite>
 ```
 
 Confirm the new run reports `Failed: 0` for the targeted scope. If
 something else regressed in the meantime, return to Phase 3
 (re-enter Plan Mode) — do not iterate fixes silently. Each fix /
-verify cycle deserves its own plan.
+verify cycle deserves its own plan, and each re-verify carries its
+own `--build`.
 
 When every previously-failing runner in scope is green, deliver the
 four-question task-completion report required by CLAUDE.md:
@@ -197,14 +206,17 @@ commit.
 
 ## When the run is large
 
-For a full pass (47 runners, up to 1 hour), launch in the background
-so the conversation remains usable while the runner works:
+For a full pass (≈ 5–10 min build + up to ~1 h of runners), launch in
+the background so the conversation remains usable while the runner
+works:
 
 ```bash
-python3 test/autotest/run-full-regression.py
+python3 test/autotest/run-full-regression.py --build
 ```
 
 Use the orchestrator's per-runner `PASS / FAIL` lines to track
 progress. Do not poll aggressively; check back when the background
-task finishes. While waiting, you can pre-read the codebase areas a
-recent change touched so the failure analysis in Phase 3 is faster.
+task finishes. While the build phase is running, the runner list has
+not started yet — that window is a good time to pre-read the codebase
+areas a recent change touched so the failure analysis in Phase 3 is
+faster.

@@ -513,18 +513,40 @@ export async function testProjectEditorSqlite(ctx: AutotestContext): Promise<Tes
     if (!folderMenuReady || cancelled()) return results
 
     if (!findTreeItemByLabel('stress-large.db')) {
+      // Navigate the post-restructure tree: test → autotest → fixtures → sqlite.
+      // The sqlite corpus moved from test/sqlite-fixtures/ to test/autotest/fixtures/sqlite/
+      // in commit 864af6e; line 80–81 of this file already point at the new
+      // path, but the tree expansion below was missed during that migration.
       const testDirItem = findTreeItemByLabel('test')
-      if (testDirItem && !findTreeItemByLabel('sqlite-fixtures')) {
+      if (testDirItem && !findTreeItemByLabel('autotest')) {
         dispatchClick(testDirItem)
       }
       await waitFor(
-        'sqlite-tree-fixtures-dir-visible',
-        () => Boolean(findTreeItemByLabel('sqlite-fixtures')),
+        'sqlite-tree-autotest-dir-visible',
+        () => Boolean(findTreeItemByLabel('autotest')),
         5000
       )
-      const fixturesDirItem = findTreeItemByLabel('sqlite-fixtures')
-      if (fixturesDirItem && !findTreeItemByLabel('stress-large.db')) {
+      const autotestDirItem = findTreeItemByLabel('autotest')
+      if (autotestDirItem && !findTreeItemByLabel('fixtures')) {
+        dispatchClick(autotestDirItem)
+      }
+      await waitFor(
+        'sqlite-tree-fixtures-dir-visible',
+        () => Boolean(findTreeItemByLabel('fixtures')),
+        5000
+      )
+      const fixturesDirItem = findTreeItemByLabel('fixtures')
+      if (fixturesDirItem && !findTreeItemByLabel('sqlite')) {
         dispatchClick(fixturesDirItem)
+      }
+      await waitFor(
+        'sqlite-tree-sqlite-dir-visible',
+        () => Boolean(findTreeItemByLabel('sqlite')),
+        5000
+      )
+      const sqliteDirItem = findTreeItemByLabel('sqlite')
+      if (sqliteDirItem && !findTreeItemByLabel('stress-large.db')) {
+        dispatchClick(sqliteDirItem)
       }
     }
     const stressFileInTreeReady = await waitFor(
