@@ -14,6 +14,8 @@ Targets (all gitignored, all local-only):
   traces/test-logs/           Per-runner autotest stdout/stderr
   traces/screenshots/         Ad-hoc capture output (if any)
   traces/profile/             CPU / sampling profile dumps (if any)
+  traces/.tp_shell.log        Perfetto trace_processor_shell --httpd daemon log
+                              (written by infra/scripts/open_trace.sh)
   test/full-regression-results/   Per-run summary + per-runner logs from
                                   test/autotest/run-full-regression.py
   test/autotest/results/      Renderer-side autotest scratch output
@@ -67,6 +69,9 @@ TARGETS: List[Target] = [
     Target("traces/test-logs",             "traces",           REPO / "traces" / "test-logs",             _KEEP),
     Target("traces/screenshots",           "traces",           REPO / "traces" / "screenshots",           _KEEP),
     Target("traces/profile",               "traces",           REPO / "traces" / "profile",               _KEEP),
+    # File target: the Perfetto trace_processor_shell daemon log written by
+    # infra/scripts/open_trace.sh. Single file at traces/ top level, not a dir.
+    Target("traces/.tp_shell.log",         "traces",           REPO / "traces" / ".tp_shell.log",         set()),
     Target("test/full-regression-results", "regression",       REPO / "test" / "full-regression-results", _KEEP),
     Target("test/autotest/results",        "autotest-results", REPO / "test" / "autotest" / "results",    _KEEP),
 ]
@@ -129,17 +134,21 @@ def collect_plan(categories: Set[str]) -> List[TargetPlan]:
         items: List[Path] = []
         bytes_total = 0
         files_total = 0
-        try:
-            children = sorted(tgt.base.iterdir())
-        except OSError:
-            children = []
-        for child in children:
-            if child.name in tgt.preserve:
-                continue
-            items.append(child)
-            b, c = path_size_files(child)
-            bytes_total += b
-            files_total += c
+        if tgt.base.is_file() and not tgt.base.is_symlink():
+            items.append(tgt.base)
+            bytes_total, files_total = path_size_files(tgt.base)
+        else:
+            try:
+                children = sorted(tgt.base.iterdir())
+            except OSError:
+                children = []
+            for child in children:
+                if child.name in tgt.preserve:
+                    continue
+                items.append(child)
+                b, c = path_size_files(child)
+                bytes_total += b
+                files_total += c
         if items:
             plan.append(TargetPlan(tgt, items, bytes_total, files_total))
     return plan
@@ -154,6 +163,12 @@ def print_plan(plan: List[TargetPlan], dry_run: bool) -> None:
     header = "DRY-RUN — would delete" if dry_run else "Cleanup plan — will delete"
     print(f"{header} {grand_files} file(s), {human_size(grand_bytes)} total:\n")
     for tp in plan:
+        # File targets are a single self-referential item — render as one
+        # line; directory targets get a trailing "/" plus a leaf listing.
+        if tp.target.base.is_file():
+            print(f"  {tp.target.label}  (file, {human_size(tp.bytes_total)})")
+            print()
+            continue
         entries = "entry" if len(tp.items) == 1 else "entries"
         print(f"  {tp.target.label}/  ({len(tp.items)} {entries}, {tp.files_total} file(s), {human_size(tp.bytes_total)})")
         # Show up to 5 leaf items per category so the plan stays readable.
