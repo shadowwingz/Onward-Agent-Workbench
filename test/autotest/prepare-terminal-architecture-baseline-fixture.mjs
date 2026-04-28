@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
-const fixtureRoot = resolve(repoRoot, 'test', 'fixtures', 'terminal-architecture-baseline')
+const fixtureRoot = resolve(repoRoot, 'test', 'autotest', 'fixtures', 'terminal-architecture-baseline')
 const seedDir = resolve(fixtureRoot, 'seed')
 const workdir = resolve(fixtureRoot, 'workdir')
 const marker = 'ONWARD_TERMINAL_BASELINE_TOKEN'

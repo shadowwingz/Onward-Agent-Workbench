@@ -9,8 +9,8 @@ import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
-const fixtureRoot = resolve(repoRoot, 'test', 'fixtures', 'prompt-input-longtail')
-const sharedFixtureRoot = resolve(repoRoot, 'test', 'fixtures', 'terminal-architecture-baseline')
+const fixtureRoot = resolve(repoRoot, 'test', 'autotest', 'fixtures', 'prompt-input-longtail')
+const sharedFixtureRoot = resolve(repoRoot, 'test', 'autotest', 'fixtures', 'terminal-architecture-baseline')
 const seedDir = resolve(sharedFixtureRoot, 'seed')
 const loadGeneratorPath = resolve(sharedFixtureRoot, 'load-generator.mjs')
 const taskWorkloadPath = resolve(fixtureRoot, 'task-workload.mjs')

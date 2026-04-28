@@ -14,8 +14,8 @@ const BINARY_RE = /\0/
 const ALLOWLIST = new Set([
   'src/i18n/core.ts',
   // Test files may contain Chinese strings as test data (not comments)
-  'test/test-full-e2e.ts',
-  'test/test-prompt-integrity.ts',
+  'test/autotest/test-full-e2e.ts',
+  'test/autotest/test-prompt-integrity.ts',
   // Project instruction files may quote Chinese phrases from user usage.
   'CLAUDE.md',
   'AGENTS.md'

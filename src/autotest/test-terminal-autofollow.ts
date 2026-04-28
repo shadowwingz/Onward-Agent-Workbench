@@ -21,7 +21,7 @@ export async function testTerminalAutofollow(ctx: AutotestContext): Promise<Test
   // repo root (seen in the worktree's autotest invocations), which would
   // route the fixture lookup to ~/test/autotest/fixtures/... and fail immediately.
   const fixtureRootPath = window.electronAPI.debug.autotestCwd || rootPath
-  const fixturePath = `${fixtureRootPath}${separator}test${separator}fixtures${separator}terminal-autofollow-repro.mjs`
+  const fixturePath = `${fixtureRootPath}${separator}test${separator}autotest${separator}fixtures${separator}terminal-autofollow-repro.mjs`
 
   const execCommand = async (command: string, label: string, waitMs = 300) => {
     await window.electronAPI.terminal.write(terminalId, `${command}\r`)

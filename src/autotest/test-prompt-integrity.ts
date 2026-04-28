@@ -74,8 +74,8 @@ export async function testPromptIntegrity(ctx: AutotestContext): Promise<TestRes
   const terminalApi = () => window.__onwardTerminalDebug as TerminalDebugApi | undefined
   const platform = window.electronAPI.platform
   const separator = platform === 'win32' ? '\\' : '/'
-  const fixturePath = joinPlatformPath(separator, rootPath, 'test', 'fixtures', 'prompt-capture-stdin.cjs')
-  const shellReadyFixturePath = joinPlatformPath(separator, rootPath, 'test', 'fixtures', 'prompt-shell-ready.cjs')
+  const fixturePath = joinPlatformPath(separator, rootPath, 'test', 'autotest', 'fixtures', 'prompt-capture-stdin.cjs')
+  const shellReadyFixturePath = joinPlatformPath(separator, rootPath, 'test', 'autotest', 'fixtures', 'prompt-shell-ready.cjs')
   const outputDir = `test-prompt-integrity-${Date.now()}`
   const selectedTerminal = () => senderApi()?.getSelectedTerminalIds()[0] ?? terminalId
 
