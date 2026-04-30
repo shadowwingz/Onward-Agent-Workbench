@@ -40,6 +40,15 @@ export interface TerminalInfo {
   title: string
   /** Custom name (for editing) */
   customName: string | null
+  /**
+   * Repo root snapshot taken when customName was last set by a user-initiated
+   * action (Rename, Use Branch, Use Repo). Non-null means "manual override
+   * active in this repo": auto-follow leaves customName alone while the
+   * terminal's cwd is still inside this repoRoot, and clears it once the
+   * cwd moves to a different repoRoot. Null means customName was either
+   * unset, set automatically by auto-follow, or set outside any repo.
+   */
+  manualNameRepoRoot: string | null
   /** Persisted working directory */
   lastCwd?: string | null
   isActive: boolean

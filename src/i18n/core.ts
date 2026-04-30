@@ -177,7 +177,7 @@ const en = {
   'terminalDropdown.codeAgent': 'Launch Code Agent',
 
   'terminalTitleMenu.ariaLabel': 'Terminal title menu',
-  'terminalTitleMenu.renameItem': 'Rename (double-click)',
+  'terminalTitleMenu.renameItem': 'Rename',
   'terminalTitleMenu.useBranchItem': 'Use branch name',
   'terminalTitleMenu.useRepoItem': 'Use Git folder name',
   'terminalTitleMenu.renameTooltip': 'Rename this terminal',
@@ -185,6 +185,8 @@ const en = {
   'terminalTitleMenu.useRepoTooltip': 'Set the name to the Git folder name (snapshot)',
   'terminalTitleMenu.useBranchDisabledTooltip': 'No Git branch detected in this terminal',
   'terminalTitleMenu.useRepoDisabledTooltip': 'This terminal is not inside a Git repository',
+  'terminalTitleMenu.autoFollowBranchItem': 'Auto-follow Git branch name',
+  'terminalTitleMenu.autoFollowBranchTooltip': 'When on, this task is named after the current branch and updates automatically. A manual rename takes priority until you switch to a different repository.',
 
   // Coding Agent Modal
   'codingAgent.title': 'Launch Code Agent',
@@ -502,7 +504,7 @@ const en = {
   'terminalGrid.copyLabel.branch': 'branch',
   'terminalGrid.copyLabel.path': 'path',
   'terminalGrid.placeholderTask': 'Task {{index}}',
-  'terminalGrid.editTitle': 'Double-click to edit the name',
+  'terminalGrid.editTitle': 'Click for task options',
   'terminalGrid.overlay.errorTitle': 'Failed to start terminal',
   'terminalGrid.overlay.errorDescription': 'Check the default shell or permission settings.',
   'terminalGrid.overlay.initializingTitle': 'Starting terminal...',
@@ -1264,7 +1266,7 @@ const zhCN: LocaleTranslations = {
   'terminalDropdown.codeAgent': '启动编码助手',
 
   'terminalTitleMenu.ariaLabel': '终端标题菜单',
-  'terminalTitleMenu.renameItem': '重命名（双击）',
+  'terminalTitleMenu.renameItem': '重命名',
   'terminalTitleMenu.useBranchItem': '使用分支名称',
   'terminalTitleMenu.useRepoItem': '使用 Git 文件夹名',
   'terminalTitleMenu.renameTooltip': '重命名该终端',
@@ -1272,6 +1274,8 @@ const zhCN: LocaleTranslations = {
   'terminalTitleMenu.useRepoTooltip': '将名称设为 Git 文件夹名（快照）',
   'terminalTitleMenu.useBranchDisabledTooltip': '未在该终端检测到 Git 分支',
   'terminalTitleMenu.useRepoDisabledTooltip': '该终端不在 Git 仓库内',
+  'terminalTitleMenu.autoFollowBranchItem': '自动跟随 Git 分支名',
+  'terminalTitleMenu.autoFollowBranchTooltip': '开启后，此 Task 自动以当前分支命名并随分支同步；手动重命名优先，直到切换到其他仓库。',
 
   // Coding Agent Modal
   'codingAgent.title': '启动编码助手',
@@ -1589,7 +1593,7 @@ const zhCN: LocaleTranslations = {
   'terminalGrid.copyLabel.branch': '分支',
   'terminalGrid.copyLabel.path': '路径',
   'terminalGrid.placeholderTask': 'Task {{index}}',
-  'terminalGrid.editTitle': '双击编辑名称',
+  'terminalGrid.editTitle': '点击查看 Task 选项',
   'terminalGrid.overlay.errorTitle': '终端启动失败',
   'terminalGrid.overlay.errorDescription': '请检查默认 Shell 或权限设置',
   'terminalGrid.overlay.initializingTitle': '终端启动中...',

@@ -6,7 +6,6 @@
 import type { AutotestContext, TerminalDebugApi, TestResult } from './types'
 
 const MENU_SELECTOR = '[data-testid="terminal-title-menu"]'
-const DELAY_MS = 220
 
 function menuElement(): HTMLElement | null {
   return document.querySelector(MENU_SELECTOR) as HTMLElement | null
@@ -15,10 +14,15 @@ function menuElement(): HTMLElement | null {
 function menuItems(): HTMLButtonElement[] {
   const root = menuElement()
   if (!root) return []
-  return Array.from(root.querySelectorAll('button[role="menuitem"]')) as HTMLButtonElement[]
+  // Includes both `menuitem` and `menuitemcheckbox` buttons.
+  return Array.from(
+    root.querySelectorAll('button[role="menuitem"], button[role="menuitemcheckbox"]')
+  ) as HTMLButtonElement[]
 }
 
-function itemByAction(action: 'rename' | 'use-branch' | 'use-repo'): HTMLButtonElement | null {
+function itemByAction(
+  action: 'rename' | 'auto-follow-toggle' | 'use-branch' | 'use-repo'
+): HTMLButtonElement | null {
   const items = menuItems()
   return items.find((el) => el.getAttribute('data-action') === action) ?? null
 }
@@ -62,24 +66,34 @@ export async function testTerminalTitleRename(ctx: AutotestContext): Promise<Tes
     await sleep(60)
   }
 
-  // ================= TTM-01: single click with 220ms delay =================
+  // ================= TTM-01: single click opens menu immediately (no 220ms delay) =================
+  // The previous 220ms click-vs-double-click disambiguation timer has been
+  // removed: single click should open the dropdown synchronously so users
+  // perceive zero latency. The historical "delay then open" assertion is
+  // gone; instead we verify the menu is open within a single React flush.
   await resetState()
   api.simulateTitleSingleClick(terminalId)
-  await sleep(80)
-  const beforeOpen = api.getTitleMenuState(terminalId)
-  await sleep(DELAY_MS + 60)
+  // Allow one render cycle for setTitleMenuTerminalId(...) to commit.
+  await sleep(30)
   const afterOpen = api.getTitleMenuState(terminalId)
-  record('TTM-01-delayed-menu-open', beforeOpen?.open === false && afterOpen?.open === true, {
-    before: beforeOpen,
+  record('TTM-01-immediate-menu-open', afterOpen?.open === true, {
     after: afterOpen
   })
 
-  // ================= TTM-02: menu contains three items in the expected order =================
+  // ================= TTM-02: menu contains four items in the expected order =================
+  // Order: Rename → Auto-follow checkbox → Use Branch → Use Repo.
+  // The auto-follow item is sandwiched between separators in the DOM but
+  // shares the same focusable role list, so we check the four data-action
+  // values directly.
   const itemsNow = menuItems()
   const actions = itemsNow.map((el) => el.getAttribute('data-action'))
   record(
     'TTM-02-menu-items-order',
-    itemsNow.length === 3 && actions[0] === 'rename' && actions[1] === 'use-branch' && actions[2] === 'use-repo',
+    itemsNow.length === 4 &&
+      actions[0] === 'rename' &&
+      actions[1] === 'auto-follow-toggle' &&
+      actions[2] === 'use-branch' &&
+      actions[3] === 'use-repo',
     { actions }
   )
 
@@ -207,42 +221,48 @@ export async function testTerminalTitleRename(ctx: AutotestContext): Promise<Tes
     { forcedBranch, forcedRepo, customDisabled }
   )
 
-  // ================= TTM-11: double-click within 220ms cancels pending menu =================
+  // ================= TTM-11: real DOM double-click on title does NOT enter rename =================
+  // After the rewrite, the only entry to inline rename via the title bar is
+  // the dropdown's "Rename" item (or PromptSender's task-card double-click,
+  // which lives in a different component). Dispatching a real `dblclick` on
+  // the title element must NOT start an inline edit.
   await resetState()
-  api.simulateTitleSingleClick(terminalId)
-  await sleep(80)
-  api.simulateTitleDoubleClick(terminalId)
-  // Check editing state BEFORE any long sleep — terminal focus logic may
-  // blur the input during long waits and commit the inline rename.
-  await sleep(30)
-  const editingAfterDbl = api.getInlineRenameState()
-  // Wait past the original 220ms timer threshold to verify menu never opened.
-  await sleep(DELAY_MS + 80)
-  const menuOpenAfterDbl = api.getTitleMenuState(terminalId)?.open
+  const titleAnchor = document.querySelector(
+    `[data-terminal-id="${terminalId}"] .terminal-grid-title`
+  ) as HTMLElement | null
+  if (titleAnchor) {
+    titleAnchor.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }))
+    await sleep(30)
+  }
+  const editingAfterTitleDbl = api.getInlineRenameState()
   record(
-    'TTM-11-dblclick-preempts-menu',
-    menuOpenAfterDbl === false && editingAfterDbl.editingId === terminalId,
-    { menuOpenAfterDbl, editingAfterDbl }
+    'TTM-11-title-double-click-does-not-rename',
+    editingAfterTitleDbl.editingId === null,
+    { editingAfterTitleDbl, hadAnchor: titleAnchor !== null }
   )
-  api.cancelInlineRename()
+  api.closeTitleMenu()
+  await sleep(20)
 
-  // ================= TTM-12: single click > 240ms opens menu =================
+  // ================= TTM-12: a single real click opens the menu within one frame =================
   await resetState()
-  api.simulateTitleSingleClick(terminalId)
-  // Poll for up to 1200ms to absorb render jitter — the 220ms timer should
-  // have fired well within this window.
-  const menuOpenedSlow = await waitFor(
-    'ttm12-menu-open',
+  const anchorForSingleClick = document.querySelector(
+    `[data-terminal-id="${terminalId}"] .terminal-grid-title`
+  ) as HTMLElement | null
+  if (anchorForSingleClick) {
+    anchorForSingleClick.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+  }
+  const menuOpenedFast = await waitFor(
+    'ttm12-menu-open-fast',
     () => api.getTitleMenuState(terminalId)?.open === true,
-    1200,
-    30
+    400,
+    20
   )
-  const menuOpenSlow = api.getTitleMenuState(terminalId)?.open
-  const menuDomAtSlow = menuElement() !== null
+  const menuOpenFast = api.getTitleMenuState(terminalId)?.open
+  const menuDomAtFast = menuElement() !== null
   record(
-    'TTM-12-slow-single-click-opens',
-    menuOpenedSlow === true && menuOpenSlow === true,
-    { menuOpenedSlow, menuOpenSlow, menuDomAtSlow }
+    'TTM-12-real-single-click-opens',
+    menuOpenedFast === true && menuOpenFast === true,
+    { menuOpenedFast, menuOpenFast, menuDomAtFast }
   )
   api.closeTitleMenu()
   await sleep(20)
@@ -256,7 +276,9 @@ export async function testTerminalTitleRename(ctx: AutotestContext): Promise<Tes
     api.simulateTitleSingleClick(a)
     await sleep(40)
     api.simulateTitleSingleClick(b)
-    await sleep(DELAY_MS + 80)
+    // Both single-clicks now open the menu synchronously. Allow one render
+    // flush so b's state.open=true takes effect.
+    await sleep(60)
     const stateA = api.getTitleMenuState(a)
     const stateB = api.getTitleMenuState(b)
     record(
@@ -268,15 +290,18 @@ export async function testTerminalTitleRename(ctx: AutotestContext): Promise<Tes
     record('TTM-13-only-last-terminal-menu-opens', true, { skipped: 'need 2+ terminals', visibleIds })
   }
 
-  // ================= TTM-14: pure double-click still enters inline rename =================
+  // ================= TTM-14: simulateTitleDoubleClick debug alias still drives inline rename =================
+  // The production UX no longer reacts to double-click on the title, but the
+  // debug-API alias is preserved so existing test fixtures that reach inline
+  // edit via this shortcut keep working without going through the menu.
   await resetState()
   api.simulateTitleDoubleClick(terminalId)
   await sleep(30)
-  const editingAfterPureDbl = api.getInlineRenameState()
+  const editingAfterAlias = api.getInlineRenameState()
   record(
-    'TTM-14-pure-double-click-renames',
-    editingAfterPureDbl.editingId === terminalId,
-    { editingAfterPureDbl }
+    'TTM-14-double-click-alias-enters-rename',
+    editingAfterAlias.editingId === terminalId,
+    { editingAfterAlias }
   )
   api.cancelInlineRename()
 
@@ -385,16 +410,16 @@ export async function testTerminalTitleRename(ctx: AutotestContext): Promise<Tes
     document.querySelector(`[data-terminal-id="${terminalId}"] .terminal-grid-title`) as HTMLElement | null
   const getInput = () =>
     document.querySelector(`[data-terminal-id="${terminalId}"] .terminal-grid-title-input`) as HTMLInputElement | null
-  const getMenuButton = (action: 'rename' | 'use-branch' | 'use-repo') =>
+  const getMenuButton = (action: 'rename' | 'auto-follow-toggle' | 'use-branch' | 'use-repo') =>
     document.querySelector(`[data-testid="terminal-title-menu"] [data-action="${action}"]`) as HTMLButtonElement | null
 
   let traceError: string | null = null
   try {
-    // 1) Real single-click on the title — exercises handleTitleClick → setTimeout → titleMenu:open.
+    // 1) Real single-click on the title — exercises handleTitleClick → setTitleMenuTerminalId → titleMenu:open.
     const anchor1 = getAnchor()
     if (!anchor1) throw new Error('initial title anchor not found')
     anchor1.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
-    await sleep(DELAY_MS + 80)
+    await sleep(40)
 
     // 2) Real click on the "Use branch name" menu item — exercises handleTitleSnapshotRename → titleMenu:snapshot.
     const branchBtn = getMenuButton('use-branch')
@@ -402,27 +427,35 @@ export async function testTerminalTitleRename(ctx: AutotestContext): Promise<Tes
     branchBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
     await sleep(50)
 
-    // 3) Real dblclick on the title — exercises handleTitleDoubleClick → titleMenu:rename stage:start.
+    // 3) Open the menu and click "Rename" — exercises handleStartEdit → titleMenu:rename stage:start (source=menu).
     const anchor3 = getAnchor()
-    if (!anchor3) throw new Error('title anchor missing before first dblclick')
-    anchor3.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }))
-    await sleep(50)
+    if (!anchor3) throw new Error('title anchor missing before menu rename')
+    anchor3.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+    await sleep(40)
+    const renameBtn = getMenuButton('rename')
+    if (!renameBtn) throw new Error('rename menu button not found')
+    renameBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+    await sleep(40)
 
     // 4) Enter on the inline input — exercises handleKeyDown → handleFinishEdit → titleMenu:rename stage:commit.
     const input4 = getInput()
-    if (!input4) throw new Error('inline input missing after first dblclick')
+    if (!input4) throw new Error('inline input missing after menu rename')
     input4.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))
     await sleep(50)
 
-    // 5) Real dblclick again — exercises titleMenu:rename stage:start a second time.
+    // 5) Open the menu again and click "Rename" — exercises titleMenu:rename stage:start a second time.
     const anchor5 = getAnchor()
-    if (!anchor5) throw new Error('title anchor missing before second dblclick')
-    anchor5.dispatchEvent(new MouseEvent('dblclick', { bubbles: true, cancelable: true }))
-    await sleep(50)
+    if (!anchor5) throw new Error('title anchor missing before second menu rename')
+    anchor5.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+    await sleep(40)
+    const renameBtn2 = getMenuButton('rename')
+    if (!renameBtn2) throw new Error('rename menu button not found (second)')
+    renameBtn2.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+    await sleep(40)
 
     // 6) Escape on the inline input — exercises handleCancelEdit → titleMenu:rename stage:cancel.
     const input6 = getInput()
-    if (!input6) throw new Error('inline input missing after second dblclick')
+    if (!input6) throw new Error('inline input missing after second menu rename')
     input6.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
     await sleep(50)
   } catch (err) {
@@ -437,16 +470,16 @@ export async function testTerminalTitleRename(ctx: AutotestContext): Promise<Tes
   const stages = renames.map((c) => (c.data as { stage?: string } | undefined)?.stage ?? null)
   const openSourceClick = opens.some((c) => (c.data as { source?: string } | undefined)?.source === 'click')
   const snapshotSourceBranch = snapshots.some((c) => (c.data as { source?: string } | undefined)?.source === 'branch')
-  const startWithDoubleClick = renames.some((c) => {
+  const startFromMenu = renames.some((c) => {
     const d = c.data as { stage?: string; source?: string } | undefined
-    return d?.stage === 'start' && d?.source === 'doubleClick'
+    return d?.stage === 'start' && d?.source === 'menu'
   })
   record(
     'TTM-20-trace-events-emit',
     traceError === null &&
       openSourceClick &&
       snapshotSourceBranch &&
-      startWithDoubleClick &&
+      startFromMenu &&
       stages.includes('commit') &&
       stages.includes('cancel'),
     {
@@ -458,6 +491,228 @@ export async function testTerminalTitleRename(ctx: AutotestContext): Promise<Tes
       renameCount: renames.length
     }
   )
+
+  // ================= TTM-21: auto-follow defaults to ON and tracks branch =================
+  // Default install ships with autoFollowGitBranchForTaskName=true. Pushing a
+  // branch via the git-info override should drive customName to that branch
+  // automatically, with no manualNameRepoRoot stamp (so subsequent branch
+  // changes can keep updating it).
+  await resetState()
+  api.setAutoFollowGitBranchForTaskName(true)
+  await sleep(40)
+  api.setTerminalGitInfoOverride(terminalId, {
+    repoRoot: '/repo/A',
+    branch: 'feat/auto-1',
+    repoName: 'A'
+  })
+  // Wait for React to flush the auto-follow rename + persistence debounce.
+  const followedAuto1 = await waitFor(
+    'ttm21-followed-branch',
+    () => api.getTerminalCustomName(terminalId) === 'feat/auto-1',
+    1500,
+    40
+  )
+  const manualRepoRootAfterAuto1 = api.getTerminalManualNameRepoRoot(terminalId)
+  record(
+    'TTM-21-auto-follow-default-on',
+    followedAuto1 === true &&
+      api.getTerminalCustomName(terminalId) === 'feat/auto-1' &&
+      manualRepoRootAfterAuto1 === null,
+    {
+      customName: api.getTerminalCustomName(terminalId),
+      manualRepoRootAfterAuto1
+    }
+  )
+
+  // ================= TTM-22: same-repo branch change keeps tracking =================
+  api.setTerminalGitInfoOverride(terminalId, {
+    repoRoot: '/repo/A',
+    branch: 'feat/auto-2',
+    repoName: 'A'
+  })
+  const followedAuto2 = await waitFor(
+    'ttm22-followed-branch',
+    () => api.getTerminalCustomName(terminalId) === 'feat/auto-2',
+    1500,
+    40
+  )
+  record(
+    'TTM-22-same-repo-branch-update',
+    followedAuto2 === true && api.getTerminalCustomName(terminalId) === 'feat/auto-2',
+    { customName: api.getTerminalCustomName(terminalId) }
+  )
+
+  // ================= TTM-23: dropdown Rename pins manual override in the current repo =================
+  await resetState()
+  api.setAutoFollowGitBranchForTaskName(true)
+  await sleep(40)
+  api.setTerminalGitInfoOverride(terminalId, {
+    repoRoot: '/repo/B',
+    branch: 'main',
+    repoName: 'B'
+  })
+  await waitFor('ttm23-pre-auto', () => api.getTerminalCustomName(terminalId) === 'main', 1500, 40)
+  api.openTitleMenu(terminalId)
+  await sleep(20)
+  api.clickTitleMenuItem('rename', terminalId)
+  await sleep(20)
+  api.finishInlineRename('manual-locked')
+  await sleep(80)
+  const customAfterManual = api.getTerminalCustomName(terminalId)
+  const manualRepoRootAfter = api.getTerminalManualNameRepoRoot(terminalId)
+  // Drive a branch change in the same repo. The manual name must NOT be
+  // overwritten because the recorded manualNameRepoRoot still matches.
+  api.setTerminalGitInfoOverride(terminalId, {
+    repoRoot: '/repo/B',
+    branch: 'feature/x',
+    repoName: 'B'
+  })
+  await sleep(180)
+  const customAfterSameRepoBranch = api.getTerminalCustomName(terminalId)
+  record(
+    'TTM-23-manual-pinned-within-repo',
+    customAfterManual === 'manual-locked' &&
+      manualRepoRootAfter === '/repo/B' &&
+      customAfterSameRepoBranch === 'manual-locked',
+    { customAfterManual, manualRepoRootAfter, customAfterSameRepoBranch }
+  )
+
+  // ================= TTM-24: cross-repo cwd change clears the manual override =================
+  api.setTerminalGitInfoOverride(terminalId, {
+    repoRoot: '/repo/C',
+    branch: 'develop',
+    repoName: 'C'
+  })
+  const customAfterCrossRepo = await waitFor(
+    'ttm24-cross-repo',
+    () => api.getTerminalCustomName(terminalId) === 'develop',
+    1500,
+    40
+  )
+  const manualRepoRootAfterCross = api.getTerminalManualNameRepoRoot(terminalId)
+  record(
+    'TTM-24-cross-repo-clears-manual',
+    customAfterCrossRepo === true &&
+      api.getTerminalCustomName(terminalId) === 'develop' &&
+      manualRepoRootAfterCross === null,
+    { customName: api.getTerminalCustomName(terminalId), manualRepoRootAfterCross }
+  )
+
+  // ================= TTM-25: auto-follow OFF freezes the displayed name =================
+  // Existing customName at this point is 'develop' (auto-set in TTM-24).
+  // Turning auto-follow off should leave it untouched even when the branch
+  // changes.
+  api.setAutoFollowGitBranchForTaskName(false)
+  await sleep(40)
+  api.setTerminalGitInfoOverride(terminalId, {
+    repoRoot: '/repo/C',
+    branch: 'develop-renamed',
+    repoName: 'C'
+  })
+  await sleep(180)
+  const customAfterOff = api.getTerminalCustomName(terminalId)
+  record(
+    'TTM-25-off-freezes-name',
+    customAfterOff === 'develop',
+    { customAfterOff }
+  )
+
+  // ================= TTM-26: OFF→ON re-adopts the current branch =================
+  api.setAutoFollowGitBranchForTaskName(true)
+  const customAfterOn = await waitFor(
+    'ttm26-toggled-on',
+    () => api.getTerminalCustomName(terminalId) === 'develop-renamed',
+    1500,
+    40
+  )
+  record(
+    'TTM-26-toggle-on-resyncs-branch',
+    customAfterOn === true && api.getTerminalCustomName(terminalId) === 'develop-renamed',
+    { customName: api.getTerminalCustomName(terminalId) }
+  )
+
+  // ================= TTM-27: OFF→ON also clears a stale manual override =================
+  // First, with auto-follow ON, the customName tracks the branch. Pin a
+  // manual override in this same repo, turn the toggle OFF (manual stays
+  // because no IPC update touches it), then turn it back ON. Per the design
+  // contract, OFF→ON must clear the manual flag and adopt the current branch.
+  await resetState()
+  api.setAutoFollowGitBranchForTaskName(true)
+  await sleep(40)
+  api.setTerminalGitInfoOverride(terminalId, {
+    repoRoot: '/repo/D',
+    branch: 'master',
+    repoName: 'D'
+  })
+  await waitFor('ttm27-pre-auto', () => api.getTerminalCustomName(terminalId) === 'master', 1500, 40)
+  api.openTitleMenu(terminalId)
+  await sleep(20)
+  api.clickTitleMenuItem('rename', terminalId)
+  await sleep(20)
+  api.finishInlineRename('manual-stale')
+  await sleep(80)
+  const beforeToggle = api.getTerminalCustomName(terminalId)
+  const beforeToggleManual = api.getTerminalManualNameRepoRoot(terminalId)
+  api.setAutoFollowGitBranchForTaskName(false)
+  await sleep(40)
+  api.setAutoFollowGitBranchForTaskName(true)
+  const afterToggleOn = await waitFor(
+    'ttm27-toggle-on-clears-manual',
+    () => api.getTerminalCustomName(terminalId) === 'master',
+    1500,
+    40
+  )
+  const afterToggleManual = api.getTerminalManualNameRepoRoot(terminalId)
+  record(
+    'TTM-27-on-clears-manual-and-resyncs',
+    beforeToggle === 'manual-stale' &&
+      beforeToggleManual === '/repo/D' &&
+      afterToggleOn === true &&
+      api.getTerminalCustomName(terminalId) === 'master' &&
+      afterToggleManual === null,
+    {
+      beforeToggle,
+      beforeToggleManual,
+      afterToggle: api.getTerminalCustomName(terminalId),
+      afterToggleManual
+    }
+  )
+
+  // ================= TTM-28: dropdown auto-follow checkbox persists +
+  //                              click-toggles via real DOM =================
+  // The checkbox is the user-facing entry point for the preference. Clicking
+  // it must (a) flip the persisted value, (b) NOT close the menu (per the
+  // design spec), and (c) update the visible aria-checked attribute.
+  await resetState()
+  api.setAutoFollowGitBranchForTaskName(true)
+  await sleep(30)
+  api.openTitleMenu(terminalId)
+  await sleep(30)
+  const toggleBtn = document.querySelector(
+    `[data-testid="terminal-title-menu"] [data-action="auto-follow-toggle"]`
+  ) as HTMLButtonElement | null
+  const ariaCheckedBefore = toggleBtn?.getAttribute('aria-checked')
+  toggleBtn?.click()
+  await sleep(40)
+  const persistedAfterClick = api.getAutoFollowGitBranchForTaskName()
+  const menuStillOpen = api.getTitleMenuState(terminalId)?.open
+  const toggleBtn2 = document.querySelector(
+    `[data-testid="terminal-title-menu"] [data-action="auto-follow-toggle"]`
+  ) as HTMLButtonElement | null
+  const ariaCheckedAfter = toggleBtn2?.getAttribute('aria-checked')
+  record(
+    'TTM-28-checkbox-toggles-and-stays-open',
+    ariaCheckedBefore === 'true' &&
+      persistedAfterClick === false &&
+      menuStillOpen === true &&
+      ariaCheckedAfter === 'false',
+    { ariaCheckedBefore, persistedAfterClick, menuStillOpen, ariaCheckedAfter }
+  )
+  // Restore default for downstream tests / other suites.
+  api.setAutoFollowGitBranchForTaskName(true)
+  await sleep(20)
+  api.closeTitleMenu()
+  api.setTerminalGitInfoOverride(terminalId, null)
 
   await resetState()
   log('terminal-title-rename:complete', { total: results.length })

@@ -76,6 +76,14 @@ export interface SettingsState {
   telemetryConsent: boolean | null
   /** Anonymous instance ID for telemetry (random UUID, regenerated on re-opt-in) */
   telemetryInstanceId: string | null
+  /**
+   * Auto-follow Git branch for Task name. When true, Task names default to
+   * the current cwd's branch and update on cwd / branch change. A user-driven
+   * rename (via the title menu's Rename item, Use Branch, or Use Repo)
+   * pins the name within that repo until the cwd switches to a different
+   * git repository. Default true.
+   */
+  autoFollowGitBranchForTaskName: boolean
   updatedAt: number
 }
 

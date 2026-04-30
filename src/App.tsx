@@ -174,6 +174,7 @@ const TabTerminalGrid = memo(function TabTerminalGrid({
   isActive,
   onTerminalFocus,
   onTerminalRename,
+  onTerminalAutoRename,
   onPersistTerminalCwd,
   onOpenProjectEditor,
   projectEditorTerminalId,
@@ -189,6 +190,7 @@ const TabTerminalGrid = memo(function TabTerminalGrid({
   isActive: boolean
   onTerminalFocus: (tabId: string, terminalId: string) => void
   onTerminalRename: (tabId: string, terminalId: string, newTitle: string) => void
+  onTerminalAutoRename: (tabId: string, terminalId: string, newCustomName: string | null) => void
   onPersistTerminalCwd: (terminalId: string, cwd: string | null) => void
   onOpenProjectEditor: (terminalId: string) => void
   projectEditorTerminalId: string | null
@@ -206,6 +208,7 @@ const TabTerminalGrid = memo(function TabTerminalGrid({
       id: t.id,
       title: getTerminalDisplayName(index, t.customName),
       customName: t.customName,
+      manualNameRepoRoot: t.manualNameRepoRoot ?? null,
       lastCwd: t.lastCwd,
       isActive: t.id === tab.activeTerminalId
     }))
@@ -221,6 +224,10 @@ const TabTerminalGrid = memo(function TabTerminalGrid({
   const handleTerminalRename = useCallback((terminalId: string, newTitle: string) => {
     onTerminalRename(tab.id, terminalId, newTitle)
   }, [tab.id, onTerminalRename])
+
+  const handleTerminalAutoRename = useCallback((terminalId: string, newCustomName: string | null) => {
+    onTerminalAutoRename(tab.id, terminalId, newCustomName)
+  }, [tab.id, onTerminalAutoRename])
 
   const handleActiveSubpageChange = useCallback((subpage: SubpageId | null, terminalId: string | null) => {
     updateTabById(tab.id, { activeSubpage: subpage, subpageTerminalId: terminalId })
@@ -246,6 +253,7 @@ const TabTerminalGrid = memo(function TabTerminalGrid({
       theme="vscode-dark"
       onTerminalFocus={handleTerminalFocus}
       onTerminalRename={handleTerminalRename}
+      onTerminalAutoRename={handleTerminalAutoRename}
       onPersistTerminalCwd={onPersistTerminalCwd}
       onOpenProjectEditor={onOpenProjectEditor}
       tabId={tab.id}
@@ -325,7 +333,9 @@ const TabPromptNotebook = memo(function TabPromptNotebook({
     updateTabById,
     updateEditorDraftForTab,
     updatePromptEditorHeightForTab,
-    importPrompts
+    importPrompts,
+    getTerminalRepoRoot,
+    setTerminalCustomName
   } = useAppState()
 
   const terminals: TerminalInfo[] = useMemo(() => {
@@ -333,6 +343,7 @@ const TabPromptNotebook = memo(function TabPromptNotebook({
       id: t.id,
       title: getTerminalDisplayName(index, t.customName),
       customName: t.customName,
+      manualNameRepoRoot: t.manualNameRepoRoot ?? null,
       lastCwd: t.lastCwd,
       isActive: t.id === tab.activeTerminalId
     }))
@@ -366,12 +377,13 @@ const TabPromptNotebook = memo(function TabPromptNotebook({
     : tab.activePanel
   const hidden = showSettings || !isActive || effectiveActivePanel !== 'prompt'
 
+  // Rename invoked from PromptSender's task-card double-click. This counts as
+  // a manual override scoped to the terminal's current repo, so auto-follow
+  // leaves the name alone until the cwd switches to a different repository.
   const handleTerminalRename = useCallback((id: string, newCustomName: string) => {
-    const newTerminals = tab.terminals.map(t =>
-      t.id === id ? { ...t, customName: newCustomName.trim() || null } : t
-    )
-    updateTabById(tab.id, { terminals: newTerminals })
-  }, [tab.id, tab.terminals, updateTabById])
+    const repoRoot = getTerminalRepoRoot(id)
+    setTerminalCustomName(tab.id, id, newCustomName, repoRoot)
+  }, [tab.id, getTerminalRepoRoot, setTerminalCustomName])
 
   const handleWidthChange = useCallback((width: number) => {
     updateTabById(tab.id, { promptPanelWidth: width })
@@ -508,7 +520,9 @@ function AppContent({
     setLastFocusOwner,
     addSchedule,
     updateSchedule,
-    deleteSchedule
+    deleteSchedule,
+    getTerminalRepoRoot,
+    setTerminalCustomName
   } = useAppState()
 
   const {
@@ -606,6 +620,7 @@ function AppContent({
             newTerminals.push({
               id,
               customName: null,
+              manualNameRepoRoot: null,
               lastCwd: null
             })
           }
@@ -632,6 +647,7 @@ function AppContent({
       id: t.id,
       title: getTerminalDisplayName(index, t.customName),
       customName: t.customName,
+      manualNameRepoRoot: t.manualNameRepoRoot ?? null,
       lastCwd: t.lastCwd,
       isActive: t.id === activeTab.activeTerminalId
     }))
@@ -1017,15 +1033,21 @@ function AppContent({
     }
   }, [state.activeTabId, updateActiveTab, setLastFocusedTerminalId, setLastFocusOwner])
 
-  // Terminal rename processing (with tabId parameter)
+  // Manual rename from TerminalGrid's title menu (Rename / Use Branch / Use
+  // Repo / inline edit commit). Pins manualNameRepoRoot to the terminal's
+  // current repo so the name survives within the same repo and is reset by
+  // auto-follow when the cwd switches to a different repo.
   const handleTerminalRenameWithTab = useCallback((tabId: string, terminalId: string, newCustomName: string) => {
-    if (tabId === state.activeTabId && activeTab) {
-      const newTerminals = activeTab.terminals.map(t =>
-        t.id === terminalId ? { ...t, customName: newCustomName.trim() || null } : t
-      )
-      updateActiveTab({ terminals: newTerminals })
-    }
-  }, [state.activeTabId, activeTab, updateActiveTab])
+    const repoRoot = getTerminalRepoRoot(terminalId)
+    setTerminalCustomName(tabId, terminalId, newCustomName, repoRoot)
+  }, [getTerminalRepoRoot, setTerminalCustomName])
+
+  // Auto-follow side effect from TerminalGrid: writes the branch (or null)
+  // into customName and clears manualNameRepoRoot so the terminal goes back
+  // to "auto-derived" semantics.
+  const handleTerminalAutoRenameWithTab = useCallback((tabId: string, terminalId: string, newCustomName: string | null) => {
+    setTerminalCustomName(tabId, terminalId, newCustomName, null)
+  }, [setTerminalCustomName])
 
   // Layout change handling
   const handleLayoutChange = useCallback((mode: LayoutMode) => {
@@ -1583,6 +1605,7 @@ function AppContent({
                 isActive={tab.id === state.activeTabId}
               onTerminalFocus={handleTerminalFocusWithTab}
               onTerminalRename={handleTerminalRenameWithTab}
+              onTerminalAutoRename={handleTerminalAutoRenameWithTab}
               onPersistTerminalCwd={setTerminalLastCwd}
               onOpenProjectEditor={handleOpenProjectEditor}
               projectEditorTerminalId={projectEditorTerminalId}
