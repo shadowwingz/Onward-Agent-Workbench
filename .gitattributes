@@ -1,0 +1,4 @@
+# Force LF line endings for the generated third-party license bundle so
+# regenerated outputs from different platforms (macOS / Linux / Windows)
+# don't ping-pong between CRLF and LF when committed.
+ThirdPartyNotices.txt text eol=lf
