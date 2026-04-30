@@ -74,3 +74,21 @@
 .terminal-title-menu-item:hover:not(:disabled) svg {
   color: var(--text-2);
 }
+
+.terminal-title-menu-separator {
+  height: 1px;
+  margin: 4px 6px;
+  background-color: var(--border);
+  opacity: 0.5;
+}
+
+/* When the auto-follow item is checked, treat the checkbox icon as the active
+   accent so the state is glanceable without color-blindness concerns relying
+   solely on the glyph difference. */
+.terminal-title-menu-checkbox-item[data-checked='true'] svg {
+  color: var(--accent);
+}
+
+.terminal-title-menu-checkbox-item[data-checked='true']:hover:not(:disabled) svg {
+  color: var(--accent);
+}

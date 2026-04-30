@@ -502,7 +502,10 @@ export interface TerminalDebugApi {
   } | null
   openTitleMenu: (terminalId?: string) => boolean
   closeTitleMenu: () => boolean
-  clickTitleMenuItem: (item: 'rename' | 'use-branch' | 'use-repo', terminalId?: string) => boolean
+  clickTitleMenuItem: (
+    item: 'rename' | 'auto-follow-toggle' | 'use-branch' | 'use-repo',
+    terminalId?: string
+  ) => boolean
   getTitleMenuState: (terminalId?: string) => {
     open: boolean
     branch: string | null
@@ -510,6 +513,12 @@ export interface TerminalDebugApi {
     canUseBranch: boolean
     canUseRepo: boolean
   } | null
+  /** Read the current "Auto-follow Git branch name" preference. */
+  getAutoFollowGitBranchForTaskName: () => boolean
+  /** Programmatically set the preference (mirrors the dropdown checkbox toggle). */
+  setAutoFollowGitBranchForTaskName: (enabled: boolean) => void
+  /** Read the persisted manualNameRepoRoot for a terminal. */
+  getTerminalManualNameRepoRoot: (terminalId?: string) => string | null
   simulateTitleSingleClick: (terminalId?: string) => boolean
   simulateTitleDoubleClick: (terminalId?: string) => boolean
   finishInlineRename: (value?: string) => boolean

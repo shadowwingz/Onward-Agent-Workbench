@@ -83,7 +83,7 @@ function createDefaultShortcuts(): ShortcutConfig {
  */
 function createDefaultSettings(): SettingsState {
   return {
-    version: 5,
+    version: 6,
     shortcuts: createDefaultShortcuts(),
     terminalStyles: {},
     globalTerminalStyle: createDefaultGlobalTerminalStyle(),
@@ -93,6 +93,7 @@ function createDefaultSettings(): SettingsState {
     theme: DEFAULT_THEME_SETTINGS,
     telemetryConsent: null,
     telemetryInstanceId: null,
+    autoFollowGitBranchForTaskName: true,
     updatedAt: Date.now()
   }
 }
@@ -126,6 +127,10 @@ interface SettingsContextValue {
   // theme
   updateTheme: (theme: ThemeSettings) => void
   updateLanguage: (language: AppLocale) => void
+
+  // Auto-follow Git branch for Task name (default true)
+  getAutoFollowGitBranchForTaskName: () => boolean
+  setAutoFollowGitBranchForTaskName: (enabled: boolean) => void
 }
 
 const SettingsContext = createContext<SettingsContextValue | null>(null)
@@ -336,6 +341,17 @@ export function SettingsProvider({ children, onShortcutAction }: SettingsProvide
     }))
   }, [updateSettings])
 
+  const getAutoFollowGitBranchForTaskName = useCallback((): boolean => {
+    return settings?.autoFollowGitBranchForTaskName ?? true
+  }, [settings])
+
+  const setAutoFollowGitBranchForTaskName = useCallback((enabled: boolean) => {
+    updateSettings(prev => ({
+      ...prev,
+      autoFollowGitBranchForTaskName: enabled
+    }))
+  }, [updateSettings])
+
   const value: SettingsContextValue = {
     settings,
     isLoaded,
@@ -351,7 +367,9 @@ export function SettingsProvider({ children, onShortcutAction }: SettingsProvide
     updateGitDiffFontSize,
     getGitDiffFontSize,
     updateTheme,
-    updateLanguage
+    updateLanguage,
+    getAutoFollowGitBranchForTaskName,
+    setAutoFollowGitBranchForTaskName
   }
 
   return (

@@ -387,6 +387,8 @@ so every call through `window.electronAPI.<domain>.<method>()` gets a
 | `RENDERER_PROJECT_FILE_OPEN` | `renderer:project.file-open` | `i` | `ProjectEditor.tsx::openFile` |
 | `RENDERER_PROJECT_SUBPAGE_NAVIGATE` | `renderer:project.subpage-navigate` | `i` | Two sites in `ProjectEditor.tsx` dispatching `subpage:navigate` for diff / history |
 | `RENDERER_PROJECT_SEARCH_GLOBAL` | `renderer:project.search.global` | `i` | `useGlobalSearch.ts::executeSearch` — fires once per debounced query commit |
+| `RENDERER_TASK_NAME_RESOLVE` | `renderer:task-name.resolve` | `i` | `TerminalGrid.tsx::applyTerminalInfoUpdate` — fires on every `GIT_TERMINAL_INFO` IPC update once `notifyTerminalGitInfo` records the new info. Payload tags `source: 'manual' \| 'auto-branch' \| 'cleared-by-repo-switch' \| 'fallback' \| 'skipped-disabled'` so SQL queries can verify which arm of the auto-follow rule fired. |
+| `RENDERER_TASK_NAME_MANUAL_CLEAR` | `renderer:task-name.manual-clear` | `i` | Same site, fires only when the cwd has just moved to a different repo and the previous manual rename has been erased. Payload tags `prevRepoRoot` / `newRepoRoot` / `newBranch`. Pairs with the immediately following `RENDERER_TASK_NAME_RESOLVE { source: 'cleared-by-repo-switch' }`. |
 
 #### GUI entries (new)
 

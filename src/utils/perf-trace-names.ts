@@ -242,7 +242,22 @@ export const PERF_TRACE_EVENT = {
   // before they become user-visible bugs.
   MAIN_GIT_SNAPSHOT_CAPTURE: 'main:git.snapshot.capture',
   MAIN_GIT_SNAPSHOT_CACHE_HIT: 'main:git.snapshot.cache-hit',
-  MAIN_GIT_SNAPSHOT_INVALIDATE: 'main:git.snapshot.invalidate'
+  MAIN_GIT_SNAPSHOT_INVALIDATE: 'main:git.snapshot.invalidate',
+
+  // ───────── Renderer — Task name auto-follow Git branch ─────────
+  // (a) RENDERER_TASK_NAME_RESOLVE: ph='i' instant marker emitted whenever
+  // the auto-follow rule decides what to do for a given terminal on a
+  // GIT_TERMINAL_INFO update. payload = { taskId, source: 'manual'|
+  // 'auto-branch'|'cleared-by-repo-switch'|'fallback'|'skipped-disabled',
+  // autoFollow, repoRoot, branch }. Lets traces explain *why* a name
+  // changed (or didn't).
+  // (b) RENDERER_TASK_NAME_MANUAL_CLEAR: ph='i' fired when the cwd has
+  // moved to a different repo and the previous manual override has just
+  // been erased by the rule. payload = { taskId, prevRepoRoot, newRepoRoot,
+  // newBranch }. Useful for verifying user-visible "manual name expired"
+  // moments line up with what the SQL queries expect.
+  RENDERER_TASK_NAME_RESOLVE: 'renderer:task-name.resolve',
+  RENDERER_TASK_NAME_MANUAL_CLEAR: 'renderer:task-name.manual-clear'
 } as const
 
 export type PerfTraceEventName = typeof PERF_TRACE_EVENT[keyof typeof PERF_TRACE_EVENT]
