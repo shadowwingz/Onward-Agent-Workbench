@@ -4,6 +4,7 @@
  */
 
 import type { Prompt } from './electron.d.ts'
+import type { LayoutMode, CustomLayoutPreset } from './prompt'
 
 /**
  * Timing type
@@ -194,8 +195,8 @@ export interface TabState {
   customName: string | null
   /** Create timestamp */
   createdAt: number
-  /** layout mode */
-  layoutMode: 1 | 2 | 4 | 6
+  /** layout mode (preset 1/2/4/6/8 or a custom preset reference) */
+  layoutMode: LayoutMode
   /** Currently active panel */
   activePanel: 'prompt' | null
   /** Prompt panel width */
@@ -263,6 +264,8 @@ export interface AppState {
   promptSchedules: PromptSchedule[]
   /** Global UI preferences (panel widths, viewer settings, etc.) */
   uiPreferences: UIPreferences
+  /** Globally shared custom layout presets (referenced by TabState.layoutMode when kind === 'custom'). */
+  customLayoutPresets: CustomLayoutPreset[]
   /** Last updated timestamp */
   updatedAt: number
 }

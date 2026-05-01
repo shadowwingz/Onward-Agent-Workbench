@@ -201,7 +201,7 @@ export interface PromptAPI {
 
 export interface TerminalWindowConfig {
   version: number
-  layoutMode: 1 | 2 | 4 | 6
+  layoutMode: 1 | 2 | 4 | 6 | 8
   activeTerminalId: string | null
   activePanel: 'prompt' | null
   terminals: { id: string; title: string }[]
@@ -298,11 +298,31 @@ export interface PersistedTerminalState {
   lastCwd: string | null
 }
 
+export type PresetCount = 1 | 2 | 4 | 6 | 8
+
+export interface CustomLayoutCell {
+  rowStart: 1 | 2
+  rowSpan: 1 | 2
+  colStart: 1 | 2 | 3 | 4
+  colSpan: 1 | 2 | 3 | 4
+}
+
+export interface CustomLayoutPreset {
+  id: string
+  name: string
+  cells: CustomLayoutCell[]
+  createdAt: number
+}
+
+export type LayoutMode =
+  | { kind: 'preset'; count: PresetCount }
+  | { kind: 'custom'; presetId: string }
+
 export interface TabState {
   id: string
   customName: string | null
   createdAt: number
-  layoutMode: 1 | 2 | 4 | 6
+  layoutMode: LayoutMode
   activePanel: 'prompt' | null
   promptPanelWidth: number
   promptEditorHeight: number
@@ -320,6 +340,7 @@ export interface AppState {
   lastFocusedTerminalId: string | null
   projectEditorStates?: Record<string, unknown>
   promptSchedules?: unknown[]
+  customLayoutPresets?: CustomLayoutPreset[]
   updatedAt: number
 }
 

@@ -12,7 +12,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs'
  */
 export interface TerminalWindowConfig {
   version: number                              // Configuration version number
-  layoutMode: 1 | 2 | 4 | 6                   // layout mode
+  layoutMode: 1 | 2 | 4 | 6 | 8                // layout mode (legacy: bare preset count only)
   activeTerminalId: string | null              // Active terminal ID
   activePanel: 'prompt' | null                 // active panel
   terminals: { id: string; title: string }[]   // terminal list
@@ -68,7 +68,7 @@ class TerminalConfigStorage {
    * Validate configuration data to ensure all fields are present and valid
    */
   private validateConfig(config: Partial<TerminalWindowConfig>): TerminalWindowConfig {
-    const validLayoutModes = [1, 2, 4, 6]
+    const validLayoutModes = [1, 2, 4, 6, 8]
     // Validation panel width: minimum 150px, default 280px
     const promptPanelWidth = typeof config.promptPanelWidth === 'number' && config.promptPanelWidth >= 150
       ? config.promptPanelWidth
@@ -76,7 +76,7 @@ class TerminalConfigStorage {
     return {
       version: config.version ?? DEFAULT_CONFIG.version,
       layoutMode: validLayoutModes.includes(config.layoutMode as number)
-        ? config.layoutMode as 1 | 2 | 4 | 6
+        ? config.layoutMode as 1 | 2 | 4 | 6 | 8
         : DEFAULT_CONFIG.layoutMode,
       activeTerminalId: config.activeTerminalId ?? DEFAULT_CONFIG.activeTerminalId,
       activePanel: config.activePanel === 'prompt' ? 'prompt' : null,

@@ -106,6 +106,23 @@
   grid-template-rows: 1fr 1fr;
 }
 
+/* Eight-square grid layout (4x2 — wide screens favoured) */
+.terminal-grid[data-layout="8"] {
+  grid-template-columns: 1fr 1fr 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+}
+
+/*
+ * Custom layout. The grid is always the 4col x 2row atomic mesh; each
+ * Task cell carries inline grid-column / grid-row styles to claim its
+ * rectangle. Cells must collectively cover all 8 atomic cells (validated
+ * before save) so there are no visible gaps.
+ */
+.terminal-grid[data-layout="custom"] {
+  grid-template-columns: repeat(4, 1fr);
+  grid-template-rows: repeat(2, 1fr);
+}
+
 /* terminal cell */
 .terminal-grid-cell {
   container-type: inline-size;

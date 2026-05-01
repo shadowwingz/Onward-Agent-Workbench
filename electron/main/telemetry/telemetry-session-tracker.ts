@@ -57,7 +57,25 @@ function getUsageSnapshot(): Record<string, string | number | boolean> {
       (sum, tab) => sum + (tab.terminals?.length ?? 0), 0
     ) ?? 0
     const activeTab = state.tabs?.find(t => t.id === state.activeTabId)
-    const layoutMode = activeTab?.layoutMode ?? 1
+    // Telemetry exposes layoutMode as a flat int (effective Task count) so
+    // historical dashboards keep working. Custom layouts surface the cell
+    // count instead of a stable preset value.
+    let layoutMode = 1
+    const tabLayout = activeTab?.layoutMode as
+      | { kind?: 'preset' | 'custom'; count?: number; presetId?: string }
+      | number
+      | undefined
+    if (typeof tabLayout === 'number') {
+      layoutMode = tabLayout
+    } else if (tabLayout && typeof tabLayout === 'object') {
+      if (tabLayout.kind === 'preset' && typeof tabLayout.count === 'number') {
+        layoutMode = tabLayout.count
+      } else if (tabLayout.kind === 'custom' && typeof tabLayout.presetId === 'string') {
+        const preset = (state as { customLayoutPresets?: Array<{ id: string; cells?: unknown[] }> })
+          .customLayoutPresets?.find(p => p.id === tabLayout.presetId)
+        layoutMode = Array.isArray(preset?.cells) ? preset!.cells.length : 1
+      }
+    }
 
     return {
       activeMs: getSessionDurationMs(),

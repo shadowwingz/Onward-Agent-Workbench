@@ -6,6 +6,7 @@
 import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo, memo } from 'react'
 import { createPortal } from 'react-dom'
 import { LayoutMode, TerminalInfo, TerminalShortcutAction, TerminalFocusRequest } from '../../types/prompt'
+import { resolveLayout, isSameLayoutMode, layoutDataAttr } from '../../utils/layout-mode'
 import { TerminalDropdown } from '../TerminalDropdown'
 import { TerminalTitleMenu } from '../TerminalTitleMenu'
 import { GitDiffViewer } from '../GitDiffViewer'
@@ -149,7 +150,7 @@ export const TerminalGrid = memo(function TerminalGrid({
   }))
 
   const { getTerminalStyle, getAutoFollowGitBranchForTaskName, setAutoFollowGitBranchForTaskName } = useSettings()
-  const { notifyTerminalGitInfo } = useAppState()
+  const { notifyTerminalGitInfo, state: appStateForLayout } = useAppState()
   const currentAutoFollowEnabled = getAutoFollowGitBranchForTaskName()
   // Stable refs so auto-follow logic running inside callbacks always reads the
   // freshest values instead of capturing stale closures.
@@ -217,6 +218,17 @@ export const TerminalGrid = memo(function TerminalGrid({
 
   const [displayLayoutMode, setDisplayLayoutMode] = useState<LayoutMode>(layoutMode)
   const [isTransitioning, setIsTransitioning] = useState(false)
+  const customLayoutPresets = appStateForLayout.customLayoutPresets
+  const resolvedLayout = useMemo(
+    () => resolveLayout(layoutMode, customLayoutPresets),
+    [layoutMode, customLayoutPresets]
+  )
+  const resolvedDisplayLayout = useMemo(
+    () => resolveLayout(displayLayoutMode, customLayoutPresets),
+    [displayLayoutMode, customLayoutPresets]
+  )
+  const effectiveCount = resolvedLayout.effectiveCount
+  const displayEffectiveCount = resolvedDisplayLayout.effectiveCount
 
   // Edit status
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -468,8 +480,8 @@ export const TerminalGrid = memo(function TerminalGrid({
   }, [terminals])
 
   const visibleTerminals = useMemo(() => {
-    return terminals.slice(0, displayLayoutMode)
-  }, [terminals, displayLayoutMode])
+    return terminals.slice(0, displayEffectiveCount)
+  }, [terminals, displayEffectiveCount])
 
   useEffect(() => {
     visibleTerminalIdsRef.current = visibleTerminals.map(term => term.id)
@@ -1076,10 +1088,24 @@ export const TerminalGrid = memo(function TerminalGrid({
     return () => window.removeEventListener('resize', handleResize)
   }, [fitAll])
 
-  // Refit when layout changes
+  // Refit when layout changes — depend on a fingerprint that captures
+  // *every* visible geometry change, not just the cell count. Two
+  // distinct custom presets with the same number of cells have different
+  // grid-column / grid-row spans, so the cells themselves change size
+  // without effectiveCount moving; xterm has to re-fit or it'll keep
+  // reporting old rows / cols to the PTY until a window resize fires.
+  const layoutFingerprint = useMemo(() => {
+    if (resolvedDisplayLayout.kind === 'preset') {
+      return `preset:${resolvedDisplayLayout.count}`
+    }
+    return `custom:${resolvedDisplayLayout.cells
+      .map(c => `${c.rowStart}-${c.rowSpan}-${c.colStart}-${c.colSpan}`)
+      .join('|')}`
+  }, [resolvedDisplayLayout])
+
   useEffect(() => {
     requestAnimationFrame(fitAll)
-  }, [displayLayoutMode, fitAll])
+  }, [layoutFingerprint, fitAll])
 
   // Theme changes and terminal style changes
   useEffect(() => {
@@ -1090,15 +1116,26 @@ export const TerminalGrid = memo(function TerminalGrid({
 
   // Layout switching: When adding, wait for the initialization to be completed before switching the display.
   useEffect(() => {
-    if (layoutMode === displayLayoutMode) return
+    if (isSameLayoutMode(layoutMode, displayLayoutMode)) return
 
-    if (layoutMode < displayLayoutMode) {
+    const transitionStartedAt = performance.now()
+    const emitApply = () => {
+      perfTrace(PERF_TRACE_EVENT.RENDERER_CUSTOM_LAYOUT_APPLY, {
+        kind: resolvedLayout.kind,
+        effectiveCount,
+        previousCount: displayEffectiveCount,
+        durationMs: +(performance.now() - transitionStartedAt).toFixed(1)
+      })
+    }
+
+    if (effectiveCount < displayEffectiveCount) {
       setDisplayLayoutMode(layoutMode)
       setIsTransitioning(false)
+      emitApply()
       return
     }
 
-    if (terminals.length < layoutMode) {
+    if (terminals.length < effectiveCount) {
       setIsTransitioning(true)
       return
     }
@@ -1106,7 +1143,7 @@ export const TerminalGrid = memo(function TerminalGrid({
     const epoch = ++transitionRef.current
     setIsTransitioning(true)
 
-    const targetTerminals = terminals.slice(0, layoutMode)
+    const targetTerminals = terminals.slice(0, effectiveCount)
 
     targetTerminals.forEach(term => {
       const sessionStatus = terminalSessionManager.getSession(term.id)?.status
@@ -1123,6 +1160,7 @@ export const TerminalGrid = memo(function TerminalGrid({
         targetTerminals.forEach(term => setTerminalStatus(term.id, 'ready'))
         setDisplayLayoutMode(layoutMode)
         setIsTransitioning(false)
+        emitApply()
       })
       .catch((error) => {
         console.error('Failed to initialize terminals:', error)
@@ -1130,7 +1168,7 @@ export const TerminalGrid = memo(function TerminalGrid({
         if (transitionRef.current !== epoch) return
         setIsTransitioning(false)
       })
-  }, [layoutMode, displayLayoutMode, terminals, getTerminalOptions])
+  }, [layoutMode, displayLayoutMode, effectiveCount, displayEffectiveCount, resolvedLayout.kind, terminals, getTerminalOptions])
 
   useEffect(() => {
     scheduleFocusRequest(focusRequest)
@@ -1481,7 +1519,7 @@ export const TerminalGrid = memo(function TerminalGrid({
         delete debugWindow.__onwardTerminalDebug
       }
     }
-  }, [activeTerminalId, displayLayoutMode, terminals, visibleTerminals, onTerminalRename, notifyTerminalGitInfo, setAutoFollowGitBranchForTaskName])
+  }, [activeTerminalId, displayEffectiveCount, terminals, visibleTerminals, onTerminalRename, notifyTerminalGitInfo, setAutoFollowGitBranchForTaskName])
 
   const closeGitDiffPanelRef = useRef<((restoreFocus: boolean) => void) | null>(null)
   const closeGitHistoryPanelRef = useRef<((restoreFocus: boolean) => void) | null>(null)
@@ -1950,7 +1988,7 @@ export const TerminalGrid = memo(function TerminalGrid({
   return (
     <>
       <div ref={gridWrapperRef} className={`terminal-grid-wrapper ${hidden ? 'terminal-grid-hidden' : ''}`}>
-        <div className="terminal-grid" data-layout={displayLayoutMode}>
+        <div className="terminal-grid" data-layout={layoutDataAttr(displayLayoutMode)}>
           {visibleTerminals.map((termInfo, index) => {
             const terminalInfo = terminalInfos[termInfo.id]
             const terminalStatus = terminalStatuses[termInfo.id] ?? 'idle'
@@ -1967,11 +2005,24 @@ export const TerminalGrid = memo(function TerminalGrid({
               ? `terminal-grid-branch ${branchStatusClass}`
               : 'terminal-grid-branch'
 
+            // Custom mode lays each Task on a stored rectangle inside the
+            // 4col x 2row atomic mesh. Preset modes leave grid-area unset
+            // and rely on the data-layout="N" CSS that uniformly distributes
+            // 1fr cells in DOM order.
+            const customCell = resolvedDisplayLayout.kind === 'custom'
+              ? resolvedDisplayLayout.cells[index]
+              : null
+            const cellStyle = customCell ? {
+              gridColumn: `${customCell.colStart} / span ${customCell.colSpan}`,
+              gridRow: `${customCell.rowStart} / span ${customCell.rowSpan}`
+            } : undefined
+
             return (
               <div
                 key={termInfo.id}
                 className={`terminal-grid-cell ${activeTerminalId === termInfo.id ? 'active' : ''}`}
                 data-terminal-id={termInfo.id}
+                style={cellStyle}
                 onClick={(e) => handleTerminalFocus(termInfo.id, e)}
               >
                 <div className="terminal-grid-header">

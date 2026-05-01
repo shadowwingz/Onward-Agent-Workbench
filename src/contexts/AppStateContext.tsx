@@ -6,8 +6,11 @@
 import React, { createContext, useContext, useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import type { AppState, TabState, GlobalPrompt, LocalPrompt, EditorDraft, ProjectEditorState, PromptCleanupConfig, PromptSchedule, UIPreferences, PersistedTerminalState } from '../types/tab.d.ts'
 import type { Prompt } from '../types/electron.d.ts'
+import type { CustomLayoutPreset } from '../types/prompt'
 import { normalizeProjectCwd as normalizeProjectCwdImpl } from '../utils/pathNormalize'
 import { perfTrace } from '../utils/perf-trace'
+import { migrateLayoutMode, DEFAULT_LAYOUT_MODE } from '../utils/layout-mode'
+import { isValidCustomLayoutCells } from '../utils/custom-layout-validator'
 
 export const normalizeProjectCwd = normalizeProjectCwdImpl
 
@@ -232,7 +235,7 @@ function createDefaultTabState(id: string): TabState {
     id,
     customName: null,
     createdAt: Date.now(),
-    layoutMode: 1,
+    layoutMode: DEFAULT_LAYOUT_MODE,
     activePanel: null,
     promptPanelWidth: DEFAULT_PROMPT_PANEL_WIDTH,
     promptEditorHeight: DEFAULT_PROMPT_EDITOR_HEIGHT,
@@ -256,8 +259,36 @@ function createDefaultAppState(): AppState {
     projectEditorStates: {},
     promptSchedules: [],
     uiPreferences: {},
+    customLayoutPresets: [],
     updatedAt: Date.now()
   }
+}
+
+/**
+ * Sanitise the persisted custom-layout preset list. Drops entries whose
+ * cells fail validation (overlap / gap / non-rectangular) so a corrupted
+ * file cannot brick the renderer.
+ */
+function normalizeCustomLayoutPresets(value: unknown): CustomLayoutPreset[] {
+  if (!Array.isArray(value)) return []
+  const seen = new Set<string>()
+  const out: CustomLayoutPreset[] = []
+  for (const item of value) {
+    if (!item || typeof item !== 'object') continue
+    const candidate = item as Partial<CustomLayoutPreset>
+    if (typeof candidate.id !== 'string' || candidate.id.length === 0) continue
+    if (seen.has(candidate.id)) continue
+    if (typeof candidate.name !== 'string') continue
+    if (!Array.isArray(candidate.cells) || !isValidCustomLayoutCells(candidate.cells)) continue
+    seen.add(candidate.id)
+    out.push({
+      id: candidate.id,
+      name: candidate.name,
+      cells: candidate.cells,
+      createdAt: typeof candidate.createdAt === 'number' ? candidate.createdAt : Date.now()
+    })
+  }
+  return out
 }
 
 const APP_STATE_PATCH_KEYS: Array<keyof AppState> = [
@@ -269,6 +300,7 @@ const APP_STATE_PATCH_KEYS: Array<keyof AppState> = [
   'projectEditorStates',
   'promptSchedules',
   'uiPreferences',
+  'customLayoutPresets',
   'updatedAt'
 ]
 
@@ -374,6 +406,35 @@ interface AppStateContextValue {
   addSchedule: (schedule: Omit<PromptSchedule, 'executedCount' | 'createdAt' | 'lastExecutedAt' | 'missedExecutions'>) => void
   updateSchedule: (schedule: PromptSchedule) => void
   deleteSchedule: (promptId: string) => void
+
+  // Custom layout preset CRUD (globally shared across tabs)
+  addCustomLayoutPreset: (payload: { name: string; cells: CustomLayoutPreset['cells'] }) => string
+  updateCustomLayoutPreset: (id: string, patch: Partial<Pick<CustomLayoutPreset, 'name' | 'cells'>>) => void
+  duplicateCustomLayoutPreset: (id: string) => string
+  deleteCustomLayoutPreset: (id: string) => void
+  /**
+   * Atomic preset edit + tab reconcile.
+   *
+   * Updating a preset's `cells` to a smaller count while a tab is
+   * already using that preset would leave the tab's `terminals[]`
+   * longer than the new layout exposes — i.e. live PTYs hidden behind
+   * the rendered grid. Splitting the change into "update preset" and
+   * "truncate tabs" across two reducers means a cancelled downsize
+   * dialog leaves the system in that hidden-PTY state. This API does
+   * both edits in one updateState call: cells flip and every
+   * referencing tab truncates within the same React commit.
+   *
+   * Callers must dispose the trailing terminal sessions BEFORE invoking
+   * this — the reducer is pure state and cannot reach into
+   * terminalSessionManager. `activeTabKeepIds` lets the caller route
+   * the active tab's terminal selection through DownsizeConfirmDialog;
+   * other affected tabs default to "keep first newCount terminals".
+   */
+  commitCustomLayoutPresetEdit: (
+    presetId: string,
+    payload: { name: string; cells: CustomLayoutPreset['cells'] },
+    activeTabKeepIds: string[] | null
+  ) => void
 }
 
 const AppStateContext = createContext<AppStateContextValue | null>(null)
@@ -431,6 +492,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
           promptCleanup: normalizePromptCleanup(loadedState.promptCleanup),
           tabs: loadedState.tabs.map(tab => ({
             ...tab,
+            layoutMode: migrateLayoutMode((tab as { layoutMode?: unknown }).layoutMode),
             promptPanelWidth: Math.max(tab.promptPanelWidth || 0, DEFAULT_PROMPT_PANEL_WIDTH),
             promptEditorHeight: normalizePromptEditorHeight(
               tab.promptEditorHeight ?? tab.editorDraft?.height ?? DEFAULT_PROMPT_EDITOR_HEIGHT
@@ -449,7 +511,10 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
             Object.entries(loadedState.projectEditorStates ?? {}).map(([key, value]) => [key, normalizeProjectEditorState(value)])
           ),
           promptSchedules: Array.isArray(loadedState.promptSchedules) ? loadedState.promptSchedules : [],
-          uiPreferences: loadedState.uiPreferences ?? {}
+          uiPreferences: loadedState.uiPreferences ?? {},
+          customLayoutPresets: normalizeCustomLayoutPresets(
+            (loadedState as { customLayoutPresets?: unknown }).customLayoutPresets
+          )
         }
         stateRef.current = normalizedState
         lastPersistedStateRef.current = normalizedState
@@ -1402,6 +1467,130 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     })
   }, [persistState])
 
+  // -- Custom layout preset CRUD --
+  // Presets are global (AppState.customLayoutPresets) so they show up in
+  // every tab's popover. Tabs that referenced a preset by id automatically
+  // fall back to preset 1 in resolveLayout when the preset is deleted.
+  const addCustomLayoutPreset = useCallback((payload: { name: string; cells: CustomLayoutPreset['cells'] }) => {
+    const id = generateId()
+    updateState(prev => ({
+      ...prev,
+      customLayoutPresets: [
+        ...prev.customLayoutPresets,
+        {
+          id,
+          name: payload.name,
+          cells: payload.cells,
+          createdAt: Date.now()
+        }
+      ]
+    }))
+    return id
+  }, [updateState])
+
+  const updateCustomLayoutPreset = useCallback((id: string, patch: Partial<Pick<CustomLayoutPreset, 'name' | 'cells'>>) => {
+    updateState(prev => ({
+      ...prev,
+      customLayoutPresets: prev.customLayoutPresets.map(preset =>
+        preset.id === id
+          ? {
+            ...preset,
+            ...(patch.name !== undefined ? { name: patch.name } : {}),
+            ...(patch.cells !== undefined ? { cells: patch.cells } : {})
+          }
+          : preset
+      )
+    }))
+  }, [updateState])
+
+  const duplicateCustomLayoutPreset = useCallback((id: string) => {
+    const newId = generateId()
+    updateState(prev => {
+      const source = prev.customLayoutPresets.find(p => p.id === id)
+      if (!source) return prev
+      return {
+        ...prev,
+        customLayoutPresets: [
+          ...prev.customLayoutPresets,
+          {
+            id: newId,
+            name: `${source.name} (copy)`,
+            cells: source.cells,
+            createdAt: Date.now()
+          }
+        ]
+      }
+    })
+    return newId
+  }, [updateState])
+
+  const commitCustomLayoutPresetEdit = useCallback((
+    presetId: string,
+    payload: { name: string; cells: CustomLayoutPreset['cells'] },
+    activeTabKeepIds: string[] | null
+  ) => {
+    updateState(prev => {
+      const newCount = payload.cells.length
+      const newPresets = prev.customLayoutPresets.map(p =>
+        p.id === presetId
+          ? { ...p, name: payload.name, cells: payload.cells }
+          : p
+      )
+      const activeKeep = activeTabKeepIds ? new Set(activeTabKeepIds) : null
+      const newTabs = prev.tabs.map(tab => {
+        if (tab.layoutMode.kind !== 'custom' || tab.layoutMode.presetId !== presetId) {
+          return tab
+        }
+        if (tab.terminals.length <= newCount) {
+          return tab
+        }
+        let survivors: typeof tab.terminals
+        if (activeKeep && tab.id === prev.activeTabId) {
+          // Active tab honours the user's pick from the dialog — preserves
+          // selection order so "Task 1..N" labels match what they kept.
+          survivors = tab.terminals.filter(t => activeKeep.has(t.id))
+        } else {
+          // Background tabs auto-keep the first newCount terminals. The
+          // dialog can only ask once, on the active tab; surfacing it
+          // again per-tab on switch would be invasive. The first-N rule
+          // is the same one used elsewhere when a layout shrinks.
+          survivors = tab.terminals.slice(0, newCount)
+        }
+        const nextActiveTerminalId = survivors.some(t => t.id === tab.activeTerminalId)
+          ? tab.activeTerminalId
+          : (survivors[0]?.id ?? null)
+        return { ...tab, terminals: survivors, activeTerminalId: nextActiveTerminalId }
+      })
+      return { ...prev, customLayoutPresets: newPresets, tabs: newTabs }
+    })
+  }, [updateState])
+
+  const deleteCustomLayoutPreset = useCallback((id: string) => {
+    updateState(prev => {
+      const remaining = prev.customLayoutPresets.filter(p => p.id !== id)
+      // Tabs that referenced the deleted preset fall back to preset 1
+      // AND truncate their terminal list to a single Task so we don't
+      // strand hidden PTYs (preset 1 only exposes the first slot — the
+      // tail would otherwise survive as orphan processes the user can no
+      // longer reach). Callers should dispose the trailing terminal
+      // sessions before invoking this reducer; the reducer only edits
+      // state and cannot reach into terminalSessionManager directly.
+      const tabs = prev.tabs.map(tab => {
+        if (tab.layoutMode.kind === 'custom' && tab.layoutMode.presetId === id) {
+          const survivors = tab.terminals.slice(0, 1)
+          return {
+            ...tab,
+            layoutMode: DEFAULT_LAYOUT_MODE,
+            terminals: survivors,
+            activeTerminalId: survivors[0]?.id ?? null
+          }
+        }
+        return tab
+      })
+      return { ...prev, customLayoutPresets: remaining, tabs }
+    })
+  }, [updateState])
+
   const value: AppStateContextValue = useMemo(() => ({
     state,
     isLoaded,
@@ -1449,7 +1638,12 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     updateUIPreferences,
     addSchedule,
     updateSchedule,
-    deleteSchedule: deleteScheduleByPromptId
+    deleteSchedule: deleteScheduleByPromptId,
+    addCustomLayoutPreset,
+    updateCustomLayoutPreset,
+    duplicateCustomLayoutPreset,
+    deleteCustomLayoutPreset,
+    commitCustomLayoutPresetEdit
   }), [
     state, isLoaded, activeTab,
     createTab, closeTab, switchTab, renameTab,
@@ -1465,7 +1659,9 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     setLastFocusOwner, getLastFocusOwner,
     getProjectEditorState, setProjectEditorState, flushProjectEditorState,
     getUIPreferences, updateUIPreferences,
-    addSchedule, updateSchedule, deleteScheduleByPromptId
+    addSchedule, updateSchedule, deleteScheduleByPromptId,
+    addCustomLayoutPreset, updateCustomLayoutPreset, duplicateCustomLayoutPreset, deleteCustomLayoutPreset,
+    commitCustomLayoutPresetEdit
   ])
 
   return (

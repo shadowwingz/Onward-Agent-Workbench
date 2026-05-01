@@ -253,6 +253,8 @@ function getShortcutLabel(key: string, t: ReturnType<typeof useI18n>['t']): stri
     focusTerminal4: t('settings.shortcut.focusTask', { index: 4 }),
     focusTerminal5: t('settings.shortcut.focusTask', { index: 5 }),
     focusTerminal6: t('settings.shortcut.focusTask', { index: 6 }),
+    focusTerminal7: t('settings.shortcut.focusTask', { index: 7 }),
+    focusTerminal8: t('settings.shortcut.focusTask', { index: 8 }),
     switchTab1: t('settings.shortcut.switchTab', { index: 1 }),
     switchTab2: t('settings.shortcut.switchTab', { index: 2 }),
     switchTab3: t('settings.shortcut.switchTab', { index: 3 }),

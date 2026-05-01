@@ -13,13 +13,15 @@ import { DEFAULT_LOCALE, isAppLocale, type AppLocale } from '../../src/i18n/core
  * Shortcut configuration
  */
 interface ShortcutConfig {
-  // Terminal focus shortcuts (6) - window-level
+  // Terminal focus shortcuts (8) - window-level
   focusTerminal1: string | null
   focusTerminal2: string | null
   focusTerminal3: string | null
   focusTerminal4: string | null
   focusTerminal5: string | null
   focusTerminal6: string | null
+  focusTerminal7: string | null
+  focusTerminal8: string | null
   // Tab switching shortcuts (6) - window-level
   switchTab1: string | null
   switchTab2: string | null
@@ -138,6 +140,8 @@ function createDefaultShortcuts(): ShortcutConfig {
     focusTerminal4: null,
     focusTerminal5: null,
     focusTerminal6: null,
+    focusTerminal7: null,
+    focusTerminal8: null,
     switchTab1: null,
     switchTab2: null,
     switchTab3: null,
@@ -219,6 +223,8 @@ class SettingsStorage {
       focusTerminal4: this.validateShortcut(state.shortcuts?.focusTerminal4),
       focusTerminal5: this.validateShortcut(state.shortcuts?.focusTerminal5),
       focusTerminal6: this.validateShortcut(state.shortcuts?.focusTerminal6),
+      focusTerminal7: this.validateShortcut(state.shortcuts?.focusTerminal7),
+      focusTerminal8: this.validateShortcut(state.shortcuts?.focusTerminal8),
       switchTab1: this.validateShortcut(state.shortcuts?.switchTab1),
       switchTab2: this.validateShortcut(state.shortcuts?.switchTab2),
       switchTab3: this.validateShortcut(state.shortcuts?.switchTab3),

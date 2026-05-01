@@ -1,0 +1,159 @@
+/*
+ * SPDX-FileCopyrightText: 2026 OPPO
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+.custom-layout-popover {
+  position: fixed;
+  z-index: 2000;
+  background: var(--panel);
+  border-radius: 10px;
+  box-shadow: var(--shadow-1);
+  animation: custom-layout-popover-fade 0.15s ease;
+}
+
+@keyframes custom-layout-popover-fade {
+  from { opacity: 0; transform: translateX(-4px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+.custom-layout-popover-list {
+  width: 280px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  color: var(--text-1);
+  font-size: var(--font-sm);
+}
+
+.custom-layout-popover-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 6px 6px;
+}
+
+.custom-layout-popover-title {
+  font-weight: 600;
+}
+
+.custom-layout-popover-empty {
+  padding: 14px 8px;
+  color: var(--text-3);
+  text-align: center;
+  font-size: var(--font-xs);
+}
+
+.custom-layout-popover-item {
+  display: flex;
+  align-items: center;
+  border-radius: 6px;
+  transition: background 0.12s ease;
+}
+
+.custom-layout-popover-item:hover {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.custom-layout-popover-item.is-active {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.custom-layout-popover-item-main {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  color: inherit;
+}
+
+.custom-layout-popover-item-name {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.custom-layout-popover-item-menu-wrapper {
+  position: relative;
+  padding-right: 4px;
+}
+
+.custom-layout-popover-item-menu {
+  width: 24px;
+  height: 24px;
+  border: none;
+  background: transparent;
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--text-2);
+  font-size: 16px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.12s ease;
+}
+
+.custom-layout-popover-item-menu:hover {
+  background: var(--bg-1);
+  color: var(--text-1);
+}
+
+.custom-layout-popover-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 1;
+  min-width: 120px;
+  background: var(--panel);
+  border-radius: 8px;
+  padding: 4px;
+  box-shadow: var(--shadow-1);
+  display: flex;
+  flex-direction: column;
+}
+
+.custom-layout-popover-menu button {
+  text-align: left;
+  background: transparent;
+  border: none;
+  padding: 6px 10px;
+  border-radius: 4px;
+  color: var(--text-1);
+  cursor: pointer;
+  font-size: var(--font-sm);
+}
+
+.custom-layout-popover-menu button:hover {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+}
+
+.custom-layout-popover-menu-danger:hover {
+  background: rgba(239, 68, 68, 0.15) !important;
+  color: #ef4444;
+}
+
+.custom-layout-popover-create {
+  margin-top: 4px;
+  padding: 7px 8px;
+  border: 1px dashed var(--border);
+  background: transparent;
+  border-radius: 6px;
+  color: var(--text-2);
+  cursor: pointer;
+  font-size: var(--font-sm);
+  transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+
+.custom-layout-popover-create:hover {
+  border-color: var(--accent);
+  color: var(--text-1);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}

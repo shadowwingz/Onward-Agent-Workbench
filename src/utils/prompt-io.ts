@@ -130,7 +130,7 @@ export function sortLocalPromptsByUiOrder(prompts: Prompt[], exportNow: number):
 }
 
 export function buildPromptExportPayload(
-  state: Pick<AppState, 'globalPrompts' | 'tabs' | 'promptCleanup' | 'activeTabId'>,
+  state: Pick<AppState, 'globalPrompts' | 'tabs' | 'promptCleanup' | 'activeTabId' | 'customLayoutPresets'>,
   getTabDisplayName: (tab: AppState['tabs'][number], index: number) => string,
   appInfo: unknown,
   exportNow: number
@@ -140,12 +140,21 @@ export function buildPromptExportPayload(
     const tabCreatedAt = normalizeTimestamp(item.createdAt, exportNow)
     const localPrompts = sortLocalPromptsByUiOrder(item.localPrompts, exportNow)
       .map(prompt => normalizePromptForExport(prompt, exportNow))
+    // Export the effective Task count as the legacy `layoutMode` int.
+    // Custom layouts surface the cell count instead of a preset value.
+    let exportedLayoutMode = 1
+    if (item.layoutMode.kind === 'preset') {
+      exportedLayoutMode = item.layoutMode.count
+    } else {
+      const targetId = item.layoutMode.presetId
+      exportedLayoutMode = state.customLayoutPresets?.find(p => p.id === targetId)?.cells.length ?? 1
+    }
     return {
       id: item.id,
       index,
       displayName: getTabDisplayName(item, index),
       customName: item.customName,
-      layoutMode: item.layoutMode,
+      layoutMode: exportedLayoutMode,
       activePanel: item.activePanel,
       promptPanelWidth: item.promptPanelWidth,
       activeTerminalId: item.activeTerminalId,
