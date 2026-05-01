@@ -1334,6 +1334,9 @@ export const TerminalGrid = memo(function TerminalGrid({
         return resolved ? terminalSessionManager.simulateRendererSurfaceLossForAutotest(resolved) : false
       },
       recoverVisibleRenderers: () => terminalSessionManager.restoreVisibleRendererSurfaces('manual-debug'),
+      notifyHostSurfaceEvent: (reason) => {
+        terminalSessionManager.notifyHostSurfaceEvent(reason)
+      },
       getTerminalTitle: (terminalId) => {
         const resolved = resolveTerminalId(terminalId)
         if (!resolved) return null

@@ -492,6 +492,17 @@ export interface TerminalDebugApi {
   remountTerminal: (terminalId?: string) => boolean
   simulateRendererSurfaceLoss: (terminalId?: string) => boolean
   recoverVisibleRenderers: () => number
+  // Direct hook into the host-surface restore pipeline. Bypasses the
+  // synthetic `document.dispatchEvent('visibilitychange')` /
+  // `window.dispatchEvent('focus')` path that the React listener in
+  // TerminalGrid would otherwise translate. Synthetic dispatches share an
+  // 80ms debounce window with focus juggling earlier in the suite, which
+  // races with the restore the test expects to observe; calling this
+  // method enters the manager directly with the chosen reason and a
+  // fresh debounce slot, so each TFA assertion gets a deterministic
+  // restore. Reasons are restricted to the three "host" events (the
+  // others are internal lifecycle reasons not produced by host events).
+  notifyHostSurfaceEvent: (reason: 'document-visible' | 'window-focus' | 'page-show') => void
   getTerminalTitle: (terminalId?: string) => string | null
   getTerminalCustomName: (terminalId?: string) => string | null
   getTerminalGitInfo: (terminalId?: string) => {

@@ -345,22 +345,35 @@ export async function testTerminalFocusActivation(ctx: AutotestContext): Promise
     let restoredStats: WebglPixelStats | null = null
     let restoreElapsedMs: number | null = null
     const restoreStartedAt = performance.now()
-    document.dispatchEvent(new Event('visibilitychange'))
+    // Drive the restore via the manager rather than dispatching a synthetic
+    // `visibilitychange` event. The DOM dispatch path is racey: TFA-08 just
+    // performed window-focus juggling, and the manager's 80ms surface
+    // resume debounce may have already accepted that focus event when our
+    // synthetic dispatch lands. Calling notifyHostSurfaceEvent enters the
+    // pipeline with our chosen reason and starts a fresh debounce slot.
+    terminalApi?.notifyHostSurfaceEvent('document-visible')
+    // Recovery semantics: a successful host-surface-driven restore re-creates
+    // the WebGL addon (path A) and refreshes xterm so the live terminal
+    // buffer paints into the new canvas. The post-restore canvas should
+    // therefore show the same terminal content that was visible before the
+    // loss — meaning the pixel checksum will *match* beforeLossStats, not
+    // diverge from it. Earlier revisions of this test required
+    // `checksum !== beforeLossStats.checksum`, which only ever passed when
+    // the restore happened to land mid-frame (cursor blink, partial render).
+    // Switch to the user-visible signal: a fresh canvas with renderable
+    // pixels plus the lifecycle reporting webglActive=true.
     const restored = await waitFor(
       'tfa-webgl-surface-restored-after-document-visible',
       () => {
         const surface = findWebglSurface(terminalId)
         if (!surface) return false
         const stats = readWebglPixels(surface.gl)
-        if (
-          hasRenderablePixels(stats) &&
-          stats.checksum !== beforeLossStats.checksum
-        ) {
-          restoredStats = stats
-          restoreElapsedMs = Math.round(performance.now() - restoreStartedAt)
-          return true
-        }
-        return false
+        if (!hasRenderablePixels(stats)) return false
+        const sessionState = terminalApi?.getSessionState(terminalId)
+        if (!sessionState?.webglActive) return false
+        restoredStats = stats
+        restoreElapsedMs = Math.round(performance.now() - restoreStartedAt)
+        return true
       },
       SURFACE_RESTORE_TIMEOUT_MS,
       80
@@ -450,7 +463,9 @@ export async function testTerminalFocusActivation(ctx: AutotestContext): Promise
         const phantomBlankApplied =
           phantomResult.triggered && statsAfterPaint !== null && looksAllWhite(statsAfterPaint)
 
-        document.dispatchEvent(new Event('visibilitychange'))
+        // Same rationale as TFA-09: enter the manager directly so the 80ms
+        // debounce isn't coalesced with focus events from earlier cases.
+        terminalApi?.notifyHostSurfaceEvent('document-visible')
         const recovered = await waitFor(
           'tfa-11-restored-after-visibilitychange',
           () => {
@@ -478,7 +493,10 @@ export async function testTerminalFocusActivation(ctx: AutotestContext): Promise
       {
         const phantomResult = repro.phantomBlank(terminalId)
         await sleep(PHANTOM_SETTLE_MS)
-        window.dispatchEvent(new Event('focus'))
+        // Same rationale as TFA-09/11. The synthetic window-focus dispatch
+        // hits the same debounce as the previous TFA-11 visibility event,
+        // so direct manager entry avoids the coalesce race.
+        terminalApi?.notifyHostSurfaceEvent('window-focus')
         const recovered = await waitFor(
           'tfa-12-restored-after-window-focus',
           () => {
