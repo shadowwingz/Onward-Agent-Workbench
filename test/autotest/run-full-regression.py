@@ -30,11 +30,17 @@ Outputs (gitignored — local-only, share excerpts not the artefacts):
 
 Usage:
   python3 test/autotest/run-full-regression.py
-  python3 test/autotest/run-full-regression.py --build         build dev package first
-  python3 test/autotest/run-full-regression.py --only run-foo  filter by substring
-  python3 test/autotest/run-full-regression.py --skip run-bar  exclude by substring
+  python3 test/autotest/run-full-regression.py --build           build dev package first
+  python3 test/autotest/run-full-regression.py --only run-foo    filter by substring
+  python3 test/autotest/run-full-regression.py --skip run-bar    exclude by substring
   python3 test/autotest/run-full-regression.py --app-bin <path>
-  python3 test/autotest/run-full-regression.py --list          print SCRIPTS and exit
+  python3 test/autotest/run-full-regression.py --list            print SCRIPTS and exit
+  python3 test/autotest/run-full-regression.py --repeat 3        run the same set N times
+                                                                 in succession (stability gate
+                                                                 for timing-sensitive runners
+                                                                 such as PTY / WebGL / debounce
+                                                                 / rAF / focus). Subsequent
+                                                                 iterations skip --build.
 """
 
 from __future__ import annotations
@@ -358,6 +364,105 @@ def run_one(
 
 
 # ---------------------------------------------------------------------------
+# Stability-mode wrapper: --repeat N
+# ---------------------------------------------------------------------------
+
+def run_repeated(args) -> int:
+    """
+    Re-spawn this same script N times. Each iteration is a fully isolated
+    child process with its own timestamped output directory; only iteration
+    1 inherits --build (subsequent iterations re-use the package).
+
+    Why subprocess re-spawn rather than an in-process loop: it gives each
+    iteration the cleanest possible state — no leaked module-level singletons,
+    no subprocess-tracking accumulation across iterations, and the exact
+    same code path as a single run, so flakes that only appear after many
+    iterations of accumulated state stay reproducible.
+
+    Exit 0 only if every iteration passes; otherwise 1. Iterations are NOT
+    short-circuited on first failure — we want the per-iteration histogram
+    so the author sees "fails 1 / 3" vs "fails 3 / 3" patterns.
+    """
+    base_args = [a for a in sys.argv[1:]]
+    # Strip --repeat <N> from the child args; the child should run a single
+    # iteration each time.
+    cleaned: List[str] = []
+    skip_next = False
+    for arg in base_args:
+        if skip_next:
+            skip_next = False
+            continue
+        if arg == "--repeat":
+            skip_next = True
+            continue
+        if arg.startswith("--repeat="):
+            continue
+        cleaned.append(arg)
+
+    iteration_summaries: List[dict] = []
+    overall_start = time.monotonic()
+    for i in range(1, args.repeat + 1):
+        # First iteration honours --build if requested; later iterations
+        # re-use the package built in iteration 1.
+        if i == 1:
+            child_args = list(cleaned)
+        else:
+            child_args = [a for a in cleaned if a != "--build"]
+        print("", flush=True)
+        print(f"=== ITERATION {i}/{args.repeat} ===", flush=True)
+        iter_start = time.monotonic()
+        proc = subprocess.run(
+            [sys.executable, str(Path(__file__).resolve()), *child_args],
+            cwd=str(REPO_ROOT),
+        )
+        elapsed = time.monotonic() - iter_start
+        # Best-effort: pick up the most recent timestamped output dir the
+        # child just produced so the stability summary can point at it.
+        results_root = REPO_ROOT / "test" / "full-regression-results"
+        ts_dir: Optional[str] = None
+        if results_root.is_dir():
+            entries = sorted(
+                (p for p in results_root.iterdir() if p.is_dir()),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            if entries:
+                ts_dir = entries[0].name
+        iteration_summaries.append({
+            "iteration": i,
+            "exit_code": proc.returncode,
+            "elapsed_sec": round(elapsed, 1),
+            "timestamp_dir": ts_dir,
+        })
+
+    total_elapsed = time.monotonic() - overall_start
+    failed_iterations = [s for s in iteration_summaries if s["exit_code"] != 0]
+    print("", flush=True)
+    print(f"=== STABILITY SUMMARY (--repeat {args.repeat}) ===", flush=True)
+    for s in iteration_summaries:
+        verdict = "PASS" if s["exit_code"] == 0 else f"FAIL (exit={s['exit_code']})"
+        ts = s["timestamp_dir"] or "(unknown dir)"
+        print(f"  Iteration {s['iteration']}: {verdict} — {s['elapsed_sec']:.0f}s — {ts}", flush=True)
+    print(f"Total elapsed: {total_elapsed:.0f}s", flush=True)
+    if failed_iterations:
+        print(
+            f"Verdict: NOT STABLE — {len(failed_iterations)} / {args.repeat} iterations failed.",
+            flush=True,
+        )
+        print(
+            "Inspect each failing iteration's logs/<suite>.log under "
+            f"{REPO_ROOT}/test/full-regression-results/<timestamp>/.",
+            flush=True,
+        )
+        return 1
+    print(
+        f"Verdict: STABLE — {args.repeat} / {args.repeat} iterations passed.",
+        flush=True,
+    )
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # Main orchestrator
 # ---------------------------------------------------------------------------
 
@@ -386,7 +491,23 @@ def main() -> int:
         "--list", action="store_true",
         help="Print the planned script list (post-filter) and exit.",
     )
+    parser.add_argument(
+        "--repeat", type=int, default=1, metavar="N",
+        help=(
+            "Run the (filtered) regression set N times back-to-back. "
+            "Each iteration gets its own timestamped output directory and "
+            "summary; only iteration 1 honours --build. "
+            "Exit 0 only if every iteration passes; otherwise 1. "
+            "Use this to validate timing-sensitive runners — single-run "
+            "stability is not real stability."
+        ),
+    )
     args = parser.parse_args()
+    if args.repeat < 1:
+        sys.stderr.write("ERROR: --repeat must be >= 1.\n")
+        return 2
+    if args.repeat > 1:
+        return run_repeated(args)
 
     bash = find_bash()
     node = find_node()

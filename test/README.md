@@ -237,6 +237,77 @@ If a future requirement ever demands zh-CN regression coverage, design
 that as a dedicated locale-coverage suite at that point — do not
 pre-emptively scaffold dual-language selectors in today's tests.
 
+### Hard rule — Timing-sensitive autotest authoring
+
+When an assertion's pass/fail depends on timing — PTY output rate,
+WebGL context lifecycle, debounce / throttle windows,
+requestAnimationFrame cadence, focus / visibility events, animation
+transitions, async restoration paths — the **TEST CASE itself must
+repeat the operation N times (default 5) and assert on the aggregate**,
+not on a single sample. A single sample is one observation of a
+stochastic process; one observation is not a measurement.
+
+#### Pick the aggregator by what you're measuring
+
+| Metric class | Aggregator | Example assertion |
+|---|---|---|
+| Boolean correctness (recovers / doesn't recover) | "all N trials succeeded" (or "≥ K of N", with K chosen against the failure cost) | After 5 lost+restored cycles, `webglActive=true` and `hasRenderablePixels` in all 5 |
+| Latency / throughput / pixel intensity | Median (or p95) of N trials, dropping top/bottom 10 % when the variance is bimodal | Median surface-restore latency over 5 trials < 200 ms |
+| State integrity (no leak / no listener accumulation) | Snapshot before trial 1 vs after trial N; budget does NOT grow with N | After 5 lost+restored cycles, listener count equals baseline + 0 |
+
+#### Why repeat-inside-the-test, not retry-outside
+
+A flaky test that the harness re-runs until it passes is a test that
+lies. Internal aggregation makes the assertion statistically stable AND
+keeps the failure signal honest — when the aggregate fails, the bug is
+real, not a single bad frame. Compare with the alternative:
+
+- **Retry-outside (bad)**: assertion checks 1 trial. Test fails 1-of-3
+  iterations under `--repeat 3`. Author blames "flake", marks the test
+  `.skip`, ships a regression nobody catches.
+- **Repeat-inside (good)**: assertion checks median of 5 trials. Test
+  passes deterministically when the system is correct, fails
+  deterministically when the system regresses. No "flake" excuse.
+
+#### What if a single trial isn't deterministic?
+
+That's a smell. The test is racing real work. Bypass the racey
+intermediate: call the manager / store / model directly instead of
+dispatching a synthetic DOM event, IPC message, or focus event and
+hoping the listener wins the debounce race. Sleeps paper over the
+symptom; structural bypass (the test invokes the production handler
+directly with the chosen reason / payload) is the durable fix.
+
+#### Secondary harness gate: `--repeat N` for cross-runner state leaks
+
+After the test itself is internally aggregated, you can sanity-check
+the **harness** with:
+
+```
+python3 test/autotest/run-full-regression.py --build --repeat 3 \
+    --only run-<your-suite>-autotest
+```
+
+Each iteration runs in its own timestamped output directory; the outer
+process prints a `STABILITY SUMMARY` and exits non-zero if any
+iteration failed. This catches a different bug class:
+
+- **Same case fails the same way every iteration** → the test is still
+  not internally aggregated; go back and fix the test, not the harness.
+- **Different cases fail each iteration** → earlier runners in the
+  `SCRIPTS` list are leaking focus / visibility / debounce / handle
+  state into your runner. Harden cleanup in the leaking runner (EXIT
+  trap, finally block, before/after listener-count assertion).
+- **3 / 3 PASS** → both the test and the orchestrator order are healthy.
+
+`--repeat N` is NOT a substitute for internal aggregation. A test that
+relies on `--repeat` to mask single-trial flakes is a bug in the test.
+
+#### Exemption
+
+Pure non-timing runners (lint checks, snapshot diffs, deterministic
+unit tests) are exempt — N=1 is correct for them.
+
 ### Authoring a new runner
 
 1. Create the runner under `test/autotest/run-<suite>-autotest.sh`

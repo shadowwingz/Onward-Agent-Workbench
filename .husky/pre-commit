@@ -1,0 +1,20 @@
+# Run the project text-lint before every git commit.
+# Catches the "Simplified Chinese leaked into a non-allowlisted file" class
+# of bug that otherwise only surfaces at `pnpm dist:dev` time — too late,
+# after the branch has already been pushed and someone else picks up the
+# lint hit during a merge.
+#
+# scripts/check-chinese-comments.js scans `git ls-files` directly, so it
+# catches violations in modified files plus newly tracked / staged files.
+# Runtime is < 1s on the current repo size, well below a noticeable commit
+# pause.
+#
+# To bypass in a genuine emergency (rare — the lint allowlist already
+# covers locale dictionaries, project instruction docs, and three test
+# files that legitimately quote zh-CN), use:
+#   git commit --no-verify
+# Only use --no-verify when you have already audited the diff and know the
+# Chinese text is in an allowlisted file; the same lint runs at every
+# `pnpm dist:dev` and will block daily-build CI if violations slip through.
+
+pnpm lint:comments
