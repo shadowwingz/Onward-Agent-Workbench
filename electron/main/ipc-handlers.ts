@@ -1822,8 +1822,8 @@ export function setupWindowShortcuts(mainWindow: BrowserWindow): void {
 
     const accelerator = parts.join('+')
 
-    // focusTerminal 1-6
-    for (let i = 1; i <= 6; i++) {
+    // focusTerminal 1-8
+    for (let i = 1; i <= 8; i++) {
       const shortcutKey = `focusTerminal${i}` as keyof typeof shortcuts
       if (shortcuts[shortcutKey] === accelerator) {
         event.preventDefault()

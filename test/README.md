@@ -82,6 +82,7 @@ point at files under `test/unittest/`.
 | Terminal layout / state restore across app restart | (`shouldRun('terminal-state-persistence')`, no shell runner) |
 | Per-Task font override (style settings) | (`shouldRun('per-agent-font')`, no shell runner) |
 | Renderer + main work scheduler unit tests | `test/unittest/main-work-scheduler-unit.mjs`, `renderer-work-scheduler-unit.mjs`, `terminal-output-scheduler-unit.mjs` |
+| 8-grid (2x4) preset, Custom layout popover, downsize confirm dialog, focusTerminal 7/8 shortcuts | `run-task-layout` (TLM-00..05) + `test/unittest/task-layout-utils.test.mts` (TLM-U-01..41) |
 
 ### 2.2 Tab / Subpage navigation / Settings UI
 

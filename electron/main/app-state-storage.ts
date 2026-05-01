@@ -101,11 +101,31 @@ interface PromptCleanupConfig {
 /**
  * Tab state
  */
+type PresetCount = 1 | 2 | 4 | 6 | 8
+
+interface CustomLayoutCell {
+  rowStart: 1 | 2
+  rowSpan: 1 | 2
+  colStart: 1 | 2 | 3 | 4
+  colSpan: 1 | 2 | 3 | 4
+}
+
+interface CustomLayoutPreset {
+  id: string
+  name: string
+  cells: CustomLayoutCell[]
+  createdAt: number
+}
+
+type LayoutMode =
+  | { kind: 'preset'; count: PresetCount }
+  | { kind: 'custom'; presetId: string }
+
 interface TabState {
   id: string
   customName: string | null
   createdAt: number
-  layoutMode: 1 | 2 | 4 | 6
+  layoutMode: LayoutMode
   activePanel: 'prompt' | null
   promptPanelWidth: number
   promptEditorHeight: number
@@ -152,6 +172,7 @@ interface AppState {
   projectEditorStates: Record<string, ProjectEditorState>
   promptSchedules: PromptSchedule[]
   uiPreferences: UIPreferences
+  customLayoutPresets: CustomLayoutPreset[]
   updatedAt: number
 }
 
@@ -160,12 +181,97 @@ interface AppState {
  */
 interface LegacyTerminalConfig {
   version: number
-  layoutMode: 1 | 2 | 4 | 6
+  layoutMode: 1 | 2 | 4 | 6 | 8
   activeTerminalId: string | null
   activePanel: 'prompt' | null
   terminals: { id: string; title: string }[]
   promptPanelWidth: number
   updatedAt: number
+}
+
+const VALID_PRESET_COUNTS: readonly PresetCount[] = [1, 2, 4, 6, 8]
+const CUSTOM_GRID_ROWS = 2
+const CUSTOM_GRID_COLS = 4
+const CUSTOM_GRID_TOTAL = CUSTOM_GRID_ROWS * CUSTOM_GRID_COLS
+
+function isPresetCount(value: unknown): value is PresetCount {
+  return typeof value === 'number' && (VALID_PRESET_COUNTS as readonly number[]).includes(value)
+}
+
+/**
+ * Migrate any persisted layoutMode shape (legacy bare number, current
+ * union, malformed) into a normalised LayoutMode union. Defaults to
+ * preset 1 when the input is unrecognised so a corrupt file cannot brick
+ * the renderer.
+ */
+function migrateLayoutMode(value: unknown): LayoutMode {
+  if (isPresetCount(value)) return { kind: 'preset', count: value }
+  if (value && typeof value === 'object') {
+    const obj = value as { kind?: unknown; count?: unknown; presetId?: unknown }
+    if (obj.kind === 'preset' && isPresetCount(obj.count)) return { kind: 'preset', count: obj.count }
+    if (obj.kind === 'custom' && typeof obj.presetId === 'string' && obj.presetId.length > 0) {
+      return { kind: 'custom', presetId: obj.presetId }
+    }
+  }
+  return { kind: 'preset', count: 1 }
+}
+
+function isValidCustomLayoutCellShape(cell: unknown): cell is CustomLayoutCell {
+  if (!cell || typeof cell !== 'object') return false
+  const c = cell as Partial<CustomLayoutCell>
+  return (
+    Number.isInteger(c.rowStart) && (c.rowStart as number) >= 1 && (c.rowStart as number) <= CUSTOM_GRID_ROWS &&
+    Number.isInteger(c.rowSpan) && (c.rowSpan as number) >= 1 && (c.rowSpan as number) <= CUSTOM_GRID_ROWS &&
+    Number.isInteger(c.colStart) && (c.colStart as number) >= 1 && (c.colStart as number) <= CUSTOM_GRID_COLS &&
+    Number.isInteger(c.colSpan) && (c.colSpan as number) >= 1 && (c.colSpan as number) <= CUSTOM_GRID_COLS
+  )
+}
+
+function isValidCustomLayoutCellList(cells: unknown): cells is CustomLayoutCell[] {
+  if (!Array.isArray(cells) || cells.length === 0 || cells.length > CUSTOM_GRID_TOTAL) return false
+  const occupancy: boolean[][] = Array.from(
+    { length: CUSTOM_GRID_ROWS },
+    () => Array.from({ length: CUSTOM_GRID_COLS }, () => false)
+  )
+  for (const cell of cells) {
+    if (!isValidCustomLayoutCellShape(cell)) return false
+    const rEnd = cell.rowStart + cell.rowSpan - 1
+    const cEnd = cell.colStart + cell.colSpan - 1
+    if (rEnd > CUSTOM_GRID_ROWS || cEnd > CUSTOM_GRID_COLS) return false
+    for (let r = cell.rowStart; r <= rEnd; r++) {
+      for (let c = cell.colStart; c <= cEnd; c++) {
+        if (occupancy[r - 1][c - 1]) return false
+        occupancy[r - 1][c - 1] = true
+      }
+    }
+  }
+  for (let r = 0; r < CUSTOM_GRID_ROWS; r++) {
+    for (let c = 0; c < CUSTOM_GRID_COLS; c++) {
+      if (!occupancy[r][c]) return false
+    }
+  }
+  return true
+}
+
+function validateCustomLayoutPresets(value: unknown): CustomLayoutPreset[] {
+  if (!Array.isArray(value)) return []
+  const seen = new Set<string>()
+  const out: CustomLayoutPreset[] = []
+  for (const item of value) {
+    if (!item || typeof item !== 'object') continue
+    const p = item as Partial<CustomLayoutPreset>
+    if (typeof p.id !== 'string' || p.id.length === 0 || seen.has(p.id)) continue
+    if (typeof p.name !== 'string') continue
+    if (!isValidCustomLayoutCellList(p.cells)) continue
+    seen.add(p.id)
+    out.push({
+      id: p.id,
+      name: p.name,
+      cells: p.cells as CustomLayoutCell[],
+      createdAt: typeof p.createdAt === 'number' ? p.createdAt : Date.now()
+    })
+  }
+  return out
 }
 
 const DEFAULT_PROMPT_PANEL_WIDTH = 320
@@ -237,7 +343,7 @@ function createDefaultTabState(id: string): TabState {
     id,
     customName: null,
     createdAt: Date.now(),
-    layoutMode: 1,
+    layoutMode: { kind: 'preset', count: 1 },
     activePanel: null,
     promptPanelWidth: DEFAULT_PROMPT_PANEL_WIDTH,
     promptEditorHeight: DEFAULT_PROMPT_EDITOR_HEIGHT,
@@ -266,6 +372,7 @@ function createDefaultAppState(): AppState {
     projectEditorStates: {},
     promptSchedules: [],
     uiPreferences: {},
+    customLayoutPresets: [],
     updatedAt: Date.now()
   }
 }
@@ -375,7 +482,7 @@ class AppStateStorage {
       id: tabId,
       customName: null,
       createdAt: Date.now(),
-      layoutMode: legacyConfig?.layoutMode ?? 1,
+      layoutMode: migrateLayoutMode(legacyConfig?.layoutMode),
       activePanel: legacyConfig?.activePanel ?? null,
       promptPanelWidth: legacyConfig?.promptPanelWidth ?? DEFAULT_PROMPT_PANEL_WIDTH,
       promptEditorHeight: DEFAULT_PROMPT_EDITOR_HEIGHT,
@@ -398,6 +505,7 @@ class AppStateStorage {
       projectEditorStates: {},
       promptSchedules: [],
       uiPreferences: {},
+      customLayoutPresets: [],
       updatedAt: Date.now()
     }
 
@@ -567,6 +675,10 @@ class AppStateStorage {
         ? (state.uiPreferences as UIPreferences)
         : {}
 
+    const customLayoutPresets = validateCustomLayoutPresets(
+      (state as AppState & { customLayoutPresets?: unknown }).customLayoutPresets
+    )
+
     return {
       activeTabId,
       tabs,
@@ -576,6 +688,7 @@ class AppStateStorage {
       projectEditorStates,
       promptSchedules,
       uiPreferences,
+      customLayoutPresets,
       updatedAt: state.updatedAt ?? Date.now()
     }
   }
@@ -619,8 +732,7 @@ class AppStateStorage {
   /**
    * Validate single tab data
    */
-  private validateTab(tab: Partial<TabState> & { name?: string }): TabState {
-    const validLayoutModes = [1, 2, 4, 6]
+  private validateTab(tab: Partial<TabState> & { name?: string; layoutMode?: unknown }): TabState {
     const promptPanelWidth = typeof tab.promptPanelWidth === 'number' && tab.promptPanelWidth >= MIN_PROMPT_PANEL_WIDTH
       ? tab.promptPanelWidth
       : DEFAULT_PROMPT_PANEL_WIDTH
@@ -653,9 +765,7 @@ class AppStateStorage {
       id: tab.id ?? generateId(),
       customName,
       createdAt: tab.createdAt ?? Date.now(),
-      layoutMode: validLayoutModes.includes(tab.layoutMode as number)
-        ? tab.layoutMode as 1 | 2 | 4 | 6
-        : 1,
+      layoutMode: migrateLayoutMode(tab.layoutMode),
       activePanel: tab.activePanel === 'prompt' ? 'prompt' : null,
       promptPanelWidth,
       promptEditorHeight,

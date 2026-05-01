@@ -1,0 +1,322 @@
+/*
+ * SPDX-FileCopyrightText: 2026 OPPO
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+.custom-layout-editor {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  width: 320px;
+  background: var(--panel);
+  border-radius: 10px;
+  box-shadow: var(--shadow-1);
+  color: var(--text-1);
+  font-size: var(--font-sm);
+  user-select: none;
+}
+
+.custom-layout-editor-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.custom-layout-editor-title {
+  font-weight: 600;
+}
+
+.custom-layout-editor-name {
+  width: 100%;
+  height: 30px;
+  padding: 0 10px;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-1);
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+
+.custom-layout-editor-name:focus {
+  border-color: var(--accent);
+}
+
+.custom-layout-editor-hint {
+  margin: 0;
+  color: var(--text-2);
+  font-size: var(--font-xs);
+  line-height: 1.4;
+}
+
+.custom-layout-editor-grid {
+  position: relative;
+  display: grid;
+  width: 100%;
+  /* 4col x 2row mesh; 2:1 aspect ratio echoes the real terminal area. */
+  aspect-ratio: 2 / 1;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  gap: 1px;
+  overflow: hidden;
+}
+
+.custom-layout-editor-atom {
+  background: color-mix(in srgb, var(--bg-2) 90%, transparent);
+  cursor: crosshair;
+  transition: background 0.1s ease;
+}
+
+.custom-layout-editor-grid.is-dragging .custom-layout-editor-atom {
+  cursor: crosshair;
+}
+
+.custom-layout-editor-atom:hover {
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg-2));
+}
+
+.custom-layout-editor-cell {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-1);
+  font-weight: 600;
+  border-radius: 4px;
+  z-index: 2;
+  /*
+   * Cells need pointer events on so a single left-click can open the
+   * Task-number picker. Drag-to-create still works because grid's
+   * onPointerDown sees the bubbling event first, runs a geometric
+   * hit-test, and returns early when the origin atom is already inside
+   * a settled cell — so no setPointerCapture, no drag begins.
+   */
+  cursor: pointer;
+}
+
+.custom-layout-editor-cell.is-unassigned {
+  /*
+   * "Selected, awaiting Task number." Reads as a clearly highlighted
+   * region (saturated accent fill) so the user immediately sees the
+   * selection took effect. The 1px solid accent rim distinguishes it
+   * from a numbered Task without resorting to dashed borders that
+   * looked "tentative" in earlier feedback.
+   */
+  background: color-mix(in srgb, var(--accent) 32%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 75%, transparent);
+}
+
+.custom-layout-editor-cell.is-assigned {
+  /* Fully claimed — saturated accent, matches the saved-preset look. */
+  background: color-mix(in srgb, var(--accent) 48%, transparent);
+  border: 1px solid var(--accent);
+}
+
+.custom-layout-editor-cell-label {
+  pointer-events: none;
+}
+
+.custom-layout-editor-cell-label.is-unassigned-label {
+  /* Subdued so the highlighted background does the heavy lifting; the
+     "(unassigned)" string stays informative without competing with the
+     accent fill for attention. */
+  font-size: var(--font-xs);
+  font-weight: 500;
+  opacity: 0.85;
+  letter-spacing: 0.2px;
+}
+
+.custom-layout-editor-cell-remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  background: rgba(0, 0, 0, 0.45);
+  color: #fff;
+  border-radius: 50%;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* Re-enable pointer events for the close button only — the parent
+     cell intentionally opts out so drag selection works through it. */
+  pointer-events: auto;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.custom-layout-editor-cell:hover .custom-layout-editor-cell-remove {
+  opacity: 1;
+}
+
+.custom-layout-editor-candidate {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  border: 1.5px dashed var(--accent);
+  border-radius: 4px;
+  /* Live drag preview — never intercepts the pointer so elementFromPoint
+     reads the underlying atomic cell instead of the candidate overlay. */
+  pointer-events: none;
+  z-index: 3;
+  transition: none;
+}
+
+.custom-layout-editor-candidate.is-invalid {
+  background: color-mix(in srgb, #ef4444 22%, transparent);
+  border-color: #ef4444;
+}
+
+/* ── Per-cell right-click context menu ── */
+.custom-layout-cell-context {
+  position: fixed;
+  z-index: 4000;
+  background: var(--panel);
+  border-radius: 10px;
+  padding: 6px;
+  box-shadow: var(--shadow-1);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 200px;
+  color: var(--text-1);
+  font-size: var(--font-sm);
+  user-select: none;
+  animation: custom-layout-cell-context-fade 0.12s ease;
+}
+
+@keyframes custom-layout-cell-context-fade {
+  from { opacity: 0; transform: translateY(-2px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.custom-layout-cell-context-title {
+  padding: 4px 8px 2px;
+  color: var(--text-2);
+  font-size: var(--font-xs);
+}
+
+.custom-layout-cell-context-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 4px;
+  padding: 0 4px 4px;
+}
+
+.custom-layout-cell-context-num {
+  height: 30px;
+  border: 1px solid var(--border);
+  background: var(--bg-1);
+  color: var(--text-1);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: var(--font-sm);
+  font-weight: 600;
+  transition: background 0.12s ease, border-color 0.12s ease, opacity 0.12s ease;
+}
+
+.custom-layout-cell-context-num:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  border-color: var(--accent);
+}
+
+.custom-layout-cell-context-num.is-current {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+.custom-layout-cell-context-num:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.custom-layout-cell-context-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 4px 6px;
+}
+
+.custom-layout-cell-context-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: none;
+  background: transparent;
+  color: var(--text-1);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: var(--font-sm);
+  text-align: left;
+  transition: background 0.12s ease;
+}
+
+.custom-layout-cell-context-item:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+}
+
+.custom-layout-cell-context-item:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.custom-layout-cell-context-item.is-danger:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+}
+
+.custom-layout-editor-error {
+  color: #ef4444;
+  font-size: var(--font-xs);
+  min-height: 16px;
+}
+
+.custom-layout-editor-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.custom-layout-editor-actions-end {
+  display: flex;
+  gap: 8px;
+}
+
+.custom-layout-editor-secondary,
+.custom-layout-editor-primary {
+  height: 30px;
+  padding: 0 14px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-1);
+  color: var(--text-1);
+  cursor: pointer;
+  font-size: var(--font-sm);
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.custom-layout-editor-secondary:hover {
+  background: var(--bg-2);
+}
+
+.custom-layout-editor-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.custom-layout-editor-primary:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+
+.custom-layout-editor-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}

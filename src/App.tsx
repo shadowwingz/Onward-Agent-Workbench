@@ -32,6 +32,8 @@ import { requestOpenExternalHttpLink } from './utils/externalLink'
 import { perfTrace, perfTraceTask } from './utils/perf-trace'
 import { PERF_TRACE_EVENT } from './utils/perf-trace-names'
 import { computeNextExecution } from './utils/schedule'
+import { resolveLayout, getEffectiveCount } from './utils/layout-mode'
+import { DownsizeConfirmDialog, type DownsizeTerminalEntry } from './components/DownsizeConfirmDialog/DownsizeConfirmDialog'
 import {
   createTerminalBatchResult,
   getDeliveredTerminalIds
@@ -338,8 +340,13 @@ const TabPromptNotebook = memo(function TabPromptNotebook({
     setTerminalCustomName
   } = useAppState()
 
+  const tabEffectiveCount = useMemo(
+    () => getEffectiveCount(tab.layoutMode, state.customLayoutPresets),
+    [tab.layoutMode, state.customLayoutPresets]
+  )
+
   const terminals: TerminalInfo[] = useMemo(() => {
-    return tab.terminals.slice(0, tab.layoutMode).map((t, index) => ({
+    return tab.terminals.slice(0, tabEffectiveCount).map((t, index) => ({
       id: t.id,
       title: getTerminalDisplayName(index, t.customName),
       customName: t.customName,
@@ -347,7 +354,7 @@ const TabPromptNotebook = memo(function TabPromptNotebook({
       lastCwd: t.lastCwd,
       isActive: t.id === tab.activeTerminalId
     }))
-  }, [tab.terminals, tab.layoutMode, tab.activeTerminalId, getTerminalDisplayName])
+  }, [tab.terminals, tabEffectiveCount, tab.activeTerminalId, getTerminalDisplayName])
 
   const prompts = useMemo(() => {
     return [...state.globalPrompts, ...tab.localPrompts]
@@ -522,7 +529,8 @@ function AppContent({
     updateSchedule,
     deleteSchedule,
     getTerminalRepoRoot,
-    setTerminalCustomName
+    setTerminalCustomName,
+    commitCustomLayoutPresetEdit
   } = useAppState()
 
   const {
@@ -603,18 +611,18 @@ function AppContent({
     if (!isLoaded) return
 
     state.tabs.forEach(tab => {
-      const layoutMode = tab.layoutMode
+      const targetCount = getEffectiveCount(tab.layoutMode, state.customLayoutPresets)
       const currentTerminals = tab.terminals
 
-      if (currentTerminals.length < layoutMode) {
+      if (currentTerminals.length < targetCount) {
         // Only process the currently active Tab (avoid repeated updates)
         if (tab.id === state.activeTabId) {
           const newTerminals = [...currentTerminals]
-          for (let i = currentTerminals.length; i < layoutMode; i++) {
+          for (let i = currentTerminals.length; i < targetCount; i++) {
             const id = `terminal-${tab.id}-${Date.now()}-${i}`
             perfTraceTask(PERF_TRACE_EVENT.RENDERER_TERMINAL_SPLIT_ADD, {
               tabId: tab.id,
-              layoutMode,
+              targetCount,
               slotIndex: i
             }, id)
             newTerminals.push({
@@ -631,7 +639,7 @@ function AppContent({
         }
       }
     })
-  }, [isLoaded, state.tabs, state.activeTabId, updateActiveTab])
+  }, [isLoaded, state.tabs, state.activeTabId, state.customLayoutPresets, updateActiveTab])
 
   // Set default active terminal
   useEffect(() => {
@@ -1049,10 +1057,179 @@ function AppContent({
     setTerminalCustomName(tabId, terminalId, newCustomName, null)
   }, [setTerminalCustomName])
 
-  // Layout change handling
-  const handleLayoutChange = useCallback((mode: LayoutMode) => {
+  // Pending downsize-style dialog. Two distinct intents need the same
+  // "pick N terminals to keep" UI:
+  //   - layout-change: user clicked a smaller preset / Custom button.
+  //   - preset-edit:   user shrank an existing preset's cell count
+  //                    while a tab was using it. The cells must NOT
+  //                    flip until the user confirms — otherwise a
+  //                    cancel leaves hidden PTYs (Codex P1).
+  // Modeled as a discriminated union so we can route confirm / cancel
+  // to the right branch and reuse one DownsizeConfirmDialog instance.
+  type PendingDialog =
+    | { kind: 'layout-change'; mode: LayoutMode; requiredCount: number }
+    | {
+        kind: 'preset-edit'
+        presetId: string
+        payload: { name: string; cells: import('./types/prompt').CustomLayoutCell[] }
+        requiredCount: number
+      }
+  const [pendingDialog, setPendingDialog] = useState<PendingDialog | null>(null)
+
+  // Layout change handling. Compares the resulting Task count against the
+  // current Task count: if it shrinks, the user has to pick which Tasks
+  // survive (DownsizeConfirmDialog). Closed Tasks have their PTY torn down
+  // immediately so resources are released.
+  //
+  // `hintEffectiveCount` lets the caller short-circuit the AppState read
+  // when state has not yet propagated.
+  const handleLayoutChange = useCallback((mode: LayoutMode, hintEffectiveCount?: number) => {
+    if (!activeTab) {
+      updateActiveTab({ layoutMode: mode })
+      return
+    }
+    const resolvedCount = hintEffectiveCount ?? getEffectiveCount(mode, state.customLayoutPresets)
+    const currentCount = activeTab.terminals.length
+    if (currentCount > resolvedCount) {
+      setPendingDialog({ kind: 'layout-change', mode, requiredCount: resolvedCount })
+      return
+    }
     updateActiveTab({ layoutMode: mode })
-  }, [updateActiveTab])
+  }, [activeTab, state.customLayoutPresets, updateActiveTab])
+
+  /**
+   * Edit an existing custom preset transactionally. Two failure modes
+   * the previous "update + apply" split could not avoid:
+   *   1. cells flipped before downsize dialog finished — cancel left
+   *      hidden PTYs.
+   *   2. background tabs referencing the same preset never showed the
+   *      dialog, so their tail terminals silently went hidden.
+   * This helper inspects every affected tab, gates on the active tab
+   * via the dialog when needed, and only commits cells + truncates
+   * tabs after confirmation. Background tabs auto-keep first-N (the
+   * dialog can only ask once).
+   */
+  const handleCommitPresetEdit = useCallback((
+    presetId: string,
+    payload: { name: string; cells: import('./types/prompt').CustomLayoutCell[] }
+  ) => {
+    const newCount = payload.cells.length
+    const activeAffected = !!activeTab
+      && activeTab.layoutMode.kind === 'custom'
+      && activeTab.layoutMode.presetId === presetId
+      && activeTab.terminals.length > newCount
+
+    if (activeAffected) {
+      setPendingDialog({ kind: 'preset-edit', presetId, payload, requiredCount: newCount })
+      return
+    }
+
+    // Active tab not affected (or not using this preset) — commit
+    // immediately. Background tabs that ARE affected get their excess
+    // terminals disposed here before the reducer truncates them.
+    for (const tab of state.tabs) {
+      if (tab.layoutMode.kind !== 'custom' || tab.layoutMode.presetId !== presetId) continue
+      if (tab.terminals.length <= newCount) continue
+      tab.terminals.slice(newCount).forEach(term => {
+        perfTraceTask(PERF_TRACE_EVENT.RENDERER_TERMINAL_DESTROY_BY_DOWNSIZE, {
+          tabId: tab.id,
+          terminalId: term.id,
+          reason: 'preset-edit-background'
+        }, term.id)
+        try {
+          terminalSessionManager.dispose(term.id)
+        } catch (error) {
+          console.warn('Failed to dispose terminal during preset-edit:', error)
+        }
+      })
+    }
+    commitCustomLayoutPresetEdit(presetId, payload, null)
+  }, [activeTab, state.tabs, commitCustomLayoutPresetEdit])
+
+  const handleDialogConfirm = useCallback((keepIds: string[]) => {
+    if (!pendingDialog || !activeTab) {
+      setPendingDialog(null)
+      return
+    }
+    const keepSet = new Set(keepIds)
+
+    if (pendingDialog.kind === 'layout-change') {
+      const survivors = activeTab.terminals.filter(t => keepSet.has(t.id))
+      const removed = activeTab.terminals.filter(t => !keepSet.has(t.id))
+      removed.forEach(term => {
+        perfTraceTask(PERF_TRACE_EVENT.RENDERER_TERMINAL_DESTROY_BY_DOWNSIZE, {
+          tabId: activeTab.id,
+          terminalId: term.id,
+          reason: 'layout-change'
+        }, term.id)
+        try {
+          terminalSessionManager.dispose(term.id)
+        } catch (error) {
+          console.warn('Failed to dispose terminal during downsize:', error)
+        }
+      })
+      const nextActiveTerminalId = survivors.some(t => t.id === activeTab.activeTerminalId)
+        ? activeTab.activeTerminalId
+        : (survivors[0]?.id ?? null)
+      updateActiveTab({
+        layoutMode: pendingDialog.mode,
+        terminals: survivors,
+        activeTerminalId: nextActiveTerminalId
+      })
+    } else {
+      // preset-edit: dispose the active tab's dropped terminals + every
+      // background tab's tail (auto-keep first-N), then atomically flip
+      // preset cells and truncate every referencing tab.
+      const removedActive = activeTab.terminals.filter(t => !keepSet.has(t.id))
+      removedActive.forEach(term => {
+        perfTraceTask(PERF_TRACE_EVENT.RENDERER_TERMINAL_DESTROY_BY_DOWNSIZE, {
+          tabId: activeTab.id,
+          terminalId: term.id,
+          reason: 'preset-edit-active'
+        }, term.id)
+        try {
+          terminalSessionManager.dispose(term.id)
+        } catch (error) {
+          console.warn('Failed to dispose terminal during preset-edit:', error)
+        }
+      })
+      for (const tab of state.tabs) {
+        if (tab.id === activeTab.id) continue
+        if (tab.layoutMode.kind !== 'custom' || tab.layoutMode.presetId !== pendingDialog.presetId) continue
+        if (tab.terminals.length <= pendingDialog.requiredCount) continue
+        tab.terminals.slice(pendingDialog.requiredCount).forEach(term => {
+          perfTraceTask(PERF_TRACE_EVENT.RENDERER_TERMINAL_DESTROY_BY_DOWNSIZE, {
+            tabId: tab.id,
+            terminalId: term.id,
+            reason: 'preset-edit-background'
+          }, term.id)
+          try {
+            terminalSessionManager.dispose(term.id)
+          } catch (error) {
+            console.warn('Failed to dispose terminal during preset-edit:', error)
+          }
+        })
+      }
+      commitCustomLayoutPresetEdit(pendingDialog.presetId, pendingDialog.payload, keepIds)
+    }
+    setPendingDialog(null)
+  }, [pendingDialog, activeTab, state.tabs, updateActiveTab, commitCustomLayoutPresetEdit])
+
+  const handleDialogCancel = useCallback(() => {
+    // No state mutation — cells stay as-is, no PTYs disposed. This is
+    // the entire point of routing preset edits through this dialog.
+    setPendingDialog(null)
+  }, [])
+
+  const downsizeTerminals = useMemo<DownsizeTerminalEntry[]>(() => {
+    if (!activeTab) return []
+    return activeTab.terminals.map((term, index) => ({
+      id: term.id,
+      position: index + 1,
+      customName: term.customName,
+      cwd: term.lastCwd ?? null
+    }))
+  }, [activeTab])
 
   // Display state of the Settings panel (independent of Tab state)
   const [showSettings, setShowSettings] = useState(false)
@@ -1535,6 +1712,7 @@ function AppContent({
   }
 
   const layoutMode = activeTab.layoutMode
+  const layoutEffectiveCount = getEffectiveCount(layoutMode, state.customLayoutPresets)
   const activePanel = activeTab.activePanel
 
   // Calculate the displayed activePanel (for Sidebar)
@@ -1555,12 +1733,13 @@ function AppContent({
           onPanelChange={handlePanelChangeWithSettings}
           onFeedbackToggle={handleFeedbackToggle}
           onLayoutChange={handleLayoutChange}
+          onCommitPresetEdit={handleCommitPresetEdit}
           onChangeLogToggle={handleToggleChangeLog}
         />
         <main className="main-content">
           {showSettings && (
             <Settings
-              terminals={terminals.slice(0, layoutMode)}
+              terminals={terminals.slice(0, layoutEffectiveCount)}
               onClose={handleCloseSettings}
               width={getSettingsPanelWidth()}
               onWidthChange={setSettingsPanelWidth}
@@ -1628,6 +1807,13 @@ function AppContent({
         isLoading={changeLogLoading}
       />
       <FeedbackModal isOpen={showFeedbackModal} onClose={handleCloseFeedbackModal} />
+      <DownsizeConfirmDialog
+        open={pendingDialog !== null}
+        terminals={downsizeTerminals}
+        requiredCount={pendingDialog?.requiredCount ?? 0}
+        onConfirm={handleDialogConfirm}
+        onCancel={handleDialogCancel}
+      />
     </div>
   )
 }

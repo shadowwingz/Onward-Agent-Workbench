@@ -3,9 +3,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { LayoutMode } from '../../types/prompt'
+import { useCallback, useRef, useState } from 'react'
+import { LayoutMode, PresetCount, CustomLayoutCell } from '../../types/prompt'
 import { useI18n } from '../../i18n/useI18n'
+import { useAppState } from '../../contexts/AppStateContext'
+import { CustomLayoutPopover } from '../CustomLayoutPopover/CustomLayoutPopover'
+import { terminalSessionManager } from '../../terminal/terminal-session-manager'
+import { perfTraceTask } from '../../utils/perf-trace'
+import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
 import './Sidebar.css'
+
+const isPresetActive = (mode: LayoutMode, count: PresetCount): boolean =>
+  mode.kind === 'preset' && mode.count === count
+
+const presetMode = (count: PresetCount): LayoutMode => ({ kind: 'preset', count })
 
 interface SidebarProps {
   activePanel: 'prompt' | 'settings' | null
@@ -14,7 +25,19 @@ interface SidebarProps {
   isChangeLogOpen: boolean
   onPanelChange: (panel: 'prompt' | 'settings' | null) => void
   onFeedbackToggle: () => void
-  onLayoutChange: (mode: LayoutMode) => void
+  /**
+   * Set the active layout. The optional `effectiveCount` short-circuits
+   * the parent's downsize gate so freshly-created custom presets — whose
+   * cells aren't yet visible in AppState on this render — can still be
+   * applied atomically without re-reading stale state.
+   */
+  onLayoutChange: (mode: LayoutMode, effectiveCount?: number) => void
+  /**
+   * Transactional preset edit. The popover surfaces the user's intent
+   * (id + new payload) and the parent decides whether to gate on a
+   * downsize dialog before committing — see App.tsx::handleCommitPresetEdit.
+   */
+  onCommitPresetEdit: (presetId: string, payload: { name: string; cells: CustomLayoutCell[] }) => void
   onChangeLogToggle: () => void
 }
 
@@ -26,9 +49,50 @@ export function Sidebar({
   onPanelChange,
   onFeedbackToggle,
   onLayoutChange,
+  onCommitPresetEdit,
   onChangeLogToggle
 }: SidebarProps) {
   const { t } = useI18n()
+  const {
+    state,
+    addCustomLayoutPreset,
+    updateCustomLayoutPreset,
+    duplicateCustomLayoutPreset,
+    deleteCustomLayoutPreset
+  } = useAppState()
+  // updateCustomLayoutPreset is intentionally unused now — preset edits
+  // go through onCommitPresetEdit so we can gate on the downsize dialog
+  // before flipping cells. Renames-only could still use the direct
+  // reducer, but the popover only surfaces edits via the editor today.
+  void updateCustomLayoutPreset
+  const customLayoutPresets = state.customLayoutPresets
+  const customButtonRef = useRef<HTMLButtonElement | null>(null)
+  const [customPopoverOpen, setCustomPopoverOpen] = useState(false)
+  const isCustomActive = layoutMode.kind === 'custom'
+
+  // Deleting a preset triggers an in-reducer truncate of every tab that
+  // references it (down to one terminal). The reducer can't reach into
+  // terminalSessionManager, so we dispose the trailing terminal sessions
+  // here first — synchronously, before the state update queues — to
+  // prevent orphan PTYs.
+  const handleDeletePreset = useCallback((id: string) => {
+    for (const tab of state.tabs) {
+      if (tab.layoutMode.kind !== 'custom' || tab.layoutMode.presetId !== id) continue
+      tab.terminals.slice(1).forEach(term => {
+        perfTraceTask(PERF_TRACE_EVENT.RENDERER_TERMINAL_DESTROY_BY_DOWNSIZE, {
+          tabId: tab.id,
+          terminalId: term.id,
+          reason: 'preset-deleted'
+        }, term.id)
+        try {
+          terminalSessionManager.dispose(term.id)
+        } catch (error) {
+          console.warn('Failed to dispose terminal during preset delete:', error)
+        }
+      })
+    }
+    deleteCustomLayoutPreset(id)
+  }, [state.tabs, deleteCustomLayoutPreset])
 
   const handlePromptToggle = () => {
     onPanelChange(activePanel === 'prompt' ? null : 'prompt')
@@ -59,8 +123,8 @@ export function Sidebar({
 
       {/* Layout toggle button group */}
       <button
-        className={`sidebar-btn ${layoutMode === 1 ? 'active' : ''}`}
-        onClick={() => onLayoutChange(1)}
+        className={`sidebar-btn ${isPresetActive(layoutMode, 1) ? 'active' : ''}`}
+        onClick={() => onLayoutChange(presetMode(1))}
         title={t('sidebar.layout.single')}
       >
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -69,8 +133,8 @@ export function Sidebar({
       </button>
 
       <button
-        className={`sidebar-btn ${layoutMode === 2 ? 'active' : ''}`}
-        onClick={() => onLayoutChange(2)}
+        className={`sidebar-btn ${isPresetActive(layoutMode, 2) ? 'active' : ''}`}
+        onClick={() => onLayoutChange(presetMode(2))}
         title={t('sidebar.layout.double')}
       >
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -80,8 +144,8 @@ export function Sidebar({
       </button>
 
       <button
-        className={`sidebar-btn ${layoutMode === 4 ? 'active' : ''}`}
-        onClick={() => onLayoutChange(4)}
+        className={`sidebar-btn ${isPresetActive(layoutMode, 4) ? 'active' : ''}`}
+        onClick={() => onLayoutChange(presetMode(4))}
         title={t('sidebar.layout.quad')}
       >
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -92,8 +156,8 @@ export function Sidebar({
       </button>
 
       <button
-        className={`sidebar-btn ${layoutMode === 6 ? 'active' : ''}`}
-        onClick={() => onLayoutChange(6)}
+        className={`sidebar-btn ${isPresetActive(layoutMode, 6) ? 'active' : ''}`}
+        onClick={() => onLayoutChange(presetMode(6))}
         title={t('sidebar.layout.six')}
       >
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -103,6 +167,64 @@ export function Sidebar({
           <line x1="3" y1="12" x2="21" y2="12" />
         </svg>
       </button>
+
+      {/*
+        8-grid (2x4) icon — design B: just the outer frame, one mid-row
+        rule, and three short column ticks on each row. Conveys "more
+        slots" without painting the cell mesh; reads cleanly at 20px.
+      */}
+      <button
+        className={`sidebar-btn ${isPresetActive(layoutMode, 8) ? 'active' : ''}`}
+        onClick={() => onLayoutChange(presetMode(8))}
+        title={t('sidebar.layout.eight')}
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+          <rect x="3" y="3" width="18" height="18" rx="2" />
+          <line x1="3" y1="12" x2="21" y2="12" />
+          <line x1="8" y1="6" x2="8" y2="9" />
+          <line x1="13" y1="6" x2="13" y2="9" />
+          <line x1="18" y1="6" x2="18" y2="9" />
+          <line x1="8" y1="15" x2="8" y2="18" />
+          <line x1="13" y1="15" x2="13" y2="18" />
+          <line x1="18" y1="15" x2="18" y2="18" />
+        </svg>
+      </button>
+
+      {/*
+        Custom layout — opens a popover with saved presets and a "+ New"
+        entry. The icon is intentionally non-uniform (one wide cell, two
+        narrow cells, one tall cell) so it reads as "user-defined" rather
+        than another preset count.
+      */}
+      <button
+        ref={customButtonRef}
+        className={`sidebar-btn ${isCustomActive ? 'active' : ''}`}
+        onClick={() => setCustomPopoverOpen(prev => !prev)}
+        title={t('sidebar.layout.custom')}
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+          <rect x="3" y="3" width="18" height="18" rx="2" />
+          <line x1="11" y1="3" x2="11" y2="14" />
+          <line x1="3" y1="14" x2="21" y2="14" />
+          <line x1="16" y1="14" x2="16" y2="21" />
+        </svg>
+      </button>
+
+      {customPopoverOpen && (
+        <CustomLayoutPopover
+          anchorEl={customButtonRef.current}
+          presets={customLayoutPresets}
+          activeMode={layoutMode}
+          onClose={() => setCustomPopoverOpen(false)}
+          onApplyPreset={(presetId, effectiveCount) =>
+            onLayoutChange({ kind: 'custom', presetId }, effectiveCount)
+          }
+          onCreatePreset={(payload) => addCustomLayoutPreset(payload)}
+          onCommitEdit={(id, payload) => onCommitPresetEdit(id, payload)}
+          onDuplicatePreset={(id) => duplicateCustomLayoutPreset(id)}
+          onDeletePreset={(id) => handleDeletePreset(id)}
+        />
+      )}
 
       {/* Spacer Push the Settings button to the bottom */}
       <div className="sidebar-spacer" />

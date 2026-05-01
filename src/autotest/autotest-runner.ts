@@ -11,6 +11,7 @@
 import type { AutotestContext, TestResult, TestSuiteResult } from './types'
 import { testTerminalAutofollow } from './test-terminal-autofollow'
 import { testTerminalTitleRename } from './test-terminal-title-rename'
+import { testTaskLayout } from './test-task-layout'
 import { testPromptSender } from './test-prompt-sender'
 import { testPromptList } from './test-prompt-list'
 import { testPromptIntegrity } from './test-prompt-integrity'
@@ -176,6 +177,13 @@ export async function runAllTests(ctx: AutotestContext): Promise<void> {
       const results = await testTerminalTitleRename(ctx)
       collectSuiteResults('TerminalTitleRename', results)
       await sleep(300)
+    }
+
+    if (!ctx.cancelled() && shouldRun('task-layout')) {
+      log('phase0.13:begin')
+      const results = await testTaskLayout(ctx)
+      collectSuiteResults('TaskLayout', results)
+      await sleep(200)
     }
 
     if (!ctx.cancelled() && shouldRun('feedback')) {

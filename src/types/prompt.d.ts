@@ -23,13 +23,51 @@ export interface PromptStore {
 }
 
 /**
- * terminal layout mode
- * 1: Single window
- * 2: Dual window (horizontal)
- * 4: Four-square grid
- * 6: Six-square grid (3x2)
+ * Preset terminal layout grid count.
+ * 1: single, 2: dual horizontal, 4: 2x2, 6: 3x2, 8: 4x2.
+ * Each preset cell is the same size (1fr).
  */
-export type LayoutMode = 1 | 2 | 4 | 6
+export type PresetCount = 1 | 2 | 4 | 6 | 8
+
+/**
+ * Custom layout cell — a rectangular Task footprint inside the 2 (rows) x
+ * 4 (cols) atomic grid. Coordinates are 1-based; rowSpan/colSpan are
+ * inclusive spans. The set of cells in a preset must:
+ *  - be pairwise non-overlapping
+ *  - completely cover the 2x4 grid (8 atomic cells, no gaps)
+ * Validation lives in src/utils/custom-layout-validator.ts.
+ */
+export interface CustomLayoutCell {
+  rowStart: 1 | 2
+  rowSpan: 1 | 2
+  colStart: 1 | 2 | 3 | 4
+  colSpan: 1 | 2 | 3 | 4
+}
+
+/**
+ * Saved custom layout preset shared globally across all tabs.
+ */
+export interface CustomLayoutPreset {
+  id: string
+  name: string
+  cells: CustomLayoutCell[]
+  createdAt: number
+}
+
+/**
+ * Tab layout mode. A preset uses one of the fixed grid counts; a custom
+ * layout references a CustomLayoutPreset by id (resolved against
+ * AppState.customLayoutPresets at render time).
+ */
+export type LayoutMode =
+  | { kind: 'preset'; count: PresetCount }
+  | { kind: 'custom'; presetId: string }
+
+/**
+ * Legacy persisted form: a bare number was stored in TabState.layoutMode
+ * before the union was introduced. Used only for migration on load.
+ */
+export type LegacyLayoutMode = 1 | 2 | 4 | 6 | 8
 
 /**
  * Terminal information

@@ -257,7 +257,26 @@ export const PERF_TRACE_EVENT = {
   // newBranch }. Useful for verifying user-visible "manual name expired"
   // moments line up with what the SQL queries expect.
   RENDERER_TASK_NAME_RESOLVE: 'renderer:task-name.resolve',
-  RENDERER_TASK_NAME_MANUAL_CLEAR: 'renderer:task-name.manual-clear'
+  RENDERER_TASK_NAME_MANUAL_CLEAR: 'renderer:task-name.manual-clear',
+
+  // ───────── Renderer — Task layout (8-grid + Custom) ─────────
+  // Layout transitions ride the renderer thread because TerminalGrid has
+  // to recompute grid-column / grid-row for every Task cell and run
+  // FitAddon resizes. All four events are emitted as ph='i' instants
+  // (the existing renderer perfTrace wrapper only emits instants) and
+  // carry a `durationMs` payload field on transitions so SQL queries can
+  // still build latency histograms via `args.durationMs`.
+  // (a) APPLY: every layoutMode → displayLayoutMode transition that
+  //     completes (ensureReady resolved). Captures transitionMs.
+  // (b) EDITOR_OPEN: when CustomLayoutEditor mounts.
+  // (c) DOWNSIZE_DIALOG_OPEN: when DownsizeConfirmDialog mounts.
+  // (d) TERMINAL_DESTROY_BY_DOWNSIZE: per-Task destroy emitted before
+  //     terminalSessionManager.dispose; tagged with the per-Task tid via
+  //     perfTraceTask so it lines up on the Task's row in Perfetto.
+  RENDERER_CUSTOM_LAYOUT_APPLY: 'renderer:custom-layout.apply',
+  RENDERER_CUSTOM_LAYOUT_EDITOR_OPEN: 'renderer:custom-layout.editor-open',
+  RENDERER_DOWNSIZE_DIALOG_OPEN: 'renderer:downsize-dialog.open',
+  RENDERER_TERMINAL_DESTROY_BY_DOWNSIZE: 'renderer:terminal.destroy-by-downsize'
 } as const
 
 export type PerfTraceEventName = typeof PERF_TRACE_EVENT[keyof typeof PERF_TRACE_EVENT]

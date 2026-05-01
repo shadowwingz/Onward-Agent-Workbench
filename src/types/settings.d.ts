@@ -10,13 +10,15 @@ import type { AppLocale } from '../i18n/core'
 
 // Shortcut configuration
 export interface ShortcutConfig {
-  // Terminal focus shortcuts (6)
+  // Terminal focus shortcuts (8)
   focusTerminal1: string | null
   focusTerminal2: string | null
   focusTerminal3: string | null
   focusTerminal4: string | null
   focusTerminal5: string | null
   focusTerminal6: string | null
+  focusTerminal7: string | null
+  focusTerminal8: string | null
   // Tab switching shortcuts (6)
   switchTab1: string | null
   switchTab2: string | null

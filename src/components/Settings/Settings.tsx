@@ -69,7 +69,9 @@ const SHORTCUT_GROUPS: { titleKey: TranslationKey; descriptionKey?: TranslationK
       { key: 'focusTerminal3', labelKey: 'settings.shortcut.focusTask', labelParams: { index: 3 } },
       { key: 'focusTerminal4', labelKey: 'settings.shortcut.focusTask', labelParams: { index: 4 } },
       { key: 'focusTerminal5', labelKey: 'settings.shortcut.focusTask', labelParams: { index: 5 } },
-      { key: 'focusTerminal6', labelKey: 'settings.shortcut.focusTask', labelParams: { index: 6 } }
+      { key: 'focusTerminal6', labelKey: 'settings.shortcut.focusTask', labelParams: { index: 6 } },
+      { key: 'focusTerminal7', labelKey: 'settings.shortcut.focusTask', labelParams: { index: 7 } },
+      { key: 'focusTerminal8', labelKey: 'settings.shortcut.focusTask', labelParams: { index: 8 } }
     ]
   },
   {

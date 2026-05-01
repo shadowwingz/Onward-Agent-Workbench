@@ -156,7 +156,7 @@ export interface PromptAPI {
 
 export interface TerminalWindowConfig {
   version: number
-  layoutMode: 1 | 2 | 4 | 6
+  layoutMode: 1 | 2 | 4 | 6 | 8
   activeTerminalId: string | null
   activePanel: 'prompt' | null
   terminals: { id: string; title: string }[]

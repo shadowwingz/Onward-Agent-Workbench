@@ -60,6 +60,8 @@ function createDefaultShortcuts(): ShortcutConfig {
     focusTerminal4: null,
     focusTerminal5: null,
     focusTerminal6: null,
+    focusTerminal7: null,
+    focusTerminal8: null,
     switchTab1: null,
     switchTab2: null,
     switchTab3: null,

@@ -402,6 +402,10 @@ so every call through `window.electronAPI.<domain>.<method>()` gets a
 | `RENDERER_SETTINGS_OPEN` | `renderer:settings.open` | `i` | `src/App.tsx` panel switcher |
 | `RENDERER_CHANGELOG_OPEN` | `renderer:changelog.open` | `i` | `src/App.tsx::handleToggleChangeLog` |
 | `RENDERER_SUBPAGE_FRESHNESS_CHECK` | `renderer:subpage.freshness-check` | `i` | `src/components/TerminalGrid/TerminalGrid.tsx::handleViewGitDiff` / `handleViewGitHistory` — fires once per subpage activation. Tagged `subpage: 'diff' \| 'history' \| 'editor'`, `cwd`, `reason: 'open' \| 'switch'`. Pairs with `MAIN_GIT_DIFF_CACHE_INVALIDATE { reason: 'force' }` on the main side. |
+| `RENDERER_CUSTOM_LAYOUT_APPLY` | `renderer:custom-layout.apply` | `i` (carries `durationMs`) | `TerminalGrid.tsx` layout-transition `useEffect` — fires once per `layoutMode` change after `displayLayoutMode` flips, or immediately when downsizing. Tagged `kind: 'preset' \| 'custom'`, `effectiveCount`, `previousCount`, `durationMs` so SQL queries can compare custom-apply latency to preset-apply latency. |
+| `RENDERER_CUSTOM_LAYOUT_EDITOR_OPEN` | `renderer:custom-layout.editor-open` | `i` | `CustomLayoutEditor.tsx` mount effect — fires when the editor opens (popover "+ New layout" or "Edit"). Tagged `mode: 'create' \| 'edit'`, `seedCellCount`. |
+| `RENDERER_DOWNSIZE_DIALOG_OPEN` | `renderer:downsize-dialog.open` | `i` | `DownsizeConfirmDialog.tsx` open-effect — fires when the user picks a smaller layout (preset or custom) and the keep-Tasks dialog appears. Tagged `currentCount`, `requiredCount`. |
+| `RENDERER_TERMINAL_DESTROY_BY_DOWNSIZE` | `renderer:terminal.destroy-by-downsize` | `i` | `App.tsx::handleDownsizeConfirm` — emitted on the per-Task tid lane just before `terminalSessionManager.dispose(id)`, so a Task's lifetime ends visibly on its own Perfetto row. Tagged `tabId`, `terminalId`. |
 
 #### Background ops
 
