@@ -4,7 +4,7 @@
  */
 
 import React, { createContext, useContext, useEffect, useState, useCallback, useRef, useMemo } from 'react'
-import type { AppState, TabState, GlobalPrompt, LocalPrompt, EditorDraft, ProjectEditorState, PromptCleanupConfig, PromptSchedule, UIPreferences } from '../types/tab.d.ts'
+import type { AppState, TabState, GlobalPrompt, LocalPrompt, EditorDraft, ProjectEditorState, PromptCleanupConfig, PromptSchedule, UIPreferences, PersistedTerminalState } from '../types/tab.d.ts'
 import type { Prompt } from '../types/electron.d.ts'
 import { normalizeProjectCwd as normalizeProjectCwdImpl } from '../utils/pathNormalize'
 import { perfTrace } from '../utils/perf-trace'
@@ -300,6 +300,23 @@ interface AppStateContextValue {
   getTabDisplayName: (tab: TabState, index: number) => string
   getTerminalDisplayName: (index: number, customName: string | null) => string
 
+  // Task name auto-follow Git branch — shared transient git info + rename ops
+  notifyTerminalGitInfo: (terminalId: string, info: { repoRoot: string | null; branch: string | null }) => void
+  getTerminalRepoRoot: (terminalId: string) => string | null
+  /**
+   * Atomic write of customName + manualNameRepoRoot for a terminal.
+   * Pass `manualNameRepoRoot: <repoRoot>` to mark a manual override scoped to
+   * that repo (so it survives cwd changes within the same repo and gets
+   * cleared when the cwd moves to a different repo). Pass null for the
+   * auto-follow path.
+   */
+  setTerminalCustomName: (
+    tabId: string,
+    terminalId: string,
+    customName: string | null,
+    manualNameRepoRoot: string | null
+  ) => void
+
   // Prompt operation
   addPrompt: (prompt: Omit<Prompt, 'id' | 'createdAt' | 'updatedAt' | 'lastUsedAt'>) => void
   updatePrompt: (prompt: Prompt, preserveTimestamp?: boolean) => void
@@ -367,6 +384,12 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
   const pendingHeightsRef = useRef<Map<string, number>>(new Map())
   const pendingDraftsRef = useRef<Map<string, EditorDraft | undefined>>(new Map())
   const lastFocusOwnerRef = useRef<'terminal' | 'input'>('terminal')
+  // Transient (non-persisted) per-terminal Git info bookkeeping. Populated by
+  // TerminalGrid via notifyTerminalGitInfo on every IPC GIT_TERMINAL_INFO
+  // update. Read by manual-rename callers (PromptSender double-click,
+  // TerminalGrid title-menu Rename / Use Branch / Use Repo) so they can stamp
+  // manualNameRepoRoot with the cwd's current repo.
+  const terminalGitInfoRef = useRef<Map<string, { repoRoot: string | null; branch: string | null }>>(new Map())
   const perfCountersRef = useRef({
     updateCalls: 0,
     createTab: 0,
@@ -407,6 +430,9 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
             terminals: (tab.terminals ?? []).map((terminal) => ({
               ...terminal,
               customName: terminal.customName ?? null,
+              manualNameRepoRoot: typeof (terminal as PersistedTerminalState).manualNameRepoRoot === 'string'
+                ? (terminal as PersistedTerminalState).manualNameRepoRoot
+                : null,
               lastCwd: normalizePersistedTerminalCwd(terminal.lastCwd)
             })),
             localPrompts: (tab.localPrompts || []).map(prompt => normalizePromptTimestamp(prompt))
@@ -684,6 +710,49 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       }
     })
   }, [updateState])
+
+  const notifyTerminalGitInfo = useCallback((terminalId: string, info: { repoRoot: string | null; branch: string | null }) => {
+    terminalGitInfoRef.current.set(terminalId, {
+      repoRoot: info.repoRoot,
+      branch: info.branch
+    })
+  }, [])
+
+  const getTerminalRepoRoot = useCallback((terminalId: string): string | null => {
+    return terminalGitInfoRef.current.get(terminalId)?.repoRoot ?? null
+  }, [])
+
+  const setTerminalCustomName = useCallback(
+    (tabId: string, terminalId: string, customName: string | null, manualNameRepoRoot: string | null) => {
+      const trimmed = typeof customName === 'string' ? (customName.trim() || null) : null
+      updateState(prev => {
+        let changed = false
+        const tabs = prev.tabs.map(tab => {
+          if (tab.id !== tabId) return tab
+          let tabChanged = false
+          const terminals = tab.terminals.map(terminal => {
+            if (terminal.id !== terminalId) return terminal
+            if (
+              terminal.customName === trimmed &&
+              (terminal.manualNameRepoRoot ?? null) === manualNameRepoRoot
+            ) {
+              return terminal
+            }
+            tabChanged = true
+            changed = true
+            return {
+              ...terminal,
+              customName: trimmed,
+              manualNameRepoRoot
+            }
+          })
+          return tabChanged ? { ...tab, terminals } : tab
+        })
+        return changed ? { ...prev, tabs } : prev
+      })
+    },
+    [updateState]
+  )
 
   const renameTab = useCallback((tabId: string, customName: string | null) => {
     if (DEBUG_APP_STATE) {
@@ -1319,6 +1388,9 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     canCreateTab,
     getTabDisplayName,
     getTerminalDisplayName,
+    notifyTerminalGitInfo,
+    getTerminalRepoRoot,
+    setTerminalCustomName,
     addPrompt,
     updatePrompt,
     deletePrompt,
@@ -1350,6 +1422,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     createTab, closeTab, switchTab, renameTab,
     updateActiveTab, updateTabById, updateEditorDraftForTab, updatePromptEditorHeightForTab, setTerminalLastCwd,
     reorderTabs, canCreateTab,
+    notifyTerminalGitInfo, getTerminalRepoRoot, setTerminalCustomName,
     addPrompt, updatePrompt, deletePrompt,
     pinPrompt, unpinPrompt, reorderPinnedPrompts,
     touchPromptLastUsed, cleanupPrompts, updatePromptCleanup, importPrompts,

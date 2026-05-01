@@ -81,6 +81,8 @@ interface SettingsState {
   telemetryConsent: boolean | null
   /** Anonymous instance ID for telemetry (random UUID, regenerated on re-opt-in) */
   telemetryInstanceId: string | null
+  /** Auto-follow Git branch for Task name (default true). Added in v6. */
+  autoFollowGitBranchForTaskName: boolean
   updatedAt: number
 }
 
@@ -106,7 +108,8 @@ const MIGRATION_THEME: ThemeSettings = {
 }
 
 // Current version number
-const CURRENT_VERSION = 5
+// v6: introduces autoFollowGitBranchForTaskName (default true).
+const CURRENT_VERSION = 6
 
 /** Settings panel default width */
 const DEFAULT_SETTINGS_PANEL_WIDTH = 400
@@ -168,6 +171,7 @@ function createDefaultSettingsState(): SettingsState {
     theme: DEFAULT_THEME,
     telemetryConsent: null,
     telemetryInstanceId: null,
+    autoFollowGitBranchForTaskName: true,
     updatedAt: Date.now()
   }
 }
@@ -274,6 +278,13 @@ class SettingsStorage {
       ? state.telemetryInstanceId
       : null
 
+    // autoFollowGitBranchForTaskName (v6): default true for fresh installs and
+    // for existing users upgrading from < v6 (the rule needs to take effect
+    // immediately so terminals start following branches without extra setup).
+    const autoFollowGitBranchForTaskName = typeof state.autoFollowGitBranchForTaskName === 'boolean'
+      ? state.autoFollowGitBranchForTaskName
+      : true
+
     return {
       version: CURRENT_VERSION,
       shortcuts,
@@ -285,6 +296,7 @@ class SettingsStorage {
       theme,
       telemetryConsent,
       telemetryInstanceId,
+      autoFollowGitBranchForTaskName,
       updatedAt: state.updatedAt ?? Date.now()
     }
   }
@@ -470,6 +482,9 @@ class SettingsStorage {
       }
       if (partial.theme) {
         this.state.theme = this.validateTheme(partial.theme, false)
+      }
+      if (typeof partial.autoFollowGitBranchForTaskName === 'boolean') {
+        this.state.autoFollowGitBranchForTaskName = partial.autoFollowGitBranchForTaskName
       }
       this.state.updatedAt = Date.now()
       this.persist()

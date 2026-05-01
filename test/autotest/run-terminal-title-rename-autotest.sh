@@ -32,7 +32,7 @@ if grep -q "\[AutoTest\] FAIL" "$LOG_FILE"; then
   exit 1
 fi
 
-if ! grep -q "TTM-20-trace-events-emit" "$LOG_FILE"; then
+if ! grep -q "terminal-title-rename:complete" "$LOG_FILE"; then
   echo "Terminal title rename autotest did not complete. Log: $LOG_FILE" >&2
   tail -n 120 "$LOG_FILE" >&2
   exit 1

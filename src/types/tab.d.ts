@@ -88,6 +88,12 @@ export interface EditorDraft {
 export interface PersistedTerminalState {
   id: string
   customName: string | null
+  /**
+   * Repo root recorded at the moment customName was last set by a user-driven
+   * action. Used by auto-follow to decide whether the manual name is still
+   * "in scope" for the current cwd. Null means no active manual override.
+   */
+  manualNameRepoRoot: string | null
   lastCwd: string | null
 }
 

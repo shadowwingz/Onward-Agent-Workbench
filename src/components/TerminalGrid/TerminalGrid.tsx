@@ -16,6 +16,7 @@ import { CodingAgentModal } from '../CodingAgentModal'
 import type { CodingAgentConfigInput } from '../../types/electron'
 import { BrowserPanel } from '../BrowserPanel/BrowserPanel'
 import { useSettings } from '../../contexts/SettingsContext'
+import { useAppState } from '../../contexts/AppStateContext'
 import { DEFAULT_TERMINAL_FONT_SIZE, DEFAULT_TERMINAL_FONT_FAMILY } from '../../constants/terminal'
 import {
   terminalSessionManager,
@@ -57,6 +58,13 @@ interface TerminalGridProps {
   fontFamily?: string
   onTerminalFocus: (id: string) => void
   onTerminalRename: (id: string, newTitle: string) => void
+  /**
+   * Auto-follow side-effect callback. Called by TerminalGrid whenever the
+   * auto-follow rule writes (or clears) the customName because of a Git
+   * branch / repo change. Receives the new customName (null = clear) and
+   * always implies manualNameRepoRoot=null at the App layer.
+   */
+  onTerminalAutoRename: (id: string, newCustomName: string | null) => void
   onPersistTerminalCwd: (terminalId: string, cwd: string | null) => void
   onOpenProjectEditor: (terminalId: string, options?: { filePath?: string | null; repoRoot?: string | null }) => void
   tabId?: string
@@ -85,7 +93,6 @@ interface TerminalGitInfo {
 const TERMINAL_PATH_SEGMENTS = 3
 const FOCUS_REQUEST_MAX_ATTEMPTS = 12
 const FOCUS_REQUEST_RETRY_MS = 50
-const TITLE_DBLCLICK_DELAY_MS = 220
 
 async function resolveTerminalShellKind(terminalId: string): Promise<TerminalShellKind | undefined> {
   try {
@@ -104,6 +111,7 @@ export const TerminalGrid = memo(function TerminalGrid({
   fontFamily = DEFAULT_TERMINAL_FONT_FAMILY,
   onTerminalFocus,
   onTerminalRename,
+  onTerminalAutoRename,
   onPersistTerminalCwd,
   onOpenProjectEditor,
   tabId: _tabId,
@@ -140,7 +148,72 @@ export const TerminalGrid = memo(function TerminalGrid({
     terminalStyle: null
   }))
 
-  const { getTerminalStyle } = useSettings()
+  const { getTerminalStyle, getAutoFollowGitBranchForTaskName, setAutoFollowGitBranchForTaskName } = useSettings()
+  const { notifyTerminalGitInfo } = useAppState()
+  const currentAutoFollowEnabled = getAutoFollowGitBranchForTaskName()
+  // Stable refs so auto-follow logic running inside callbacks always reads the
+  // freshest values instead of capturing stale closures.
+  const autoFollowEnabledRef = useRef<boolean>(currentAutoFollowEnabled)
+  useEffect(() => {
+    autoFollowEnabledRef.current = currentAutoFollowEnabled
+  }, [currentAutoFollowEnabled])
+  const onTerminalAutoRenameRef = useRef(onTerminalAutoRename)
+  useEffect(() => {
+    onTerminalAutoRenameRef.current = onTerminalAutoRename
+  }, [onTerminalAutoRename])
+  const onTerminalRenameRef = useRef(onTerminalRename)
+  useEffect(() => {
+    onTerminalRenameRef.current = onTerminalRename
+  }, [onTerminalRename])
+  // Detect OFF→ON transition of the auto-follow toggle. Per the design spec,
+  // turning it back on must clear any active manual override and immediately
+  // adopt the current branch (so the user sees the effect right away rather
+  // than waiting for the next git-watch poll).
+  const prevAutoFollowEnabledRef = useRef<boolean>(currentAutoFollowEnabled)
+  useEffect(() => {
+    const wasEnabled = prevAutoFollowEnabledRef.current
+    prevAutoFollowEnabledRef.current = currentAutoFollowEnabled
+    if (wasEnabled || !currentAutoFollowEnabled) return
+    // OFF → ON: walk the currently visible terminals and reconcile.
+    visibleTerminalsRef.current.forEach(term => {
+      const info = terminalInfosRef.current[term.id]
+      const newBranch = info?.branch ?? null
+      const newRepoRoot = info?.repoRoot ?? null
+      const manualRepoRoot = term.manualNameRepoRoot ?? null
+      if (manualRepoRoot != null) {
+        // Clear the manual override and adopt the new branch (or null when
+        // the cwd is outside any repository).
+        perfTrace(PERF_TRACE_EVENT.RENDERER_TASK_NAME_MANUAL_CLEAR, {
+          taskId: term.id,
+          prevRepoRoot: manualRepoRoot,
+          newRepoRoot,
+          newBranch,
+          reason: 'auto-follow-toggled-on'
+        })
+        perfTrace(PERF_TRACE_EVENT.RENDERER_TASK_NAME_RESOLVE, {
+          taskId: term.id,
+          source: 'cleared-by-repo-switch',
+          autoFollow: true,
+          repoRoot: newRepoRoot,
+          branch: newBranch,
+          reason: 'auto-follow-toggled-on'
+        })
+        onTerminalAutoRenameRef.current(term.id, newBranch)
+      } else if (newBranch != null && newBranch !== (term.customName ?? null)) {
+        // No manual override, but the branch we know about diverges from the
+        // currently displayed customName — sync.
+        perfTrace(PERF_TRACE_EVENT.RENDERER_TASK_NAME_RESOLVE, {
+          taskId: term.id,
+          source: 'auto-branch',
+          autoFollow: true,
+          repoRoot: newRepoRoot,
+          branch: newBranch,
+          reason: 'auto-follow-toggled-on'
+        })
+        onTerminalAutoRenameRef.current(term.id, newBranch)
+      }
+    })
+  }, [currentAutoFollowEnabled])
 
   const [displayLayoutMode, setDisplayLayoutMode] = useState<LayoutMode>(layoutMode)
   const [isTransitioning, setIsTransitioning] = useState(false)
@@ -150,10 +223,10 @@ export const TerminalGrid = memo(function TerminalGrid({
   const [editingTitle, setEditingTitle] = useState('')
   const editInputRef = useRef<HTMLInputElement>(null)
   const editingIdRef = useRef<string | null>(null)
-  // Title dropdown menu (click anchor + delayed open to coexist with double-click rename)
+  // Title dropdown menu (single-click opens immediately — there is no longer a
+  // double-click rename gesture, so no need to defer the open).
   const [titleMenuTerminalId, setTitleMenuTerminalId] = useState<string | null>(null)
   const titleMenuTerminalIdRef = useRef<string | null>(null)
-  const pendingTitleClickRef = useRef<{ id: string; timer: number } | null>(null)
   const titleAnchorsRef = useRef<Map<string, HTMLSpanElement | null>>(new Map())
   const focusRafRef = useRef<number | null>(null)
   const focusRetryTimerRef = useRef<number | null>(null)
@@ -597,7 +670,98 @@ export const TerminalGrid = memo(function TerminalGrid({
       }
       return { ...prev, [terminalId]: effective }
     })
-  }, [mergeOverride, onPersistTerminalCwd])
+    // Share the latest Git info with AppState so PromptSender's manual-rename
+    // path can stamp manualNameRepoRoot atomically.
+    notifyTerminalGitInfo(terminalId, {
+      repoRoot: effective.repoRoot ?? null,
+      branch: effective.branch ?? null
+    })
+    // Auto-follow side-effect: drive the customName based on the new Git info.
+    // Rule (only runs when autoFollowGitBranchForTaskName is on):
+    //   (a) manual override active in same repo → leave alone
+    //   (b) manual override active but cwd has moved to a different repo →
+    //       clear it and adopt the new branch (or null if no branch)
+    //   (c) no active manual override → keep customName tracking the branch
+    const visibleTerminal = visibleTerminalsRef.current.find(term => term.id === terminalId)
+    const newRepoRoot = effective.repoRoot ?? null
+    const newBranch = effective.branch ?? null
+    if (!autoFollowEnabledRef.current) {
+      perfTrace(PERF_TRACE_EVENT.RENDERER_TASK_NAME_RESOLVE, {
+        taskId: terminalId,
+        source: 'skipped-disabled',
+        autoFollow: false,
+        repoRoot: newRepoRoot,
+        branch: newBranch
+      })
+      return
+    }
+    if (!visibleTerminal) {
+      perfTrace(PERF_TRACE_EVENT.RENDERER_TASK_NAME_RESOLVE, {
+        taskId: terminalId,
+        source: 'fallback',
+        reason: 'not-visible',
+        autoFollow: true,
+        repoRoot: newRepoRoot,
+        branch: newBranch
+      })
+      return
+    }
+    const currentCustomName = visibleTerminal.customName ?? null
+    const currentManualRepoRoot = visibleTerminal.manualNameRepoRoot ?? null
+
+    if (currentManualRepoRoot != null && newRepoRoot != null && currentManualRepoRoot === newRepoRoot) {
+      // (a) manual override still in scope — leave it
+      perfTrace(PERF_TRACE_EVENT.RENDERER_TASK_NAME_RESOLVE, {
+        taskId: terminalId,
+        source: 'manual',
+        autoFollow: true,
+        repoRoot: newRepoRoot,
+        branch: newBranch,
+        customName: currentCustomName
+      })
+      return
+    }
+    if (currentManualRepoRoot != null && newRepoRoot != null && currentManualRepoRoot !== newRepoRoot) {
+      // (b) cwd moved to another repo — manual override expired
+      perfTrace(PERF_TRACE_EVENT.RENDERER_TASK_NAME_MANUAL_CLEAR, {
+        taskId: terminalId,
+        prevRepoRoot: currentManualRepoRoot,
+        newRepoRoot,
+        newBranch
+      })
+      perfTrace(PERF_TRACE_EVENT.RENDERER_TASK_NAME_RESOLVE, {
+        taskId: terminalId,
+        source: 'cleared-by-repo-switch',
+        autoFollow: true,
+        repoRoot: newRepoRoot,
+        branch: newBranch
+      })
+      onTerminalAutoRenameRef.current(terminalId, newBranch)
+      return
+    }
+    if (newBranch != null && newBranch !== currentCustomName) {
+      // (c) auto-track branch
+      perfTrace(PERF_TRACE_EVENT.RENDERER_TASK_NAME_RESOLVE, {
+        taskId: terminalId,
+        source: 'auto-branch',
+        autoFollow: true,
+        repoRoot: newRepoRoot,
+        branch: newBranch,
+        customName: currentCustomName
+      })
+      onTerminalAutoRenameRef.current(terminalId, newBranch)
+      return
+    }
+    perfTrace(PERF_TRACE_EVENT.RENDERER_TASK_NAME_RESOLVE, {
+      taskId: terminalId,
+      source: 'fallback',
+      reason: 'no-change',
+      autoFollow: true,
+      repoRoot: newRepoRoot,
+      branch: newBranch,
+      customName: currentCustomName
+    })
+  }, [mergeOverride, notifyTerminalGitInfo, onPersistTerminalCwd])
 
   const setTerminalStatus = useCallback((terminalId: string, status: TerminalSessionStatus) => {
     setTerminalStatuses(prev => {
@@ -1161,10 +1325,6 @@ export const TerminalGrid = memo(function TerminalGrid({
       openTitleMenu: (terminalId) => {
         const resolved = resolveTerminalId(terminalId)
         if (!resolved) return false
-        if (pendingTitleClickRef.current) {
-          window.clearTimeout(pendingTitleClickRef.current.timer)
-          pendingTitleClickRef.current = null
-        }
         setTitleMenuTerminalId(resolved)
         return true
       },
@@ -1182,6 +1342,13 @@ export const TerminalGrid = memo(function TerminalGrid({
           setTitleMenuTerminalId(null)
           setEditingId(resolved)
           setEditingTitle(termEntry.customName ?? '')
+          return true
+        }
+        if (item === 'auto-follow-toggle') {
+          // Mirrors the production click handler: toggle the preference and
+          // keep the menu open so subsequent assertions can read the new
+          // checkbox state.
+          setAutoFollowGitBranchForTaskName(!autoFollowEnabledRef.current)
           return true
         }
         if (item === 'use-branch') {
@@ -1217,24 +1384,17 @@ export const TerminalGrid = memo(function TerminalGrid({
       simulateTitleSingleClick: (terminalId) => {
         const resolved = resolveTerminalId(terminalId)
         if (!resolved) return false
-        if (pendingTitleClickRef.current) {
-          window.clearTimeout(pendingTitleClickRef.current.timer)
-          pendingTitleClickRef.current = null
-        }
-        const timer = window.setTimeout(() => {
-          pendingTitleClickRef.current = null
-          setTitleMenuTerminalId(resolved)
-        }, TITLE_DBLCLICK_DELAY_MS)
-        pendingTitleClickRef.current = { id: resolved, timer }
+        // Single click now opens the menu immediately — no debounce timer.
+        setTitleMenuTerminalId(resolved)
         return true
       },
       simulateTitleDoubleClick: (terminalId) => {
+        // Double-click rename has been removed from the production UX, but
+        // existing tests use this hook as a shortcut into inline edit mode.
+        // Keep it as a no-decoration alias that takes the same path the
+        // dropdown's "Rename" item now takes.
         const resolved = resolveTerminalId(terminalId)
         if (!resolved) return false
-        if (pendingTitleClickRef.current) {
-          window.clearTimeout(pendingTitleClickRef.current.timer)
-          pendingTitleClickRef.current = null
-        }
         const termEntry = visibleTerminalsRef.current.find((term) => term.id === resolved)
         setTitleMenuTerminalId(null)
         setEditingId(resolved)
@@ -1270,34 +1430,48 @@ export const TerminalGrid = memo(function TerminalGrid({
         if (!terminalId) return false
         if (override === null) {
           terminalInfoOverridesRef.current.delete(terminalId)
-        } else {
-          const existing = terminalInfoOverridesRef.current.get(terminalId) ?? {}
-          const next: Partial<TerminalGitInfo> = { ...existing }
-          if (override.cwd !== undefined) next.cwd = override.cwd
-          if (override.repoRoot !== undefined) next.repoRoot = override.repoRoot
-          if (override.branch !== undefined) next.branch = override.branch
-          if (override.repoName !== undefined) next.repoName = override.repoName
-          if (override.status !== undefined) next.status = override.status
-          terminalInfoOverridesRef.current.set(terminalId, next)
-        }
-        setTerminalInfos((prev) => {
-          const current = prev[terminalId]
-          if (override === null) {
+          setTerminalInfos((prev) => {
+            const current = prev[terminalId]
             if (!current) return prev
             const next = { ...prev }
             delete next[terminalId]
             return next
-          }
-          const merged: TerminalGitInfo = {
-            cwd: override.cwd !== undefined ? override.cwd : current?.cwd ?? null,
-            repoRoot: override.repoRoot !== undefined ? override.repoRoot : current?.repoRoot ?? null,
-            branch: override.branch !== undefined ? override.branch : current?.branch ?? null,
-            repoName: override.repoName !== undefined ? override.repoName : current?.repoName ?? null,
-            status: override.status !== undefined ? override.status : current?.status ?? null
-          }
-          return { ...prev, [terminalId]: merged }
-        })
+          })
+          notifyTerminalGitInfo(terminalId, { repoRoot: null, branch: null })
+          return true
+        }
+        const existing = terminalInfoOverridesRef.current.get(terminalId) ?? {}
+        const merged: Partial<TerminalGitInfo> = { ...existing }
+        if (override.cwd !== undefined) merged.cwd = override.cwd
+        if (override.repoRoot !== undefined) merged.repoRoot = override.repoRoot
+        if (override.branch !== undefined) merged.branch = override.branch
+        if (override.repoName !== undefined) merged.repoName = override.repoName
+        if (override.status !== undefined) merged.status = override.status
+        terminalInfoOverridesRef.current.set(terminalId, merged)
+        // Drive the same code path a real IPC update would: applyTerminal-
+        // InfoUpdate handles setTerminalInfos, the AppState ref via
+        // notifyTerminalGitInfo, and — most importantly for TTM-21+ — the
+        // auto-follow rename rule.
+        const previousEffective = terminalInfosRef.current[terminalId]
+        const nextEffective: TerminalGitInfo = {
+          cwd: merged.cwd !== undefined ? merged.cwd : previousEffective?.cwd ?? null,
+          repoRoot: merged.repoRoot !== undefined ? merged.repoRoot : previousEffective?.repoRoot ?? null,
+          branch: merged.branch !== undefined ? merged.branch : previousEffective?.branch ?? null,
+          repoName: merged.repoName !== undefined ? merged.repoName : previousEffective?.repoName ?? null,
+          status: merged.status !== undefined ? merged.status : previousEffective?.status ?? null
+        }
+        applyTerminalInfoUpdate(terminalId, nextEffective)
         return true
+      },
+      getAutoFollowGitBranchForTaskName: () => autoFollowEnabledRef.current,
+      setAutoFollowGitBranchForTaskName: (enabled: boolean) => {
+        setAutoFollowGitBranchForTaskName(Boolean(enabled))
+      },
+      getTerminalManualNameRepoRoot: (terminalId) => {
+        const resolved = resolveTerminalId(terminalId)
+        if (!resolved) return null
+        const term = visibleTerminalsRef.current.find((t) => t.id === resolved)
+        return term?.manualNameRepoRoot ?? null
       }
     }
 
@@ -1307,7 +1481,7 @@ export const TerminalGrid = memo(function TerminalGrid({
         delete debugWindow.__onwardTerminalDebug
       }
     }
-  }, [activeTerminalId, displayLayoutMode, terminals, visibleTerminals, onTerminalRename])
+  }, [activeTerminalId, displayLayoutMode, terminals, visibleTerminals, onTerminalRename, notifyTerminalGitInfo, setAutoFollowGitBranchForTaskName])
 
   const closeGitDiffPanelRef = useRef<((restoreFocus: boolean) => void) | null>(null)
   const closeGitHistoryPanelRef = useRef<((restoreFocus: boolean) => void) | null>(null)
@@ -1739,50 +1913,26 @@ export const TerminalGrid = memo(function TerminalGrid({
     terminalSessionManager.focusIfNeeded(terminalId)
   }, [onTerminalFocus])
 
-  // Title single-click with delayed open so double-click can pre-empt it.
+  // Single click on the title opens the dropdown menu immediately. Double-click
+  // is no longer a rename gesture; the only entry to inline edit is the
+  // "Rename" item inside this menu (or PromptSender's task-card double-click,
+  // which lives in a different component).
   const handleTitleClick = useCallback((e: React.MouseEvent, id: string) => {
     e.stopPropagation()
-    if (pendingTitleClickRef.current && pendingTitleClickRef.current.id === id) return
-    if (pendingTitleClickRef.current) {
-      window.clearTimeout(pendingTitleClickRef.current.timer)
-      pendingTitleClickRef.current = null
-    }
-    // Title click stops propagation; call focus logic explicitly to preserve activation.
     handleTerminalFocus(id)
-    const timer = window.setTimeout(() => {
-      pendingTitleClickRef.current = null
-      const info = terminalInfosRef.current[id]
-      const branch = info?.branch ?? null
-      const repoName = info?.repoName ?? null
-      debugLog('titleMenu:open', {
-        terminalId: id,
-        source: 'click',
-        branch,
-        repoName,
-        canUseBranch: typeof branch === 'string' && branch.trim().length > 0,
-        canUseRepo: typeof repoName === 'string' && repoName.trim().length > 0
-      })
-      setTitleMenuTerminalId(id)
-    }, TITLE_DBLCLICK_DELAY_MS)
-    pendingTitleClickRef.current = { id, timer }
-  }, [handleTerminalFocus])
-
-  // Double-click cancels a pending single-click timer and enters inline rename immediately.
-  const handleTitleDoubleClick = useCallback((e: React.MouseEvent, id: string, currentCustomName: string | null) => {
-    e.stopPropagation()
-    if (pendingTitleClickRef.current) {
-      window.clearTimeout(pendingTitleClickRef.current.timer)
-      pendingTitleClickRef.current = null
-    }
-    setTitleMenuTerminalId(null)
-    debugLog('titleMenu:rename', {
-      stage: 'start',
+    const info = terminalInfosRef.current[id]
+    const branch = info?.branch ?? null
+    const repoName = info?.repoName ?? null
+    debugLog('titleMenu:open', {
       terminalId: id,
-      source: 'doubleClick',
-      currentCustomName
+      source: 'click',
+      branch,
+      repoName,
+      canUseBranch: typeof branch === 'string' && branch.trim().length > 0,
+      canUseRepo: typeof repoName === 'string' && repoName.trim().length > 0
     })
-    handleStartEdit(id, currentCustomName)
-  }, [handleStartEdit])
+    setTitleMenuTerminalId(id)
+  }, [handleTerminalFocus])
 
   // Snapshot helper: write a value into customName through the existing rename callback.
   const handleTitleSnapshotRename = useCallback((id: string, value: string, source: 'branch' | 'repo') => {
@@ -1796,16 +1946,6 @@ export const TerminalGrid = memo(function TerminalGrid({
     })
     onTerminalRename(id, trimmed)
   }, [onTerminalRename])
-
-  // Cleanup any pending title-click timer on unmount.
-  useEffect(() => {
-    return () => {
-      if (pendingTitleClickRef.current) {
-        window.clearTimeout(pendingTitleClickRef.current.timer)
-        pendingTitleClickRef.current = null
-      }
-    }
-  }, [])
 
   return (
     <>
@@ -1868,7 +2008,6 @@ export const TerminalGrid = memo(function TerminalGrid({
                         }}
                         className="terminal-grid-title"
                         onClick={(e) => handleTitleClick(e, termInfo.id)}
-                        onDoubleClick={(e) => handleTitleDoubleClick(e, termInfo.id, termInfo.customName)}
                         title={t('terminalGrid.editTitle')}
                       >
                         {termInfo.title}
@@ -1889,6 +2028,14 @@ export const TerminalGrid = memo(function TerminalGrid({
                       }}
                       onUseBranch={() => handleTitleSnapshotRename(termInfo.id, terminalInfos[termInfo.id]?.branch ?? '', 'branch')}
                       onUseRepoName={() => handleTitleSnapshotRename(termInfo.id, terminalInfos[termInfo.id]?.repoName ?? '', 'repo')}
+                      autoFollowEnabled={currentAutoFollowEnabled}
+                      onToggleAutoFollow={() => {
+                        debugLog('titleMenu:autoFollowToggle', {
+                          terminalId: termInfo.id,
+                          previous: currentAutoFollowEnabled
+                        })
+                        setAutoFollowGitBranchForTaskName(!currentAutoFollowEnabled)
+                      }}
                       branch={terminalInfos[termInfo.id]?.branch ?? null}
                       repoName={terminalInfos[termInfo.id]?.repoName ?? null}
                       forceClose={hidden || globalOverlayActive}

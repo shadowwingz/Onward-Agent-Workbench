@@ -30,7 +30,7 @@
     "dist": "electron-vite build && electron-builder",
     "dist:dev": "node scripts/dist-dev.js",
     "dist:release": "node scripts/dist-release.js",
-    "generate-notices": "license-checker-rseidelsohn --production --plainVertical --out ThirdPartyNotices.txt",
+    "generate-notices": "license-checker-rseidelsohn --production --plainVertical --out ThirdPartyNotices.txt && node scripts/normalize-notices.js",
     "verify:seti-file-tree": "node test/autotest/seti-file-tree-icon-verify.mjs"
   },
   "build": {

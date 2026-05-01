@@ -11,7 +11,7 @@ import './TerminalTitleMenu.css'
 const MENU_VIEWPORT_PADDING = 8
 const MENU_VERTICAL_GAP = 4
 
-export type TerminalTitleMenuItemKey = 'rename' | 'use-branch' | 'use-repo'
+export type TerminalTitleMenuItemKey = 'rename' | 'auto-follow-toggle' | 'use-branch' | 'use-repo'
 
 interface TerminalTitleMenuProps {
   open: boolean
@@ -20,6 +20,14 @@ interface TerminalTitleMenuProps {
   onRename: () => void
   onUseBranch: () => void
   onUseRepoName: () => void
+  /** Current state of the "Auto-follow Git branch name" preference. */
+  autoFollowEnabled: boolean
+  /**
+   * Toggle the auto-follow preference. The menu stays open after this
+   * interaction so the user can see the new state, unlike Rename / Use Branch
+   * / Use Repo which close the menu after activation.
+   */
+  onToggleAutoFollow: () => void
   branch: string | null
   repoName: string | null
   forceClose?: boolean
@@ -32,6 +40,8 @@ export function TerminalTitleMenu({
   onRename,
   onUseBranch,
   onUseRepoName,
+  autoFollowEnabled,
+  onToggleAutoFollow,
   branch,
   repoName,
   forceClose = false
@@ -166,6 +176,29 @@ export function TerminalTitleMenu({
         </svg>
         <span>{t('terminalTitleMenu.renameItem')}</span>
       </button>
+      <div className="terminal-title-menu-separator" role="separator" aria-orientation="horizontal" />
+      <button
+        type="button"
+        className="terminal-title-menu-item terminal-title-menu-checkbox-item"
+        role="menuitemcheckbox"
+        aria-checked={autoFollowEnabled}
+        title={t('terminalTitleMenu.autoFollowBranchTooltip')}
+        onClick={() => onToggleAutoFollow()}
+        data-action="auto-follow-toggle"
+        data-checked={autoFollowEnabled ? 'true' : 'false'}
+      >
+        {autoFollowEnabled ? (
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+            <path d="M2.5 2A1.5 1.5 0 0 0 1 3.5v9A1.5 1.5 0 0 0 2.5 14h11a1.5 1.5 0 0 0 1.5-1.5v-9A1.5 1.5 0 0 0 13.5 2h-11zm9.255 3.182-5.25 5.25a.5.5 0 0 1-.708 0l-2.5-2.5a.5.5 0 0 1 .708-.708l2.146 2.147 4.896-4.896a.5.5 0 1 1 .708.707z" />
+          </svg>
+        ) : (
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+            <path d="M2.5 2A1.5 1.5 0 0 0 1 3.5v9A1.5 1.5 0 0 0 2.5 14h11a1.5 1.5 0 0 0 1.5-1.5v-9A1.5 1.5 0 0 0 13.5 2h-11zm0 1h11a.5.5 0 0 1 .5.5v9a.5.5 0 0 1-.5.5h-11a.5.5 0 0 1-.5-.5v-9a.5.5 0 0 1 .5-.5z" />
+          </svg>
+        )}
+        <span>{t('terminalTitleMenu.autoFollowBranchItem')}</span>
+      </button>
+      <div className="terminal-title-menu-separator" role="separator" aria-orientation="horizontal" />
       <button
         type="button"
         className="terminal-title-menu-item"
