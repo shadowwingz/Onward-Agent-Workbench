@@ -8,7 +8,7 @@ param(
   [string]$UserDataDir = ""
 )
 
-$RootDir = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+$RootDir = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path))
 . (Join-Path $RootDir "test\autotest\Resolve-DevAppBin.ps1")
 
 if (-not $AppBin) {

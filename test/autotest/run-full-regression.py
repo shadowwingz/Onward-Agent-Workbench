@@ -88,6 +88,7 @@ SCRIPTS: List[str] = [
     "test/autotest/run-project-editor-restore-autotest.sh",
     "test/autotest/run-project-editor-restore-unit-autotest.sh",
     "test/autotest/run-project-editor-sqlite-autotest.sh",
+    "test/autotest/run-prompt-editor-context-menu-autotest.sh",
     "test/autotest/run-prompt-input-latency-autotest.sh",
     "test/autotest/run-prompt-input-longtail-autotest.sh",
     "test/autotest/run-prompt-integrity-autotest.sh",

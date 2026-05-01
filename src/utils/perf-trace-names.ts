@@ -185,6 +185,12 @@ export const PERF_TRACE_EVENT = {
   RENDERER_PROMPT_EDITOR_SUBMIT: 'renderer:prompt.editor.submit',
   RENDERER_PROMPT_EDITOR_CANCEL: 'renderer:prompt.editor.cancel-edit',
   RENDERER_PROMPT_SENDER_DISPATCH: 'renderer:prompt.sender.dispatch',
+  // Right-click on the prompt input textarea opens a custom context menu
+  // (cut/copy/paste/paste-plain, import pinned, save-as-pinned, insert
+  // cwd/branch/task title, history, format tools, send-to-task, clear).
+  // Instant marker (ph='i') with payload counts so usage frequency and
+  // populated submenus are observable without leaking content.
+  RENDERER_PROMPT_EDITOR_CTX_MENU_OPEN: 'renderer:prompt.editor.ctx-menu-open',
 
   // ───────── Renderer — user input: terminal ─────────
   RENDERER_TERMINAL_FOCUS_CHANGE: 'renderer:terminal.focus-change',

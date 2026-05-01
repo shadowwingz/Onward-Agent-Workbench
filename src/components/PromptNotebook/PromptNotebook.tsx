@@ -14,6 +14,7 @@ import type { ScheduleNotification } from '../../hooks/useScheduleEngine'
 import { PromptSearch } from './PromptSearch'
 import { PromptList } from './PromptList'
 import { PromptSender } from './PromptSender'
+import { PromptEditorContextMenu, type ContextMenuSnapshot } from './PromptEditorContextMenu'
 import { ScheduleConfigModal } from './ScheduleConfigModal'
 import { ScheduleNotificationBar } from './ScheduleNotification'
 import { useI18n } from '../../i18n/useI18n'
@@ -48,6 +49,7 @@ interface PromptNotebookProps {
   // Tab prompt related
   prompts: Prompt[]
   onAddPrompt: (prompt: Omit<Prompt, 'id' | 'createdAt' | 'updatedAt' | 'lastUsedAt'>) => void
+  onAddPinnedPrompt: (prompt: Omit<Prompt, 'id' | 'createdAt' | 'updatedAt' | 'lastUsedAt' | 'pinned'>) => void
   onUpdatePrompt: (prompt: Prompt, preserveTimestamp?: boolean) => void
   onDeletePrompt: (promptId: string) => void
   onPinPrompt: (promptId: string) => void
@@ -79,6 +81,13 @@ interface PromptNotebookProps {
   onDeleteSchedule: (promptId: string) => void
   onDismissScheduleNotification: (promptId: string, type: ScheduleNotification['type']) => void
   onRetrySchedule: (promptId: string) => void
+  /**
+   * Resolve the latest Git branch for a terminal id (cached transient info).
+   * Used by the prompt editor's right-click context menu to offer
+   * "insert current branch name". Optional — when missing the menu item is
+   * rendered disabled.
+   */
+  getTerminalBranch?: (terminalId: string) => string | null
 }
 
 interface DeleteConfirmState {
@@ -114,6 +123,7 @@ export const PromptNotebook = memo(function PromptNotebook({
   onWidthChange,
   prompts,
   onAddPrompt,
+  onAddPinnedPrompt,
   onUpdatePrompt,
   onDeletePrompt,
   onPinPrompt,
@@ -140,7 +150,8 @@ export const PromptNotebook = memo(function PromptNotebook({
   onUpdateSchedule,
   onDeleteSchedule,
   onDismissScheduleNotification,
-  onRetrySchedule
+  onRetrySchedule,
+  getTerminalBranch
 }: PromptNotebookProps) {
   const { t, locale } = useI18n()
   const [selectedId, setSelectedId] = useState<string | null>(null)
@@ -994,6 +1005,43 @@ export const PromptNotebook = memo(function PromptNotebook({
     }
   }, [onSendAndExecute, applySuccessSideEffects, buildSendRecords])
 
+  // Save the editor's right-click selection as a brand-new pinned prompt.
+  // Derive a sensible title from the first non-empty line, capped to 40
+  // chars; the full text becomes the prompt body. This is the reverse of
+  // "Append to editor" — closing the loop between the editor and the pinned
+  // list without forcing the user to leave the editor surface.
+  const handleSavePinnedFromEditor = useCallback((selection: string) => {
+    const trimmed = selection.trim()
+    if (!trimmed) return
+    const firstLine = trimmed.split('\n').find(line => line.trim().length > 0) ?? trimmed
+    const compact = firstLine.replace(/\s+/g, ' ').trim()
+    const title = compact.length > 40 ? `${compact.slice(0, 39)}…` : compact
+    onAddPinnedPrompt({ title, content: trimmed, color: undefined })
+    showSaveMessage({ type: 'success', text: t('promptNotebook.editor.contextMenu.savedAsPin') })
+  }, [onAddPinnedPrompt, showSaveMessage, t])
+
+  // Right-click "Send to Task" from inside the editor (not a saved Prompt).
+  // The plain text path; does not annotate any Prompt's sendHistory.
+  const handleSendEditorToTask = useCallback((content: string, terminalId: string) => {
+    void handleSendAndExecute([terminalId], content)
+  }, [handleSendAndExecute])
+
+  // Pinned prompt list (sorted by lastUsed desc) feeds the menu's "Import
+  // pinned" submenu.
+  const pinnedPrompts = useMemo(() => {
+    return prompts.filter(p => p.pinned)
+  }, [prompts])
+
+  const activeTerminal = useMemo(() => {
+    return terminals.find(t => t.isActive) ?? terminals[0] ?? null
+  }, [terminals])
+
+  const editorCwd = activeTerminal?.lastCwd ?? null
+  const editorTaskTitle = activeTerminal?.title ?? null
+  const editorBranch = activeTerminal && getTerminalBranch
+    ? getTerminalBranch(activeTerminal.id)
+    : null
+
   // Drag to adjust width
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
@@ -1171,6 +1219,14 @@ export const PromptNotebook = memo(function PromptNotebook({
           addToHistoryShortcut={addToHistoryShortcut}
           hidden={hidden}
           onSaveSuccess={handleSaveSuccess}
+          ctxPinnedPrompts={pinnedPrompts}
+          ctxTerminals={terminals}
+          ctxAppendPromptToContent={handleAppend}
+          ctxSaveSelectionAsPinned={handleSavePinnedFromEditor}
+          ctxSendToTask={handleSendEditorToTask}
+          ctxCurrentCwd={editorCwd}
+          ctxCurrentBranch={editorBranch}
+          ctxCurrentTaskTitle={editorTaskTitle}
         />
 
         {/* Send control area */}
@@ -1384,7 +1440,15 @@ const PromptEditorWithAppend = memo(function PromptEditorWithAppend({
   onEditorDraftChange,
   addToHistoryShortcut,
   hidden = false,
-  onSaveSuccess
+  onSaveSuccess,
+  ctxPinnedPrompts,
+  ctxTerminals,
+  ctxAppendPromptToContent,
+  ctxSaveSelectionAsPinned,
+  ctxSendToTask,
+  ctxCurrentCwd,
+  ctxCurrentBranch,
+  ctxCurrentTaskTitle
 }: {
   onSubmit: (title: string, content: string, color?: 'red' | 'yellow' | 'green' | null) => void
   onUpdatePrompt: (prompt: Prompt, preserveTimestamp?: boolean) => void
@@ -1402,10 +1466,26 @@ const PromptEditorWithAppend = memo(function PromptEditorWithAppend({
   addToHistoryShortcut: string | null
   hidden?: boolean
   onSaveSuccess?: () => void
+  ctxPinnedPrompts: Prompt[]
+  ctxTerminals: TerminalInfo[]
+  ctxAppendPromptToContent: (prompt: Prompt) => void
+  ctxSaveSelectionAsPinned: (selection: string) => void
+  ctxSendToTask: (content: string, terminalId: string) => void
+  ctxCurrentCwd: string | null
+  ctxCurrentBranch: string | null
+  ctxCurrentTaskTitle: string | null
 }) {
   const { t } = useI18n()
   const [title, setTitle] = useState('')
   const [content, setContent] = useState('')
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; snapshot: ContextMenuSnapshot; canUndo: boolean } | null>(null)
+  // Undo stack scoped to right-click context-menu mutations only. Native
+  // textarea Cmd+Z continues to handle keystroke-level history; this stack
+  // captures atomic menu operations (paste / cut / format / clear / etc.)
+  // so a single Undo click reverts the whole menu action. Bounded at 50 to
+  // keep memory predictable in long sessions.
+  const HISTORY_LIMIT = 50
+  const historyRef = useRef<Array<{ value: string; selectionStart: number; selectionEnd: number }>>([])
   const MIN_EDITOR_HEIGHT = 180
   const [height, setHeight] = useState(() => Math.max(promptEditorHeight, MIN_EDITOR_HEIGHT))
   const heightRef = useRef(height)
@@ -1636,6 +1716,92 @@ const PromptEditorWithAppend = memo(function PromptEditorWithAppend({
     }
   }, [clearTrigger])
 
+  // Programmatic content mutation used by the right-click context menu.
+  // Sets the content (running through React state so debounced parent
+  // notification still fires) and restores the caret position on the next
+  // paint, since the controlled textarea otherwise resets caret to end.
+  // The pre-mutation content/selection is pushed to historyRef so the menu's
+  // "Undo" entry can revert exactly one menu operation. The title is NOT
+  // captured: no current menu action mutates the title, so reverting it
+  // would silently overwrite any keystroke the user typed into the title
+  // input between the menu action and the undo click.
+  const applyMutation = useCallback((next: string, cursorAt?: number) => {
+    const ta = textareaRef.current
+    historyRef.current.push({
+      value: ta?.value ?? '',
+      selectionStart: ta?.selectionStart ?? 0,
+      selectionEnd: ta?.selectionEnd ?? 0
+    })
+    if (historyRef.current.length > HISTORY_LIMIT) {
+      historyRef.current.shift()
+    }
+    setContent(next)
+    if (performanceTrace.enabled) {
+      performanceTrace.recordInstant('ui.prompt.edit', {
+        field: 'content',
+        mode: editingPrompt ? 'edit' : 'new',
+        ...performanceTrace.summarizeText('payload', next)
+      }, 'prompt')
+    }
+    if (cursorAt !== undefined) {
+      requestAnimationFrame(() => {
+        const ta = textareaRef.current
+        if (!ta) return
+        try {
+          ta.setSelectionRange(cursorAt, cursorAt)
+        } catch (err) {
+          // setSelectionRange may throw on Firefox / detached nodes; safe to
+          // ignore — the caret will land at the default position.
+        }
+      })
+    }
+  }, [editingPrompt])
+
+  // Undo the most recent applyMutation by popping the history stack. Returns
+  // false when the stack is empty (UI surface this as a disabled menu item).
+  // Only content + caret are restored — title is owned by the user's keyboard
+  // and is not part of menu mutations.
+  const undoLastMutation = useCallback((): boolean => {
+    const last = historyRef.current.pop()
+    if (!last) return false
+    setContent(last.value)
+    requestAnimationFrame(() => {
+      const ta = textareaRef.current
+      if (!ta) return
+      try {
+        ta.setSelectionRange(last.selectionStart, last.selectionEnd)
+        ta.focus()
+      } catch {
+        // Ignore — caret position is best-effort.
+      }
+    })
+    return true
+  }, [])
+
+  const handleTextareaContextMenu = useCallback((e: React.MouseEvent<HTMLTextAreaElement>) => {
+    e.preventDefault()
+    e.stopPropagation()
+    // Capture value/selection atomically at the contextmenu event so menu
+    // actions operate on what the user is currently looking at — independent
+    // of any subsequent React reconciliation that might revert the textarea
+    // DOM value before the menu mounts.
+    const ta = e.currentTarget
+    setCtxMenu({
+      x: e.clientX,
+      y: e.clientY,
+      snapshot: {
+        value: ta.value,
+        start: ta.selectionStart ?? 0,
+        end: ta.selectionEnd ?? 0
+      },
+      canUndo: historyRef.current.length > 0
+    })
+  }, [])
+
+  const closeCtxMenu = useCallback(() => {
+    setCtxMenu(null)
+  }, [])
+
   // Shortcut support
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     // Construct an accelerator format of the current keystroke
@@ -1714,8 +1880,29 @@ const PromptEditorWithAppend = memo(function PromptEditorWithAppend({
           placeholder={t('promptNotebook.editorPlaceholder')}
           value={content}
           onChange={(e) => handleContentChange(e.target.value)}
+          onContextMenu={handleTextareaContextMenu}
         />
       </div>
+      {ctxMenu && (
+        <PromptEditorContextMenu
+          position={{ x: ctxMenu.x, y: ctxMenu.y }}
+          snapshot={ctxMenu.snapshot}
+          canUndo={ctxMenu.canUndo}
+          isMac={isMac}
+          onClose={closeCtxMenu}
+          textareaRef={textareaRef}
+          applyMutation={applyMutation}
+          onUndo={undoLastMutation}
+          pinnedPrompts={ctxPinnedPrompts}
+          appendPromptToContent={ctxAppendPromptToContent}
+          saveSelectionAsPinned={ctxSaveSelectionAsPinned}
+          currentCwd={ctxCurrentCwd}
+          currentBranch={ctxCurrentBranch}
+          currentTaskTitle={ctxCurrentTaskTitle}
+          terminals={ctxTerminals}
+          onSendToTask={ctxSendToTask}
+        />
+      )}
 
       <div className="prompt-editor-actions">
         <div

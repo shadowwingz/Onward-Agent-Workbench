@@ -15,7 +15,7 @@ function Fail($name, $detail) {
   Write-Host "  FAIL  $name -- $detail" -ForegroundColor Red
 }
 
-$RootDir = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+$RootDir = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path))
 
 Write-Host "`n=== PowerShell TTY Autotest ===" -ForegroundColor Cyan
 

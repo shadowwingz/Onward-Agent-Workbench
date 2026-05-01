@@ -7,7 +7,7 @@ param(
   [string]$UserDataDir = ""
 )
 
-$RootDir = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+$RootDir = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path))
 . (Join-Path $RootDir "test\autotest\Resolve-DevAppBin.ps1")
 
 if (-not $AppBin) {
@@ -20,7 +20,7 @@ if (-not $AppBin -or -not (Test-Path $AppBin)) {
 }
 
 if (-not $LogFile) {
-  $RepoRoot = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
+  $RepoRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSCommandPath))
 $LogFile = Join-Path $RepoRoot "traces/test-logs/onward-feedback-autotest.log"
 New-Item -ItemType Directory -Force (Split-Path -Parent $LogFile) | Out-Null
 }

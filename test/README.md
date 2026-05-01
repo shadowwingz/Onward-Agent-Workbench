@@ -164,6 +164,7 @@ point at files under `test/unittest/`.
 | Prompt input latency baseline (typing → paint p95) | `run-prompt-input-latency` (PIL-01, PIL-02) |
 | Prompt input long-tail under terminal pressure | `run-prompt-input-longtail` (PILT-01, PILT-02) |
 | Prompt list filter / color tag / task badge | `run-prompt-list` (PL-01..12) |
+| Prompt editor right-click context menu — undo / cut / copy / paste / clear-content / pinned-import / save-as-pinned / insert cwd / insert branch / insert task title / send-to-task; auto viewport flip + clamp | `run-prompt-editor-context-menu` (PECM-01..03, 05..09, 13..16) |
 | Prompt sender grid layout, action buttons, send/execute | `run-prompt-sender` (PS-01..10) |
 | Bug fix: terminal grid uncapped, sender respects 50% cap | `run-prompt-sender` (PS-31, PS-32, PS-33) |
 | Prompt cleanup (auto / manual, color-aware retention) | (`shouldRun('prompt-cleanup')`, no shell runner; PC-*) |

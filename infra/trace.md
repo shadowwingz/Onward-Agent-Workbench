@@ -381,6 +381,7 @@ so every call through `window.electronAPI.<domain>.<method>()` gets a
 |---|---|---|---|
 | `RENDERER_PROMPT_EDITOR_SUBMIT` | `renderer:prompt.editor.submit` | `i` | `PromptEditor.tsx::handleSubmit` |
 | `RENDERER_PROMPT_EDITOR_CANCEL` | `renderer:prompt.editor.cancel-edit` | `i` | `PromptEditor.tsx::handleCancel` |
+| `RENDERER_PROMPT_EDITOR_CTX_MENU_OPEN` | `renderer:prompt.editor.ctx-menu-open` | `i` | `PromptEditorContextMenu.tsx` — fires once per right-click on `.prompt-editor-content`. Payload tags `hasSelection`, `pinnedCount`, `historyCount`, `taskCount`. Lets traces show how often users discover the menu and which submenus carry data. |
 | `RENDERER_PROMPT_SENDER_DISPATCH` | `renderer:prompt.sender.dispatch` | `i` | `PromptSender.tsx::handleSend*` + `handleExecute` — tagged `action=send|execute|sendAndExecute|sendAllAndExecute` |
 | `RENDERER_TERMINAL_FOCUS_CHANGE` | `renderer:terminal.focus-change` | `i` | `src/App.tsx::handleTerminalFocus` — Task-scoped tid |
 | `RENDERER_TERMINAL_SEND_INPUT` | `renderer:terminal.send-input` | `i` | `src/App.tsx` sendInputSequence — Task-scoped tid |

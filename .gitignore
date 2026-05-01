@@ -18,6 +18,9 @@ traces/*
 !traces/.gitkeep
 # Local scheduled-task lock and other .claude/*.lock files produced by skill runtimes.
 .claude/*.lock
+# Per-developer Claude Code permission overrides. These vary by machine and
+# trust model and must not be checked into the repo.
+.claude/settings.local.*
 # Full regression run outputs from test/autotest/run-full-regression.py.
 # Kept locally for inspection but never committed.
 test/full-regression-results/

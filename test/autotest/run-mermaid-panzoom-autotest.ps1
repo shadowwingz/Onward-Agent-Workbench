@@ -3,7 +3,7 @@
 
 $ErrorActionPreference = "Stop"
 
-$RootDir = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+$RootDir = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path))
 
 function Get-SanitizedBranchName {
   try {

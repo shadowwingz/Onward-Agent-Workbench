@@ -3,7 +3,7 @@
 
 $ErrorActionPreference = "Stop"
 
-$RootDir = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+$RootDir = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path))
 
 $defaultExe = $null
 $releaseDir = Join-Path $RootDir "release\win-unpacked"

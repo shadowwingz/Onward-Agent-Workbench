@@ -7,7 +7,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$ProjectDir = Split-Path -Parent $ScriptDir
+$ProjectDir = Split-Path -Parent (Split-Path -Parent $ScriptDir)
 
 if (-not $TestCwd) {
     $TestCwd = $ProjectDir

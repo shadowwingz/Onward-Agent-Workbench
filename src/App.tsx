@@ -283,6 +283,7 @@ const TabPromptNotebook = memo(function TabPromptNotebook({
   onSendAndExecute,
   onChangeWorkDir,
   addPrompt: onAddPrompt,
+  addPinnedPrompt: onAddPinnedPrompt,
   updatePrompt: onUpdatePrompt,
   deletePrompt: onDeletePrompt,
   pinPrompt: onPinPrompt,
@@ -308,6 +309,7 @@ const TabPromptNotebook = memo(function TabPromptNotebook({
   onSendAndExecute: (terminalIds: string[], content: string) => Promise<TerminalBatchResult>
   onChangeWorkDir: (terminalIds: string[], directory: string) => void
   addPrompt: (prompt: Omit<Prompt, 'id' | 'createdAt' | 'updatedAt' | 'lastUsedAt'>) => void
+  addPinnedPrompt: (prompt: Omit<Prompt, 'id' | 'createdAt' | 'updatedAt' | 'lastUsedAt' | 'pinned'>) => void
   updatePrompt: (prompt: Prompt, preserveTimestamp?: boolean) => void
   deletePrompt: (promptId: string) => void
   pinPrompt: (promptId: string) => void
@@ -335,6 +337,7 @@ const TabPromptNotebook = memo(function TabPromptNotebook({
     updatePromptEditorHeightForTab,
     importPrompts,
     getTerminalRepoRoot,
+    getTerminalBranch,
     setTerminalCustomName
   } = useAppState()
 
@@ -365,14 +368,16 @@ const TabPromptNotebook = memo(function TabPromptNotebook({
   // mode and then queries `:not(.prompt-notebook-hidden) .prompt-editor[data-prompt-editing="true"] .prompt-editor-btn` —
   // with the notebook in the offscreen / hidden state the selector finds
   // nothing and the assertion fails. Treat null `activePanel` as 'prompt'
-  // ONLY for the `prompt-list` suite so the affected DOM selectors match
-  // the active tab's notebook. Other suites (prompt-integrity, schedule,
+  // for prompt-notebook suites so the affected DOM selectors match the
+  // active tab's notebook. Other suites (prompt-integrity, schedule,
   // markdown-session-restore, …) keep the default null/hidden behaviour
   // because they assume the terminal grid takes the full panel area.
-  const isPromptListAutotest =
+  const promptNotebookAutotestSuites = ['prompt-list', 'prompt-editor-context-menu']
+  const isPromptNotebookAutotest =
     window.electronAPI?.debug?.autotest === true &&
-    window.electronAPI?.debug?.autotestSuite === 'prompt-list'
-  const effectiveActivePanel = isPromptListAutotest && tab.activePanel === null
+    typeof window.electronAPI?.debug?.autotestSuite === 'string' &&
+    promptNotebookAutotestSuites.includes(window.electronAPI.debug.autotestSuite)
+  const effectiveActivePanel = isPromptNotebookAutotest && tab.activePanel === null
     ? 'prompt'
     : tab.activePanel
   const hidden = showSettings || !isActive || effectiveActivePanel !== 'prompt'
@@ -461,6 +466,7 @@ const TabPromptNotebook = memo(function TabPromptNotebook({
       onWidthChange={handleWidthChange}
       prompts={prompts}
       onAddPrompt={onAddPrompt}
+      onAddPinnedPrompt={onAddPinnedPrompt}
       onUpdatePrompt={onUpdatePrompt}
       onDeletePrompt={onDeletePrompt}
       onPinPrompt={onPinPrompt}
@@ -488,6 +494,7 @@ const TabPromptNotebook = memo(function TabPromptNotebook({
       onDeleteSchedule={onDeleteSchedule}
       onDismissScheduleNotification={onDismissScheduleNotification}
       onRetrySchedule={onRetrySchedule}
+      getTerminalBranch={getTerminalBranch}
     />
   )
 })
@@ -506,6 +513,7 @@ function AppContent({
     activeTab,
     updateActiveTab,
     addPrompt,
+    addPinnedPrompt,
     updatePrompt,
     deletePrompt,
     pinPrompt,
@@ -1578,6 +1586,7 @@ function AppContent({
               onSendAndExecute={handleSendAndExecuteOnTerminals}
               onChangeWorkDir={handleChangeWorkDir}
               addPrompt={addPrompt}
+              addPinnedPrompt={addPinnedPrompt}
               updatePrompt={updatePrompt}
               deletePrompt={deletePrompt}
               pinPrompt={pinPrompt}

@@ -35,7 +35,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$RootDir = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
+$RootDir = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSCommandPath))
 $StressScript = Join-Path $RootDir "test\autotest\stress-claude-output.ps1"
 
 # --- API helpers ---

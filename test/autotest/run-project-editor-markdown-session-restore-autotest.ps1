@@ -3,7 +3,7 @@
 
 $ErrorActionPreference = 'Stop'
 
-$RepoRoot = Split-Path -Parent $PSScriptRoot
+$RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $AppBin = if ($args.Count -ge 1 -and $args[0]) { $args[0] } else { '' }
 $LogFile = if ($args.Count -ge 2 -and $args[1]) { $args[1] } else { Join-Path $env:TEMP 'onward-project-editor-markdown-session-restore-autotest.log' }
 $FixtureRoot = if ($args.Count -ge 3 -and $args[2]) { $args[2] } else { $RepoRoot }

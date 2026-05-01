@@ -13,6 +13,7 @@ import { testTerminalAutofollow } from './test-terminal-autofollow'
 import { testTerminalTitleRename } from './test-terminal-title-rename'
 import { testPromptSender } from './test-prompt-sender'
 import { testPromptList } from './test-prompt-list'
+import { testPromptEditorContextMenu } from './test-prompt-editor-context-menu'
 import { testPromptIntegrity } from './test-prompt-integrity'
 import { testPerAgentFont } from './test-per-agent-font'
 import { testGitHistory } from './test-git-history'
@@ -398,6 +399,13 @@ export async function runAllTests(ctx: AutotestContext): Promise<void> {
       log('phase1.05:begin')
       const results = await testPromptList(ctx)
       collectSuiteResults('PromptList', results)
+      await sleep(500)
+    }
+
+    if (!ctx.cancelled() && shouldRun('prompt-editor-context-menu')) {
+      log('phase1.07:begin')
+      const results = await testPromptEditorContextMenu(ctx)
+      collectSuiteResults('PromptEditorContextMenu', results)
       await sleep(500)
     }
 

@@ -3,7 +3,7 @@
 
 $ErrorActionPreference = 'Stop'
 
-$RootDir = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+$RootDir = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path))
 . (Join-Path $RootDir 'test/autotest/Resolve-DevAppBin.ps1')
 
 $AppBin = if ($args.Count -ge 1 -and $args[0]) { $args[0] } else { Resolve-DevAppBin -RootDir $RootDir }

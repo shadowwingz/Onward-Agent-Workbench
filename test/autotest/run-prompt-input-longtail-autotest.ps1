@@ -14,7 +14,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$RootDir = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
+$RootDir = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSCommandPath))
 . (Join-Path $RootDir "test\autotest\Resolve-DevAppBin.ps1")
 
 function Get-JsonPayloadAfterMarker {
@@ -94,7 +94,7 @@ $ResultDir = Join-Path $RootDir "test\autotest\results\prompt-input-longtail"
 New-Item -ItemType Directory -Force $ResultDir | Out-Null
 
 if (-not $LogFile) {
-  $RepoRoot = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
+  $RepoRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSCommandPath))
 $LogFile = Join-Path $RepoRoot "traces/test-logs/onward-prompt-input-longtail-autotest.log"
 New-Item -ItemType Directory -Force (Split-Path -Parent $LogFile) | Out-Null
 }

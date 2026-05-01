@@ -11,7 +11,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$RootDir = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
+$RootDir = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSCommandPath))
 . (Join-Path $RootDir "test\autotest\Resolve-DevAppBin.ps1")
 
 if (-not $AppBin) {

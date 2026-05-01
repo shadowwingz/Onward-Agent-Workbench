@@ -303,6 +303,7 @@ interface AppStateContextValue {
   // Task name auto-follow Git branch — shared transient git info + rename ops
   notifyTerminalGitInfo: (terminalId: string, info: { repoRoot: string | null; branch: string | null }) => void
   getTerminalRepoRoot: (terminalId: string) => string | null
+  getTerminalBranch: (terminalId: string) => string | null
   /**
    * Atomic write of customName + manualNameRepoRoot for a terminal.
    * Pass `manualNameRepoRoot: <repoRoot>` to mark a manual override scoped to
@@ -319,6 +320,13 @@ interface AppStateContextValue {
 
   // Prompt operation
   addPrompt: (prompt: Omit<Prompt, 'id' | 'createdAt' | 'updatedAt' | 'lastUsedAt'>) => void
+  /**
+   * Create a new pinned (global) prompt in one step. Used by entry points
+   * that need to mint a global prompt directly (e.g. the prompt editor's
+   * right-click "save selection as pinned"), so callers do not have to
+   * round-trip through addPrompt + pinPrompt with a hand-tracked id.
+   */
+  addPinnedPrompt: (prompt: Omit<Prompt, 'id' | 'createdAt' | 'updatedAt' | 'lastUsedAt' | 'pinned'>) => void
   updatePrompt: (prompt: Prompt, preserveTimestamp?: boolean) => void
   deletePrompt: (promptId: string) => void
   pinPrompt: (promptId: string) => void
@@ -722,6 +730,10 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     return terminalGitInfoRef.current.get(terminalId)?.repoRoot ?? null
   }, [])
 
+  const getTerminalBranch = useCallback((terminalId: string): string | null => {
+    return terminalGitInfoRef.current.get(terminalId)?.branch ?? null
+  }, [])
+
   const setTerminalCustomName = useCallback(
     (tabId: string, terminalId: string, customName: string | null, manualNameRepoRoot: string | null) => {
       const trimmed = typeof customName === 'string' ? (customName.trim() || null) : null
@@ -829,6 +841,25 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
           ? { ...tab, localPrompts: [newPrompt, ...tab.localPrompts] }
           : tab
       )
+    }))
+  }, [updateState])
+
+  const addPinnedPrompt = useCallback((promptData: Omit<Prompt, 'id' | 'createdAt' | 'updatedAt' | 'lastUsedAt' | 'pinned'>) => {
+    if (DEBUG_APP_STATE) {
+      perfCountersRef.current.addPrompt += 1
+    }
+    const now = Date.now()
+    const newPrompt: GlobalPrompt = {
+      ...promptData,
+      id: generateId(),
+      pinned: true,
+      createdAt: now,
+      updatedAt: now,
+      lastUsedAt: now
+    }
+    updateState(prev => ({
+      ...prev,
+      globalPrompts: [newPrompt, ...prev.globalPrompts]
     }))
   }, [updateState])
 
@@ -1390,8 +1421,10 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     getTerminalDisplayName,
     notifyTerminalGitInfo,
     getTerminalRepoRoot,
+    getTerminalBranch,
     setTerminalCustomName,
     addPrompt,
+    addPinnedPrompt,
     updatePrompt,
     deletePrompt,
     pinPrompt,
@@ -1422,8 +1455,8 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     createTab, closeTab, switchTab, renameTab,
     updateActiveTab, updateTabById, updateEditorDraftForTab, updatePromptEditorHeightForTab, setTerminalLastCwd,
     reorderTabs, canCreateTab,
-    notifyTerminalGitInfo, getTerminalRepoRoot, setTerminalCustomName,
-    addPrompt, updatePrompt, deletePrompt,
+    notifyTerminalGitInfo, getTerminalRepoRoot, getTerminalBranch, setTerminalCustomName,
+    addPrompt, addPinnedPrompt, updatePrompt, deletePrompt,
     pinPrompt, unpinPrompt, reorderPinnedPrompts,
     touchPromptLastUsed, cleanupPrompts, updatePromptCleanup, importPrompts,
     getAllPrompts, hasRunningTerminals,
