@@ -207,6 +207,29 @@ or checklist.
    set**. The index is worse stale than missing — fix or remove rows
    on the same diff that touched the runner.
 
+### Hard rule — English-only test selectors
+
+Onward's automated test matrix covers **only the English locale**. When
+you author or amend an autotest:
+
+- Match buttons, menu items, dialog labels, etc. by their **English**
+  `title` / text content only. Do not write a multilingual fallback set
+  alongside the English needle (e.g. `['eight', '<other-locale>']`) —
+  English alone is sufficient.
+- Do **not** add a "read i18n dictionary" helper that imports
+  `src/i18n/core.ts` and looks selectors up by key. That is over-design
+  for a single-locale matrix.
+- Do **not** put zh-CN strings in `src/autotest/test-*.ts`,
+  `test/autotest/test-*.{ts,mjs,js}`, or any runner script. The
+  project-level `scripts/check-chinese-comments.js` lint will reject
+  them at `pnpm dist:dev` time, and test files are not allowlisted.
+- Code comments inside test files must also be **English only** — same
+  hard rule as the rest of the codebase (see `CLAUDE.md`).
+
+If a future requirement ever demands zh-CN regression coverage, design
+that as a dedicated locale-coverage suite at that point — do not
+pre-emptively scaffold dual-language selectors in today's tests.
+
 ### Authoring a new runner
 
 1. Create the runner under `test/autotest/run-<suite>-autotest.sh`

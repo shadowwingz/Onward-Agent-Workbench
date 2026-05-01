@@ -18,9 +18,10 @@ import type { AutotestContext, TestResult } from './types'
  * hook), which is where regressions would actually break the UI.
  */
 function findSidebarLayoutButton(matchTitleSubstrings: readonly string[]): HTMLButtonElement | null {
-  // Sidebar buttons carry the i18n string in `title=`; we match on a
-  // language-agnostic substring set so the suite doesn't need to know
-  // which locale the app booted in.
+  // Sidebar buttons carry the i18n string in `title=`. The autotest
+  // harness boots the app in the default English locale, so matching on
+  // English title substrings is sufficient. Add localized fallbacks via
+  // the i18n dictionary if a future locale-coverage suite needs them.
   const buttons = Array.from(document.querySelectorAll<HTMLButtonElement>('.sidebar .sidebar-btn'))
   for (const btn of buttons) {
     const title = (btn.getAttribute('title') ?? '').toLowerCase()
@@ -59,13 +60,14 @@ export async function testTaskLayout(ctx: AutotestContext): Promise<TestResult[]
   if (!sidebarReady || cancelled()) return results
 
   // ── TLM-01: 8-grid button is reachable ──
-  // Title strings: en="Eight terminals", zh-CN="八宫格". Match a
-  // language-agnostic token set so the runner survives a locale swap.
-  const eightBtn = findSidebarLayoutButton(['eight', '八宫格'])
+  // Sidebar title for the 8-grid preset is "Eight terminals" in the
+  // default English locale. Match the leading token so a future copy
+  // tweak ("Eight panes" etc.) still hits.
+  const eightBtn = findSidebarLayoutButton(['eight'])
   record('TLM-01-eight-grid-button-present', eightBtn !== null)
 
   // ── TLM-02: Custom button is reachable ──
-  const customBtn = findSidebarLayoutButton(['custom layout', '自定义布局'])
+  const customBtn = findSidebarLayoutButton(['custom layout'])
   record('TLM-02-custom-button-present', customBtn !== null)
 
   if (!eightBtn || !customBtn) return results
@@ -74,7 +76,7 @@ export async function testTaskLayout(ctx: AutotestContext): Promise<TestResult[]
   // The user might already be on layout 8 (depends on prior persisted
   // state). To keep the assertion deterministic, click "Single" (1) first,
   // then click "8" and observe.
-  const singleBtn = findSidebarLayoutButton(['single', '单窗口'])
+  const singleBtn = findSidebarLayoutButton(['single'])
   if (singleBtn) {
     singleBtn.click()
     await sleep(80)
