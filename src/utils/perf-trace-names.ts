@@ -210,6 +210,20 @@ export const PERF_TRACE_EVENT = {
   RENDERER_MONACO_VIEWSTATE_RESTORE: 'renderer:monaco.viewstate-restore',
   RENDERER_XTERM_WEBGL_INIT: 'renderer:xterm.webgl-context-init',
 
+  // ───────── Renderer — terminal renderer surface lifecycle ─────────
+  // Tracks the full WebGL context lost/restored cycle that drives the
+  // "blank Task after desktop swipe" failure mode. The preventDefault path
+  // must fire on `webglcontextlost` for Chromium to attempt restoration;
+  // creating a new addon while `gl.isContextLost()` is still true hands it
+  // a dead context and produces the broken-image visual.
+  RENDERER_XTERM_RENDERER_CONTEXT_LOST: 'renderer:xterm.renderer.context-lost',
+  RENDERER_XTERM_RENDERER_CONTEXT_RESTORED: 'renderer:xterm.renderer.context-restored',
+  RENDERER_XTERM_RENDERER_RESTORE_DEFERRED: 'renderer:xterm.renderer.restore-deferred',
+  RENDERER_XTERM_RENDERER_REFRESH_AFTER_RESTORE: 'renderer:xterm.renderer.refresh-after-restore',
+  RENDERER_XTERM_RENDERER_ENSURE_WEBGL: 'renderer:xterm.renderer.ensure-webgl',
+  RENDERER_XTERM_RENDERER_DISPOSE_WEBGL: 'renderer:xterm.renderer.dispose-webgl',
+  RENDERER_XTERM_RENDERER_FAILURE: 'renderer:xterm.renderer.failure',
+
   // ───────── Main process — Git Diff cache & freshness ─────────
   // Bug 1: parent-repo file list erroneously surfaces submodule entries when
   // only the submodule's internal worktree (m/u flags) is dirty — the parent

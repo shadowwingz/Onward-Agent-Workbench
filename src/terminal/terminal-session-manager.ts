@@ -92,6 +92,8 @@ export interface TerminalSessionDebugState {
   rendererWebglAvailable: boolean
   rendererWebglFailureCount: number
   rendererWebglDisabledUntil: number | null
+  rendererContextLost: boolean
+  rendererHasContextListeners: boolean
   rendererLastLifecycleReason: TerminalRendererLifecycleReason | null
   rendererLastSurfaceEvent: TerminalRendererSurfaceEvent | null
   pendingDataChunks: number
@@ -189,6 +191,12 @@ export class TerminalSessionManager {
   private surfaceRestoreTimeoutId: number | null = null
   private surfaceRestoreAnimationFrameId: number | null = null
   private rendererRecoveryCount = 0
+  // Autotest-only: cache the WEBGL_lose_context extension for each terminal
+  // so the repro can call `restoreContext()` on the same instance that was
+  // used to call `loseContext()`. Re-calling `gl.getExtension()` after the
+  // context is lost can return null in Chromium, which would otherwise
+  // strand the test in the lost state forever.
+  private reproLoseContextExts: Map<string, { restoreContext?: () => void }> = new Map()
 
   constructor() {
     this.registerBufferRequestListener()
@@ -626,6 +634,8 @@ export class TerminalSessionManager {
       rendererWebglAvailable: renderer.webglAvailable,
       rendererWebglFailureCount: renderer.webglFailureCount,
       rendererWebglDisabledUntil: renderer.webglDisabledUntil,
+      rendererContextLost: renderer.contextLost,
+      rendererHasContextListeners: renderer.hasContextListeners,
       rendererLastLifecycleReason: renderer.lastLifecycleReason,
       rendererLastSurfaceEvent: renderer.lastSurfaceEvent,
       pendingDataChunks: session.pendingData.length,
@@ -643,6 +653,99 @@ export class TerminalSessionManager {
 
     session.renderer.deactivate('manual-debug')
     return true
+  }
+
+  triggerRealWebglContextLossForRepro(id?: string): {
+    triggered: boolean
+    reason: string
+    terminalId: string | null
+  } {
+    const terminalId = id ?? this.getFocusedTerminalId() ?? this.sessions.keys().next().value ?? null
+    if (!terminalId) {
+      return { triggered: false, reason: 'no-terminal-id', terminalId: null }
+    }
+    const session = this.sessions.get(terminalId)
+    if (!session?.open || session.status !== 'ready') {
+      return { triggered: false, reason: 'session-not-ready', terminalId }
+    }
+    if (!session.renderer.isWebglActive()) {
+      return { triggered: false, reason: 'webgl-not-active', terminalId }
+    }
+    const canvas = session.renderer.getObservedCanvas()
+    if (!canvas) {
+      return { triggered: false, reason: 'no-webgl-canvas', terminalId }
+    }
+    const gl =
+      (canvas.getContext('webgl2') as WebGL2RenderingContext | null) ??
+      (canvas.getContext('webgl') as WebGLRenderingContext | null)
+    if (!gl) {
+      return { triggered: false, reason: 'no-gl-context', terminalId }
+    }
+    const ext = gl.getExtension('WEBGL_lose_context') as {
+      loseContext?: () => void
+      restoreContext?: () => void
+    } | null
+    if (!ext?.loseContext) {
+      return { triggered: false, reason: 'no-lose-context-extension', terminalId }
+    }
+    // Cache the extension before triggering loss — Chromium may return null
+    // from `getExtension` after the context is lost, so we'd otherwise be
+    // unable to call `restoreContext` to drive the round-trip in autotest.
+    this.reproLoseContextExts.set(terminalId, ext)
+    ext.loseContext()
+    return { triggered: true, reason: 'lose-context-called', terminalId }
+  }
+
+  forceWebglContextRestoreForRepro(id?: string): {
+    triggered: boolean
+    reason: string
+    terminalId: string | null
+  } {
+    const terminalId = id ?? this.getFocusedTerminalId() ?? this.sessions.keys().next().value ?? null
+    if (!terminalId) {
+      return { triggered: false, reason: 'no-terminal-id', terminalId: null }
+    }
+    const cached = this.reproLoseContextExts.get(terminalId)
+    if (cached?.restoreContext) {
+      cached.restoreContext()
+      this.reproLoseContextExts.delete(terminalId)
+      return { triggered: true, reason: 'restore-context-called', terminalId }
+    }
+    return { triggered: false, reason: 'no-cached-extension', terminalId }
+  }
+
+  simulatePhantomBlankForRepro(id?: string): {
+    triggered: boolean
+    reason: string
+    terminalId: string | null
+  } {
+    const terminalId = id ?? this.getFocusedTerminalId() ?? this.sessions.keys().next().value ?? null
+    if (!terminalId) {
+      return { triggered: false, reason: 'no-terminal-id', terminalId: null }
+    }
+    const session = this.sessions.get(terminalId)
+    if (!session?.open || session.status !== 'ready') {
+      return { triggered: false, reason: 'session-not-ready', terminalId }
+    }
+    const element = session.terminal.element
+    if (!element) {
+      return { triggered: false, reason: 'no-element', terminalId }
+    }
+    const canvases = element.querySelectorAll('canvas')
+    let cleared = 0
+    for (const canvas of Array.from(canvases)) {
+      const gl =
+        (canvas.getContext('webgl2') as WebGL2RenderingContext | null) ??
+        (canvas.getContext('webgl') as WebGLRenderingContext | null)
+      if (!gl) continue
+      gl.clearColor(1, 1, 1, 1)
+      gl.clear(gl.COLOR_BUFFER_BIT)
+      cleared += 1
+    }
+    if (cleared === 0) {
+      return { triggered: false, reason: 'no-webgl-canvas', terminalId }
+    }
+    return { triggered: true, reason: 'phantom-blank-applied', terminalId }
   }
 
   scrollToTop(id: string): boolean {
@@ -771,8 +874,7 @@ export class TerminalSessionManager {
       renderer: new TerminalRendererLifecycle({
         terminalId: id,
         terminal,
-        platform: window.electronAPI.platform,
-        onContextLoss: () => this.scheduleVisibleRendererSurfaceRestore('webgl-context-loss')
+        platform: window.electronAPI.platform
       }),
       lastOptions: options,
       pendingViewportRestore: null,
@@ -1402,3 +1504,28 @@ export const terminalSessionManager = new TerminalSessionManager()
 
 // Expose for E2E testing via CDP (Chrome DevTools Protocol)
 ;(window as any).__terminalSessionManager = terminalSessionManager
+
+// Repro hooks for the "blank Task after desktop swipe" autotest. These mutate
+// live terminal state (clear the WebGL canvas, force GPU context loss /
+// restore), so they're gated behind autotest mode — exposing them in normal
+// app runs would let any renderer script blank a user's terminal.
+if (window.electronAPI?.debug?.autotest) {
+  ;(window as any).__blankTaskRepro = {
+    triggerWebglLoss: (id?: string) => terminalSessionManager.triggerRealWebglContextLossForRepro(id),
+    forceWebglRestore: (id?: string) => terminalSessionManager.forceWebglContextRestoreForRepro(id),
+    phantomBlank: (id?: string) => terminalSessionManager.simulatePhantomBlankForRepro(id),
+    runVisibilityRoundtrip: async () => {
+      document.dispatchEvent(new Event('visibilitychange'))
+      window.dispatchEvent(new Event('blur'))
+      await new Promise((resolve) => setTimeout(resolve, 200))
+      window.dispatchEvent(new Event('focus'))
+      document.dispatchEvent(new Event('visibilitychange'))
+      return { dispatched: true }
+    },
+    getFocusedTerminalId: () => terminalSessionManager.getFocusedTerminalId(),
+    getSessionDebugState: (id?: string) => {
+      const tid = id ?? terminalSessionManager.getFocusedTerminalId()
+      return tid ? terminalSessionManager.getSessionDebugState(tid) : null
+    }
+  }
+}

@@ -638,6 +638,15 @@ export interface TestSuiteResult {
 // Window global declaration
 // ============================================================
 
+export interface BlankTaskReproApi {
+  triggerWebglLoss: (id?: string) => { triggered: boolean; reason: string; terminalId: string | null }
+  forceWebglRestore: (id?: string) => { triggered: boolean; reason: string; terminalId: string | null }
+  phantomBlank: (id?: string) => { triggered: boolean; reason: string; terminalId: string | null }
+  runVisibilityRoundtrip: () => Promise<{ dispatched: boolean }>
+  getFocusedTerminalId: () => string | null
+  getSessionDebugState: (id?: string) => unknown
+}
+
 declare global {
   interface Window {
     __onwardGitDiffDebug?: GitDiffDebugApi
@@ -649,5 +658,6 @@ declare global {
     __onwardChangeLogDebug?: ChangeLogDebugApi
     __onwardTerminalFocusDebug?: TerminalFocusDebugApi
     __onwardTerminalDebug?: TerminalDebugApi
+    __blankTaskRepro?: BlankTaskReproApi
   }
 }
