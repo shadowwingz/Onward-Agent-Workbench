@@ -249,11 +249,40 @@ stochastic process; one observation is not a measurement.
 
 #### Pick the aggregator by what you're measuring
 
-| Metric class | Aggregator | Example assertion |
-|---|---|---|
-| Boolean correctness (recovers / doesn't recover) | "all N trials succeeded" (or "≥ K of N", with K chosen against the failure cost) | After 5 lost+restored cycles, `webglActive=true` and `hasRenderablePixels` in all 5 |
-| Latency / throughput / pixel intensity | Median (or p95) of N trials, dropping top/bottom 10 % when the variance is bimodal | Median surface-restore latency over 5 trials < 200 ms |
-| State integrity (no leak / no listener accumulation) | Snapshot before trial 1 vs after trial N; budget does NOT grow with N | After 5 lost+restored cycles, listener count equals baseline + 0 |
+| Metric class | N | Aggregator | Example assertion |
+|---|---|---|---|
+| Boolean correctness (recovers / doesn't recover) | 5 | "all N trials succeeded" (or "≥ K of N", with K chosen against the failure cost) | After 5 lost+restored cycles, `webglActive=true` and `hasRenderablePixels` in all 5 |
+| **Latency / response-time** (operation must complete within budget) | **3** | **≥ 1 of 3 meets the budget** (fail only if all 3 exceed) | Surface-restore latency: at least 1 of 3 trials completes within 200 ms (the budget the user signed off on) |
+| Throughput / pixel intensity / sample count | 5 | Median (or p95), dropping top/bottom 10 % when the variance is bimodal | Median pixel-intensity over 5 frames > 80, variance > 0.05 |
+| State integrity (no leak / no listener accumulation) | 5 | Snapshot before trial 1 vs after trial N; budget does NOT grow with N | After 5 lost+restored cycles, listener count equals baseline + 0 |
+
+#### Latency-class assertions: ask the user for the budget first
+
+Latency budgets are a **product decision**, not a test-author guess.
+Before authoring a latency-class assertion, the budget must come from
+the product owner / lead — never invented inside the test file.
+
+When the test is being authored interactively (e.g. via Claude Code),
+the test author MUST pause and ask the user for the budget — present
+3–4 concrete options plus an "Other" escape so the user can supply a
+custom value. Capture the operation context (which path, what user
+action triggers it) so the choice is informed.
+
+Once agreed, hard-code the budget as a named constant at the top of
+the test:
+
+```ts
+// User signed off on 200 ms as the surface-restore budget on 2026-05-01.
+// Re-confirm before changing the path or the assertion threshold.
+const SURFACE_RESTORE_BUDGET_MS = 200
+```
+
+Why N=3 specifically (not 5) for latency: the assertion's question is
+"can the system meet the budget *at all*?", not "what is the
+distribution?". Three samples is enough to distinguish a transient
+spike (1 sample over budget, 2 under → PASS, transient) from a
+systematic regression (3 of 3 over budget → FAIL, real). Five samples
+would make the test slower without changing the verdict shape.
 
 #### Why repeat-inside-the-test, not retry-outside
 
