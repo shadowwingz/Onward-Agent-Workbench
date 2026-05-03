@@ -135,6 +135,7 @@ interface TabState {
   editorDraft?: EditorDraft
   activeSubpage?: 'diff' | 'editor' | 'history' | null
   subpageTerminalId?: string | null
+  promptInputMode?: 'canvas' | 'line'
 }
 
 /**
@@ -780,7 +781,8 @@ class AppStateStorage {
         : null,
       subpageTerminalId: typeof tab.subpageTerminalId === 'string' && tab.subpageTerminalId
         ? tab.subpageTerminalId
-        : null
+        : null,
+      promptInputMode: tab.promptInputMode === 'line' ? 'line' : 'canvas'
     }
   }
 

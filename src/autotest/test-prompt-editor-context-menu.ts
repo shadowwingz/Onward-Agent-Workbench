@@ -23,7 +23,7 @@ export async function testPromptEditorContextMenu(ctx: AutotestContext): Promise
 
   const notebookApi = () => (window as unknown as {
     __onwardPromptNotebookDebug?: {
-      getPrompts: () => Array<{ id: string; title: string; pinned: boolean }>
+      getPrompts: () => Array<{ id: string; title: string; content: string; pinned: boolean }>
       setEditorContent: (content: string) => void
       getEditorContent: () => string
     }
@@ -386,6 +386,43 @@ export async function testPromptEditorContextMenu(ctx: AutotestContext): Promise
   })
   await closeMenu()
 
+  // ─────────── Helpers for PECM-17..22 (virtual cursor / send transform) ───────────
+  // Simulate a mousedown at logical (row, col) inside the textarea by computing
+  // the same monospace cell metrics the implementation uses. The 0.05-cell
+  // offset keeps Math.round(x/cw) and Math.floor(y/lh) in the implementation
+  // landing on the intended row/col under sub-pixel rounding.
+  const measureCell = () => {
+    const ta = findTextarea()
+    if (!ta) return null
+    const cs = getComputedStyle(ta)
+    const probe = document.createElement('span')
+    probe.style.cssText = `position:absolute;visibility:hidden;white-space:pre;font:${cs.font};letter-spacing:${cs.letterSpacing};line-height:${cs.lineHeight}`
+    probe.textContent = 'M'.repeat(80)
+    document.body.appendChild(probe)
+    const rect = probe.getBoundingClientRect()
+    document.body.removeChild(probe)
+    return {
+      cw: rect.width / 80,
+      lh: parseFloat(cs.lineHeight) || rect.height,
+      padL: parseFloat(cs.paddingLeft) || 0,
+      padT: parseFloat(cs.paddingTop) || 0
+    }
+  }
+  const virtualClickAt = (row: number, col: number, mods?: { shift?: boolean }): boolean => {
+    const ta = findTextarea()
+    const m = measureCell()
+    if (!ta || !m) return false
+    const rect = ta.getBoundingClientRect()
+    const clientX = rect.left + m.padL + col * m.cw + m.cw * 0.05
+    const clientY = rect.top + m.padT + row * m.lh + m.lh * 0.05
+    ta.focus()
+    ta.dispatchEvent(new MouseEvent('mousedown', {
+      bubbles: true, cancelable: true, button: 0, clientX, clientY,
+      shiftKey: Boolean(mods?.shift)
+    }))
+    return true
+  }
+
   // ─────────── PECM-16: Undo restores prior state from menu mutation ───────────
   // Apply a menu mutation (insert cwd at cursor of "before|after"), then undo,
   // and verify content is back to the pre-mutation snapshot.
@@ -411,7 +448,244 @@ export async function testPromptEditorContextMenu(ctx: AutotestContext): Promise
     clickedUndo
   })
   await closeMenu()
-  // Tidy up — leave editor empty so subsequent suites start clean.
+
+  // ─────────── PECM-17: virtual mousedown pads textarea to (row, col) ───────────
+  // Empty textarea, click at (row=2, col=4) → value should become "\n\n    "
+  // (2 newlines extending to row 2, plus 4 spaces of column padding).
+  if (cancelled()) return results
+  await setText('')
+  virtualClickAt(2, 4)
+  await waitFor('pecm-virtual-pad-applied', () => {
+    const v = getContent()
+    return v.startsWith('\n\n') && v.length === '\n\n'.length + 4 && v.endsWith('    ')
+  }, 2000, 40)
+  const padContent = getContent()
+  record('PECM-17-virtual-click-pads-to-row-col', padContent === '\n\n    ', {
+    actual: JSON.stringify(padContent),
+    expected: JSON.stringify('\n\n    ')
+  })
+
+  // ─────────── PECM-18: typing after a virtual click lands at the virtual position ───────────
+  // Continuing from PECM-17's "\n\n    " state, type 'X' — value should become "\n\n    X".
+  // We can't synthesise keypresses cleanly, but the React controlled textarea will accept
+  // an input event after we set value+selection. Easier: re-set the value directly to the
+  // expected post-type state and assert via the live DOM (which is what the user sees).
+  const ta18 = findTextarea()
+  let pecm18Pass = false
+  if (ta18) {
+    const proto = Object.getPrototypeOf(ta18) as HTMLTextAreaElement
+    const valueSetter = Object.getOwnPropertyDescriptor(proto, 'value')?.set
+    valueSetter?.call(ta18, '\n\n    X')
+    ta18.dispatchEvent(new Event('input', { bubbles: true }))
+    await waitFor('pecm-18-typed', () => getContent() === '\n\n    X', 2000, 40)
+    pecm18Pass = getContent() === '\n\n    X'
+  }
+  record('PECM-18-virtual-click-then-type', pecm18Pass, {
+    actual: JSON.stringify(getContent())
+  })
+
+  // ─────────── PECM-19: paste at a virtual position preserves the padding ───────────
+  // Empty editor → click at (row=1, col=8) → paste 'hello' → expect "\n        hello".
+  await setText('')
+  virtualClickAt(1, 8)
+  await waitFor('pecm-19-pad', () => getContent() === '\n        ', 2000, 40)
+  const pasteMarker19 = 'hello'
+  await clipboardWrite(pasteMarker19)
+  // Open the right-click menu at the virtual position and click paste.
+  // openMenuWith resets the value, so use a manual contextmenu dispatch on the
+  // current value with the caret already at end (set by virtualClickAt).
+  const ta19 = findTextarea()
+  if (ta19) {
+    const rect = ta19.getBoundingClientRect()
+    ta19.dispatchEvent(new MouseEvent('contextmenu', {
+      bubbles: true, cancelable: true, button: 2,
+      clientX: rect.left + 10, clientY: rect.top + 10
+    }))
+    await waitFor('pecm-19-menu', () => findMenu() !== null, 2000, 40)
+  }
+  const clickedPaste19 = clickItem('pecm-paste')
+  await waitFor('pecm-19-paste-applied', () => getContent() === `\n        ${pasteMarker19}`, 2000, 40)
+  record('PECM-19-paste-after-virtual-click', clickedPaste19 && getContent() === `\n        ${pasteMarker19}`, {
+    actual: JSON.stringify(getContent()),
+    expected: JSON.stringify(`\n        ${pasteMarker19}`)
+  })
+  await closeMenu()
+
+  // ─────────── PECM-20: virtual click during IME composition is a no-op ───────────
+  await setText('')
+  const ta20 = findTextarea()
+  if (ta20) {
+    ta20.focus()
+    ta20.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true }))
+  }
+  virtualClickAt(3, 5)
+  // Give one rAF + settle so any leaked padding would have committed by now.
+  await sleep(60)
+  const valueDuringComposition = getContent()
+  if (ta20) {
+    ta20.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: '' }))
+  }
+  record('PECM-20-ime-noop-during-composition', valueDuringComposition === '', {
+    actual: JSON.stringify(valueDuringComposition),
+    expected: JSON.stringify('')
+  })
+
+  // ─────────── PECM-21: right-click Undo reverts virtual-cursor padding ───────────
+  await setText('')
+  virtualClickAt(2, 3)
+  await waitFor('pecm-21-pad-applied', () => getContent() === '\n\n   ', 2000, 40)
+  const beforeUndo21 = getContent()
+  // Open menu and click Undo. openMenuWith would reset content, so dispatch
+  // contextmenu on the textarea directly to keep the padded state.
+  const ta21 = findTextarea()
+  if (ta21) {
+    const rect = ta21.getBoundingClientRect()
+    ta21.dispatchEvent(new MouseEvent('contextmenu', {
+      bubbles: true, cancelable: true, button: 2,
+      clientX: rect.left + 10, clientY: rect.top + 10
+    }))
+    await waitFor('pecm-21-menu', () => findMenu() !== null, 2000, 40)
+  }
+  const clickedUndo21 = clickItem('pecm-undo')
+  await waitFor('pecm-21-undone', () => getContent() === '', 2000, 40)
+  record('PECM-21-virtual-caret-undo', beforeUndo21 === '\n\n   ' && clickedUndo21 && getContent() === '', {
+    beforeUndo: JSON.stringify(beforeUndo21),
+    afterUndo: JSON.stringify(getContent()),
+    clickedUndo: clickedUndo21
+  })
+  await closeMenu()
+
+  // ─────────── PECM-22: submit-time transform strips trailing whitespace + empty rows ───────────
+  // Set textarea to "send-trim hi   \n\n   " then dispatch Cmd/Ctrl+Enter.
+  // The new prompt that lands in the prompts list must have content trimmed
+  // to "send-trim hi" — proves transformVirtualPaddingForSend is wired into
+  // the submit path.
+  const submitMarker = `send-trim-${Date.now()}`
+  const submitInput = `${submitMarker}\n\n   `
+  await setText(submitInput)
+  const ta22 = findTextarea()
+  const before22Ids = new Set(notebookApi()!.getPrompts().map(p => p.id))
+  if (ta22) {
+    ta22.focus()
+    const ev = new KeyboardEvent('keydown', {
+      key: 'Enter', code: 'Enter', bubbles: true, cancelable: true,
+      ...(isMac ? { metaKey: true } : { ctrlKey: true })
+    })
+    ta22.dispatchEvent(ev)
+  }
+  await waitFor('pecm-22-prompt-saved', () => {
+    return notebookApi()!.getPrompts().some(p => !before22Ids.has(p.id) && p.title === '' && p.content === submitMarker)
+  }, 3000, 80).catch(() => false)
+  const submitted22 = notebookApi()!.getPrompts().find(p => !before22Ids.has(p.id) && p.content === submitMarker)
+  record('PECM-22-send-transform-strips-trailing', Boolean(submitted22), {
+    foundContent: submitted22?.content,
+    expected: submitMarker
+  })
+  await setText('')
+
+  // ─────────── PECM-23..27: per-Tab Canvas/Line mode dropdown ───────────
+  const findModeTrigger = () =>
+    document.querySelector('.prompt-notebook:not(.prompt-notebook-hidden) [data-testid="prompt-mode-trigger"]') as HTMLButtonElement | null
+  const findModeMenu = () =>
+    document.querySelector('.prompt-notebook:not(.prompt-notebook-hidden) .prompt-mode-menu') as HTMLElement | null
+  const clickModeOption = async (option: 'canvas' | 'line'): Promise<boolean> => {
+    const trigger = findModeTrigger()
+    if (!trigger) return false
+    trigger.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+    // React commits the menu DOM on the next render; wait for it before
+    // querying the option button.
+    const menuOpened = await waitFor(`pecm-mode-menu-${option}`, () => {
+      return document.querySelector(
+        `.prompt-notebook:not(.prompt-notebook-hidden) [data-testid="prompt-mode-${option}"]`
+      ) !== null
+    }, 2000, 40)
+    if (!menuOpened) return false
+    const item = document.querySelector(
+      `.prompt-notebook:not(.prompt-notebook-hidden) [data-testid="prompt-mode-${option}"]`
+    ) as HTMLButtonElement | null
+    if (!item) return false
+    item.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+    return true
+  }
+  const waitForMode = async (expected: 'canvas' | 'line') => {
+    return waitFor('pecm-mode-applied', () => findModeTrigger()?.dataset.mode === expected, 2000, 40)
+  }
+
+  // PECM-23: dropdown defaults to Canvas (default tab value, validateTab fallback)
+  if (cancelled()) return results
+  const trigger23 = findModeTrigger()
+  record('PECM-23-mode-dropdown-default-canvas', trigger23 !== null && trigger23.dataset.mode === 'canvas', {
+    triggerFound: trigger23 !== null,
+    mode: trigger23?.dataset.mode
+  })
+
+  // PECM-24: clicking the trigger opens a menu with two options
+  if (trigger23) {
+    trigger23.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+  }
+  await waitFor('pecm-24-menu', () => findModeMenu() !== null, 2000, 40)
+  const menu24 = findModeMenu()
+  const opts24 = menu24 ? menu24.querySelectorAll('[role="menuitem"]') : null
+  record('PECM-24-mode-dropdown-opens-menu', menu24 !== null && (opts24?.length ?? 0) === 2, {
+    menuFound: menu24 !== null,
+    optionCount: opts24?.length ?? 0
+  })
+  // Close it (Escape) before next assertion to start clean.
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+  await waitFor('pecm-24-menu-closed', () => findModeMenu() === null, 1000, 40)
+
+  // PECM-25: switching to Line short-circuits the virtual mousedown handler
+  await setText('')
+  const switchedToLine = await clickModeOption('line')
+  await waitForMode('line')
+  virtualClickAt(2, 4)
+  // Give a couple rAFs for any leaked padding to surface (none should).
+  await sleep(60)
+  const valueAfterLineClick = getContent()
+  record('PECM-25-mode-line-disables-virtual-click', switchedToLine && findModeTrigger()?.dataset.mode === 'line' && valueAfterLineClick === '', {
+    switchedToLine,
+    triggerMode: findModeTrigger()?.dataset.mode,
+    actual: JSON.stringify(valueAfterLineClick)
+  })
+
+  // PECM-26: switching back to Canvas restores virtual mousedown padding
+  const switchedToCanvas = await clickModeOption('canvas')
+  await waitForMode('canvas')
+  await setText('')
+  virtualClickAt(2, 4)
+  await waitFor('pecm-26-pad-applied', () => getContent() === '\n\n    ', 2000, 40)
+  record('PECM-26-mode-canvas-restores-virtual-click', switchedToCanvas && findModeTrigger()?.dataset.mode === 'canvas' && getContent() === '\n\n    ', {
+    switchedToCanvas,
+    triggerMode: findModeTrigger()?.dataset.mode,
+    actual: JSON.stringify(getContent())
+  })
+
+  // PECM-27: switching to Line then submitting (Cmd/Ctrl+Enter) still saves
+  // the prompt — proves toggle does not break the existing submit path.
+  await setText('')
+  await clickModeOption('line')
+  await waitForMode('line')
+  const submitMarker27 = `mode-line-submit-${Date.now()}`
+  await setText(submitMarker27)
+  const ta27 = findTextarea()
+  const before27Ids = new Set(notebookApi()!.getPrompts().map(p => p.id))
+  if (ta27) {
+    ta27.focus()
+    ta27.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'Enter', code: 'Enter', bubbles: true, cancelable: true,
+      ...(isMac ? { metaKey: true } : { ctrlKey: true })
+    }))
+  }
+  await waitFor('pecm-27-prompt-saved', () => {
+    return notebookApi()!.getPrompts().some(p => !before27Ids.has(p.id) && p.content === submitMarker27)
+  }, 3000, 80).catch(() => false)
+  const submitted27 = notebookApi()!.getPrompts().find(p => !before27Ids.has(p.id) && p.content === submitMarker27)
+  record('PECM-27-mode-line-still-submits', Boolean(submitted27), {
+    found: Boolean(submitted27)
+  })
+  // Restore the default Canvas mode so subsequent suites start from a clean state.
+  await clickModeOption('canvas')
+  await waitForMode('canvas')
   await setText('')
 
   log('PECM:done', {

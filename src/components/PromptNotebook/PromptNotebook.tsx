@@ -4,12 +4,15 @@
  */
 
 import { useState, useCallback, useMemo, useRef, useEffect, memo, startTransition } from 'react'
+import { flushSync } from 'react-dom'
 import { Prompt, PromptSendRecord } from '../../types/electron'
 import type { TerminalBatchResult, TerminalInfo } from '../../types/prompt'
 import type { EditorDraft, PromptCleanupConfig, PromptSchedule } from '../../types/tab.d.ts'
 import { usePromptActions } from '../../contexts/PromptActionsContext'
 import { buildAccelerator } from '../../utils/keyboard'
 import { performanceTrace } from '../../utils/performance-trace'
+import { perfTrace } from '../../utils/perf-trace'
+import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
 import type { ScheduleNotification } from '../../hooks/useScheduleEngine'
 import { PromptSearch } from './PromptSearch'
 import { PromptList } from './PromptList'
@@ -18,7 +21,47 @@ import { PromptEditorContextMenu, type ContextMenuSnapshot } from './PromptEdito
 import { ScheduleConfigModal } from './ScheduleConfigModal'
 import { ScheduleNotificationBar } from './ScheduleNotification'
 import { useI18n } from '../../i18n/useI18n'
-import type { ImportPrepareResult } from '../../utils/prompt-io'
+import { transformVirtualPaddingForSend, type ImportPrepareResult } from '../../utils/prompt-io'
+
+// ONWARD_DISABLE_VIRTUAL_CURSOR=1 falls back to plain line-by-line input.
+// Read once at module load — env vars are not watched at runtime.
+const VIRTUAL_CURSOR_DISABLED = Boolean(window.electronAPI?.debug?.virtualCursorDisabled)
+
+// Hard caps on virtual click target. A misclick at viewport-bottom of a very
+// tall editor must not allocate MB of `' '.repeat(N)` padding into the
+// textarea value. 1024 rows × 4096 cols is well past any human use case
+// and still cheap to materialise.
+const VIRTUAL_CURSOR_MAX_ROW = 1024
+const VIRTUAL_CURSOR_MAX_COL = 4096
+
+interface CellMetrics {
+  cw: number
+  lh: number
+  padL: number
+  padT: number
+}
+
+// Measure the textarea's effective monospace cell width / line height by
+// rendering a hidden <span> with the same `font` / `letter-spacing` /
+// `line-height` styles. Canvas `measureText` is rejected here: it ignores
+// `letter-spacing` and the ligature substitutions Menlo/Monaco apply, so
+// click coordinates would drift on long lines. The 80-cell sample averages
+// out sub-pixel rounding.
+function measureCellMetrics(ta: HTMLTextAreaElement): CellMetrics {
+  const cs = getComputedStyle(ta)
+  const probe = document.createElement('span')
+  probe.style.cssText = `position:absolute;visibility:hidden;white-space:pre;font:${cs.font};letter-spacing:${cs.letterSpacing};line-height:${cs.lineHeight}`
+  probe.textContent = 'M'.repeat(80)
+  document.body.appendChild(probe)
+  const rect = probe.getBoundingClientRect()
+  document.body.removeChild(probe)
+  return {
+    cw: rect.width / 80,
+    lh: parseFloat(cs.lineHeight) || rect.height,
+    padL: parseFloat(cs.paddingLeft) || 0,
+    padT: parseFloat(cs.paddingTop) || 0
+  }
+}
 import { createTerminalBatchResult, hasDeliveredTerminals } from '../../utils/terminal-batch'
 import { buildPromptTaskHistorySummary } from './promptTaskHistory'
 import { PROMPT_COLORS, type PromptColor } from './prompt-colors'
@@ -65,6 +108,10 @@ interface PromptNotebookProps {
   onUpdatePromptCleanup: (partial: Partial<PromptCleanupConfig>) => void
   promptEditorHeight: number
   onPromptEditorHeightChange: (height: number) => void
+  // Per-tab prompt input mode toggle ('canvas' = click-anywhere virtual cursor,
+  // 'line' = native line-by-line). Defaults to 'canvas' upstream.
+  promptInputMode: 'canvas' | 'line'
+  onPromptInputModeChange: (mode: 'canvas' | 'line') => void
   // Draft related
   editorDraft: EditorDraft | null
   onEditorDraftChange: (draft: EditorDraft | null) => void
@@ -139,6 +186,8 @@ export const PromptNotebook = memo(function PromptNotebook({
   onUpdatePromptCleanup,
   promptEditorHeight,
   onPromptEditorHeightChange,
+  promptInputMode,
+  onPromptInputModeChange,
   editorDraft,
   onEditorDraftChange,
   addToHistoryShortcut,
@@ -352,6 +401,7 @@ export const PromptNotebook = memo(function PromptNotebook({
       getPrompts: () => prompts.map(p => ({
         id: p.id,
         title: p.title,
+        content: p.content,
         pinned: p.pinned,
         color: p.color ?? undefined,
         lastUsedAt: p.lastUsedAt,
@@ -1214,6 +1264,8 @@ export const PromptNotebook = memo(function PromptNotebook({
           clearTrigger={clearEditorTrigger}
           promptEditorHeight={promptEditorHeight}
           onPromptEditorHeightChange={onPromptEditorHeightChange}
+          promptInputMode={promptInputMode}
+          onPromptInputModeChange={onPromptInputModeChange}
           editorDraft={editorDraft}
           onEditorDraftChange={onEditorDraftChange}
           addToHistoryShortcut={addToHistoryShortcut}
@@ -1436,6 +1488,8 @@ const PromptEditorWithAppend = memo(function PromptEditorWithAppend({
   clearTrigger,
   promptEditorHeight,
   onPromptEditorHeightChange,
+  promptInputMode,
+  onPromptInputModeChange,
   editorDraft,
   onEditorDraftChange,
   addToHistoryShortcut,
@@ -1461,6 +1515,8 @@ const PromptEditorWithAppend = memo(function PromptEditorWithAppend({
   clearTrigger: number
   promptEditorHeight: number
   onPromptEditorHeightChange: (height: number) => void
+  promptInputMode: 'canvas' | 'line'
+  onPromptInputModeChange: (mode: 'canvas' | 'line') => void
   editorDraft: EditorDraft | null
   onEditorDraftChange: (draft: EditorDraft | null) => void
   addToHistoryShortcut: string | null
@@ -1492,6 +1548,17 @@ const PromptEditorWithAppend = memo(function PromptEditorWithAppend({
   const isDraggingRef = useRef(false)
   const hasMountedRef = useRef(false)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  // Tracks IME composition (Chinese / Japanese / Korean input) so the virtual
+  // cursor mousedown handler can short-circuit and avoid mutating value /
+  // selection mid-composition, which would otherwise abort the IME session.
+  const isComposingRef = useRef(false)
+  // Cached cell metrics for the virtual-cursor click → (row, col) calculation.
+  // Invalidated on resize / font change. null = recompute on next click.
+  const metricsRef = useRef<CellMetrics | null>(null)
+  // Mode-selector dropdown state — controls the popup that lets the user
+  // toggle between Canvas (virtual cursor) and Line (native textarea) input.
+  const [isModeMenuOpen, setIsModeMenuOpen] = useState(false)
+  const modeSelectorRef = useRef<HTMLDivElement>(null)
   const { registerFocusEditor, registerSubmitEditor } = usePromptActions()
   const platform = window.electronAPI?.platform ?? 'darwin'
   const isMac = platform === 'darwin'
@@ -1605,6 +1672,11 @@ const PromptEditorWithAppend = memo(function PromptEditorWithAppend({
     const handleMouseUp = () => {
       isDraggingRef.current = false
       onPromptEditorHeightChange(heightRef.current)
+      // Resizing changes the textarea's content area but in current CSS the
+      // monospace font / line-height / paddings remain identical. Cell width
+      // is unaffected, so metricsRef stays valid. Invalidate defensively in
+      // case future CSS makes the dimensions font-relative.
+      metricsRef.current = null
       document.removeEventListener('mousemove', handleMouseMove)
       document.removeEventListener('mouseup', handleMouseUp)
       document.body.classList.remove('resizing-editor-height')
@@ -1615,19 +1687,23 @@ const PromptEditorWithAppend = memo(function PromptEditorWithAppend({
     document.addEventListener('mouseup', handleMouseUp)
   }, [height, onPromptEditorHeightChange])
 
-  // Save processing (two strategies)
+  // Save processing (two strategies). The persisted content goes through
+  // transformVirtualPaddingForSend so virtual-cursor placements with no input
+  // ("ghost" padding) don't bleed into saved prompts. Leading-column padding
+  // is preserved as intentional indentation.
   const handleSave = useCallback((saveAsNew: boolean) => {
-    if (!content.trim() || !editingPrompt) return
+    const sendContent = transformVirtualPaddingForSend(content)
+    if (!sendContent || !editingPrompt) return
 
     if (saveAsNew) {
       // Create new entry (inherit colors)
-      onSubmit(title.trim(), content.trim(), editingPrompt.color)
+      onSubmit(title.trim(), sendContent, editingPrompt.color)
     } else {
       // Update the original entry directly (preserveTimestamp: true, keep the original position)
       const updatedPrompt = {
         ...editingPrompt,
         title: title.trim(),
-        content: content.trim(),
+        content: sendContent,
         lastUsedAt: Date.now()
         // Do not modify updatedAt, createdAt, pinned, color
       }
@@ -1642,11 +1718,12 @@ const PromptEditorWithAppend = memo(function PromptEditorWithAppend({
     onSaveSuccess?.()
   }, [title, content, editingPrompt, onSubmit, onUpdatePrompt, onCancelEdit, onEditorDraftChange, onSaveSuccess])
 
-  // Submit processing (add new Prompt, optionally with a color tag)
+  // Submit processing (add new Prompt, optionally with a color tag).
   const handleSubmit = useCallback((color?: PromptColor | null) => {
-    if (!content.trim()) return
+    const sendContent = transformVirtualPaddingForSend(content)
+    if (!sendContent) return
 
-    onSubmit(title.trim(), content.trim(), color ?? null)
+    onSubmit(title.trim(), sendContent, color ?? null)
     setTitle('')
     setContent('')
     // Clear draft after submission
@@ -1655,12 +1732,13 @@ const PromptEditorWithAppend = memo(function PromptEditorWithAppend({
 
   // Edit mode: apply a color and save the current edit in one action
   const handleSaveWithColor = useCallback((color: PromptColor) => {
-    if (!content.trim() || !editingPrompt) return
+    const sendContent = transformVirtualPaddingForSend(content)
+    if (!sendContent || !editingPrompt) return
 
     onUpdatePrompt({
       ...editingPrompt,
       title: title.trim(),
-      content: content.trim(),
+      content: sendContent,
       color,
       lastUsedAt: Date.now()
     }, true)
@@ -1802,6 +1880,146 @@ const PromptEditorWithAppend = memo(function PromptEditorWithAppend({
     setCtxMenu(null)
   }, [])
 
+  // Virtual-cursor mousedown: lets the user click anywhere inside the textarea
+  // — including blank space past EOL or past EOF — and start typing there.
+  // The handler physically pads the textarea value with spaces (to fill the
+  // target line up to the click column) and `\n`s (to extend to the target
+  // row), then sets the caret to that position so the native textarea caret
+  // blinks at the virtual click point. Padding is undone via the same
+  // historyRef stack the right-click context menu uses.
+  //
+  // Hooked on `mousedown`, NOT `click`: shift+click selection ranges are
+  // resolved by the browser between mousedown and click, so padding has to
+  // happen first.
+  const handleCanvasMouseDown = useCallback((e: React.MouseEvent<HTMLTextAreaElement>) => {
+    if (VIRTUAL_CURSOR_DISABLED) return
+    // Per-tab user preference: when the dropdown selects 'line', treat the
+    // textarea as a plain native input — no virtual-cursor padding.
+    if (promptInputMode === 'line') return
+    // IME composition mid-flight: mutating value / selection here would
+    // cancel the partial character. Short-circuit; the user's next click
+    // after compositionend will work.
+    if (isComposingRef.current) return
+    const ta = textareaRef.current
+    if (!ta) return
+    const startedAt = performance.now()
+    const measureStartedAt = startedAt
+    const wasMetricsCached = metricsRef.current !== null
+    const m = metricsRef.current ?? (metricsRef.current = measureCellMetrics(ta))
+    const measureMs = performance.now() - measureStartedAt
+    const rect = ta.getBoundingClientRect()
+    const x = e.clientX - rect.left - m.padL + ta.scrollLeft
+    const y = e.clientY - rect.top - m.padT + ta.scrollTop
+    const targetRow = Math.max(0, Math.floor(y / m.lh))
+    // Math.round (not Math.floor) feels closer to native textarea click —
+    // half a cell past column N counts as N+1, not N.
+    const targetCol = Math.max(0, Math.round(x / m.cw))
+    if (targetRow > VIRTUAL_CURSOR_MAX_ROW || targetCol > VIRTUAL_CURSOR_MAX_COL) return
+
+    const lines = ta.value.split('\n')
+    // STEP 1: extend rows BEFORE column padding. Otherwise lines[targetRow]
+    // is undefined and `' '.repeat(NaN)` throws.
+    while (lines.length <= targetRow) lines.push('')
+    // STEP 2: pad columns of the target line.
+    const line = lines[targetRow]
+    if (line.length < targetCol) {
+      lines[targetRow] = line + ' '.repeat(targetCol - line.length)
+    }
+    const next = lines.join('\n')
+    if (next === ta.value) return  // Click landed inside existing text — let native click handle it.
+
+    e.preventDefault()
+    const flatPos = lines.slice(0, targetRow).reduce((n, l) => n + l.length + 1, 0) + lines[targetRow].length
+
+    // Push pre-mutation state to the same history stack the context menu
+    // uses, so right-click Undo can revert virtual-cursor padding too.
+    historyRef.current.push({
+      value: ta.value,
+      selectionStart: ta.selectionStart ?? 0,
+      selectionEnd: ta.selectionEnd ?? 0
+    })
+    if (historyRef.current.length > HISTORY_LIMIT) {
+      historyRef.current.shift()
+    }
+    const padded = next.length - ta.value.length
+    // e.preventDefault() above blocks the native mousedown focus path. Take
+    // it back ourselves — without this, the very first virtual click on an
+    // unfocused textarea sets the value but leaves the caret invisible and
+    // the user has to click again. Focusing here is cheap and idempotent.
+    ta.focus()
+    // flushSync forces React to commit the new value SYNCHRONOUSLY before we
+    // call setSelectionRange. The naïve approach — setContent(next) then
+    // requestAnimationFrame(setSelectionRange) — costs an extra ~8ms (one
+    // frame at 120 Hz / ~16ms at 60 Hz) waiting for the rAF to fire, and
+    // because the controlled-textarea value would race the caret position
+    // setSelectionRange has to wait for the value to land. Pulling the
+    // commit into the user-event handler removes both waits: the caret
+    // lands the same tick as the click, and the browser paints it on the
+    // very next frame.
+    const beforeFlushAt = performance.now()
+    flushSync(() => setContent(next))
+    const flushSyncMs = performance.now() - beforeFlushAt
+    try {
+      ta.setSelectionRange(flatPos, flatPos)
+    } catch {
+      // Best-effort.
+    }
+    const caretCommittedAt = performance.now()
+    // Single-frame paint measurement: from caret-set to next rAF (≈ paint
+    // commit on a healthy frame). No second rAF — the measurement cost
+    // itself shouldn't drive the production code's user-visible delay.
+    requestAnimationFrame(() => {
+      const paintedAt = performance.now()
+      // durationMs auto-elevates this to ph='X' span via resolvePhase.
+      perfTrace(PERF_TRACE_EVENT.RENDERER_PROMPT_EDITOR_VIRTUAL_CARET, {
+        row: targetRow,
+        col: targetCol,
+        padded,
+        metricsCached: wasMetricsCached,
+        measureMs: +measureMs.toFixed(2),
+        flushSyncMs: +flushSyncMs.toFixed(2),
+        handlerMs: +(caretCommittedAt - startedAt).toFixed(2),
+        paintMs: +(paintedAt - caretCommittedAt).toFixed(2),
+        durationMs: +(paintedAt - startedAt).toFixed(2)
+      })
+    })
+  }, [promptInputMode])
+
+  const handleCompositionStart = useCallback(() => {
+    isComposingRef.current = true
+  }, [])
+
+  const handleCompositionEnd = useCallback(() => {
+    isComposingRef.current = false
+  }, [])
+
+  // Mode-selector dropdown: close on outside click + Escape, mirroring the
+  // pattern used by TerminalDropdown / PromptEditorContextMenu.
+  useEffect(() => {
+    if (!isModeMenuOpen) return
+    const handleClickOutside = (event: MouseEvent) => {
+      if (!modeSelectorRef.current?.contains(event.target as Node)) {
+        setIsModeMenuOpen(false)
+      }
+    }
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setIsModeMenuOpen(false)
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    document.addEventListener('keydown', handleKey)
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside)
+      document.removeEventListener('keydown', handleKey)
+    }
+  }, [isModeMenuOpen])
+
+  const handleSelectMode = useCallback((mode: 'canvas' | 'line') => {
+    setIsModeMenuOpen(false)
+    if (mode !== promptInputMode) {
+      onPromptInputModeChange(mode)
+    }
+  }, [promptInputMode, onPromptInputModeChange])
+
   // Shortcut support
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     // Construct an accelerator format of the current keystroke
@@ -1846,10 +2064,23 @@ const PromptEditorWithAppend = memo(function PromptEditorWithAppend({
 
   }, [handleSubmit, handleSave, handleCancel, editingPrompt, addToHistoryShortcut, matchesAccelerator, saveShortcut, saveAsShortcut, cancelShortcut])
 
-  // Register callback to Context (only visible instance registration)
+  // Register callback to Context (only visible instance registration).
+  // Keyboard-shortcut focus lands the caret at (row 0, col 0) — the
+  // textarea would otherwise restore its last selection, which under the
+  // virtual-cursor model could be a stale virtual position from a prior
+  // click. (0, 0) is the predictable "start fresh" anchor.
   useEffect(() => {
     if (hidden) return
-    registerFocusEditor(() => textareaRef.current?.focus())
+    registerFocusEditor(() => {
+      const ta = textareaRef.current
+      if (!ta) return
+      ta.focus()
+      try {
+        ta.setSelectionRange(0, 0)
+      } catch {
+        // Best-effort — non-fatal on detached nodes.
+      }
+    })
     registerSubmitEditor(() => handleSubmit())
     return () => {
       registerFocusEditor(null)
@@ -1867,13 +2098,67 @@ const PromptEditorWithAppend = memo(function PromptEditorWithAppend({
       <div className="prompt-editor-resizer" onMouseDown={handleMouseDown} />
 
       <div className="prompt-editor-inputs">
-        <input
-          type="text"
-          className="prompt-editor-title"
-          placeholder={t('promptEditor.titlePlaceholder')}
-          value={title}
-          onChange={(e) => handleTitleChange(e.target.value)}
-        />
+        <div className="prompt-editor-title-row">
+          <input
+            type="text"
+            className="prompt-editor-title"
+            placeholder={t('promptEditor.titlePlaceholder')}
+            value={title}
+            onChange={(e) => handleTitleChange(e.target.value)}
+          />
+          {!VIRTUAL_CURSOR_DISABLED && (
+            <div className="prompt-mode-selector" ref={modeSelectorRef}>
+              <button
+                type="button"
+                className="prompt-mode-trigger"
+                onClick={() => setIsModeMenuOpen(open => !open)}
+                title={t('promptEditor.modeSelector.trigger')}
+                aria-label={t('promptEditor.modeSelector.aria')}
+                aria-haspopup="menu"
+                aria-expanded={isModeMenuOpen}
+                data-mode={promptInputMode}
+                data-testid="prompt-mode-trigger"
+              >
+                <span>{promptInputMode === 'canvas'
+                  ? t('promptEditor.modeSelector.canvas')
+                  : t('promptEditor.modeSelector.line')}</span>
+                <svg width="10" height="6" viewBox="0 0 10 6" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true">
+                  <path d="M1 1l4 4 4-4" />
+                </svg>
+              </button>
+              {isModeMenuOpen && (
+                <div className="prompt-mode-menu" role="menu">
+                  <button
+                    type="button"
+                    className="prompt-mode-item"
+                    role="menuitem"
+                    data-testid="prompt-mode-canvas"
+                    aria-checked={promptInputMode === 'canvas'}
+                    onClick={() => handleSelectMode('canvas')}
+                  >
+                    <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                      {promptInputMode === 'canvas' && <path d="M13.3 4.3a1 1 0 0 1 0 1.4l-6 6a1 1 0 0 1-1.4 0l-3-3a1 1 0 1 1 1.4-1.4L6.6 9.6l5.3-5.3a1 1 0 0 1 1.4 0z" />}
+                    </svg>
+                    <span>{t('promptEditor.modeSelector.canvas')}</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="prompt-mode-item"
+                    role="menuitem"
+                    data-testid="prompt-mode-line"
+                    aria-checked={promptInputMode === 'line'}
+                    onClick={() => handleSelectMode('line')}
+                  >
+                    <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                      {promptInputMode === 'line' && <path d="M13.3 4.3a1 1 0 0 1 0 1.4l-6 6a1 1 0 0 1-1.4 0l-3-3a1 1 0 1 1 1.4-1.4L6.6 9.6l5.3-5.3a1 1 0 0 1 1.4 0z" />}
+                    </svg>
+                    <span>{t('promptEditor.modeSelector.line')}</span>
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
         <textarea
           ref={textareaRef}
           className="prompt-editor-content"
@@ -1881,6 +2166,9 @@ const PromptEditorWithAppend = memo(function PromptEditorWithAppend({
           value={content}
           onChange={(e) => handleContentChange(e.target.value)}
           onContextMenu={handleTextareaContextMenu}
+          onMouseDown={handleCanvasMouseDown}
+          onCompositionStart={handleCompositionStart}
+          onCompositionEnd={handleCompositionEnd}
         />
       </div>
       {ctxMenu && (

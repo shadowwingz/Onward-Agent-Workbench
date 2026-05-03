@@ -749,17 +749,25 @@ body.resizing-editor-height * {
   overflow: hidden;
 }
 
+.prompt-editor-title-row {
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
 .prompt-editor-title {
-  width: 100%;
+  flex: 1;
+  min-width: 0;
   padding: 8px 12px;
   border: none;
-  border-bottom: 1px solid var(--border);
   background-color: transparent;
   color: var(--text-2);
   font-size: var(--font-md);
   font-weight: 500;
   outline: none;
-  flex-shrink: 0;
+  text-overflow: ellipsis;
 }
 
 .prompt-editor-title::placeholder {
@@ -768,6 +776,77 @@ body.resizing-editor-height * {
 
 .prompt-editor-title:focus {
   background-color: var(--bg-1);
+}
+
+.prompt-mode-selector {
+  position: relative;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  padding-right: 6px;
+}
+
+.prompt-mode-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background-color: transparent;
+  color: var(--text-2);
+  font-size: var(--font-sm);
+  font-weight: 500;
+  cursor: pointer;
+  transition: background-color 0.12s ease, border-color 0.12s ease;
+}
+
+.prompt-mode-trigger:hover {
+  background-color: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-color: var(--accent);
+}
+
+.prompt-mode-trigger[aria-expanded="true"] {
+  background-color: color-mix(in srgb, var(--accent) 15%, transparent);
+  border-color: var(--accent);
+}
+
+.prompt-mode-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 1000;
+  min-width: 140px;
+  background-color: var(--panel);
+  border-radius: 10px;
+  padding: 6px;
+  box-shadow: var(--shadow-1);
+  display: flex;
+  flex-direction: column;
+}
+
+.prompt-mode-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 6px;
+  background-color: transparent;
+  color: var(--text-2);
+  font-size: var(--font-sm);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.12s ease;
+}
+
+.prompt-mode-item:hover {
+  background-color: color-mix(in srgb, var(--accent) 15%, transparent);
+}
+
+.prompt-mode-item svg {
+  flex-shrink: 0;
+  color: var(--accent);
 }
 
 .prompt-editor-content {

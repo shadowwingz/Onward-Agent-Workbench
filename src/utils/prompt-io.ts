@@ -343,3 +343,12 @@ export function buildImportPlan(payload: PromptExportPayload, existingPrompts: P
 
   return { globals, locals, duplicateCount }
 }
+
+// Strip per-line trailing whitespace and pop trailing empty lines so virtual
+// cursor placements that received no input don't leak to the terminal.
+export function transformVirtualPaddingForSend(value: string): string {
+  if (!value) return ''
+  const lines = value.split('\n').map((line) => line.replace(/[ \t]+$/, ''))
+  while (lines.length > 0 && lines[lines.length - 1] === '') lines.pop()
+  return lines.join('\n')
+}

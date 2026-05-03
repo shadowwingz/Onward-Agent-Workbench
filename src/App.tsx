@@ -409,6 +409,10 @@ const TabPromptNotebook = memo(function TabPromptNotebook({
     updatePromptEditorHeightForTab(tab.id, height)
   }, [tab.id, updatePromptEditorHeightForTab])
 
+  const handlePromptInputModeChange = useCallback((mode: 'canvas' | 'line') => {
+    updateTabById(tab.id, { promptInputMode: mode })
+  }, [tab.id, updateTabById])
+
   const handleExportAllPrompts = useCallback(async () => {
     const exportNow = Date.now()
     const appInfo = await window.electronAPI.appInfo.get().catch((error) => {
@@ -489,6 +493,8 @@ const TabPromptNotebook = memo(function TabPromptNotebook({
       onUpdatePromptCleanup={onUpdatePromptCleanup}
       promptEditorHeight={tab.promptEditorHeight}
       onPromptEditorHeightChange={handlePromptEditorHeightChange}
+      promptInputMode={tab.promptInputMode ?? 'canvas'}
+      onPromptInputModeChange={handlePromptInputModeChange}
       editorDraft={editorDraft}
       onEditorDraftChange={handleEditorDraftChange}
       addToHistoryShortcut={addToHistoryShortcut}

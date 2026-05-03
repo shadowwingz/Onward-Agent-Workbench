@@ -801,6 +801,7 @@ export interface DebugAPI {
   autotestExit: boolean
   autotestFixtureExtra: string | null
   perfTraceCaptureContent: boolean
+  virtualCursorDisabled: boolean
   log: (message: string, data?: unknown) => void
   focusWindow: () => Promise<boolean>
   getAppMetrics: () => Promise<Record<string, unknown>[]>

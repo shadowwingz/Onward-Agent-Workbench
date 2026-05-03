@@ -191,6 +191,15 @@ export const PERF_TRACE_EVENT = {
   // Instant marker (ph='i') with payload counts so usage frequency and
   // populated submenus are observable without leaking content.
   RENDERER_PROMPT_EDITOR_CTX_MENU_OPEN: 'renderer:prompt.editor.ctx-menu-open',
+  // Mousedown past EOL/EOF physically pads the textarea value with spaces
+  // and newlines, then setSelectionRange to the target. Args carry a
+  // breakdown of the input → paint pipeline:
+  //   measureMs / handlerMs — synchronous work (cell metrics + value mutate)
+  //   caretMs / paintMs / durationMs — outer rAF (caret) + inner rAF (paint)
+  // resolvePhase() promotes events with `durationMs` to ph='X' span, so
+  // slice.dur SQL queries work directly. row/col/padded retained for
+  // outlier hunting (wild clicks generating KB-scale padding).
+  RENDERER_PROMPT_EDITOR_VIRTUAL_CARET: 'renderer:prompt.editor.virtual-caret',
 
   // ───────── Renderer — user input: terminal ─────────
   RENDERER_TERMINAL_FOCUS_CHANGE: 'renderer:terminal.focus-change',

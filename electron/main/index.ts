@@ -537,6 +537,12 @@ app.whenReady().then(() => {
     }
   }
 
+  // Debug: surface the Prompt virtual-cursor kill switch so it's obvious
+  // when a user/CI is running without click-anywhere-to-type.
+  if (process.env.ONWARD_DISABLE_VIRTUAL_CURSOR === '1') {
+    console.log('[PromptEditor] Virtual cursor disabled (ONWARD_DISABLE_VIRTUAL_CURSOR=1); falling back to plain line-by-line input.')
+  }
+
   // Initialize telemetry (reads consent from settings; no-op if not consented)
   getTelemetryService().initialize()
   getTelemetryService().track('session/start')

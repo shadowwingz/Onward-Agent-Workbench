@@ -390,6 +390,10 @@ const en = {
   'promptEditor.saveWith.red': 'Save with red tag',
   'promptEditor.saveWith.yellow': 'Save with yellow tag',
   'promptEditor.saveWith.green': 'Save with green tag',
+  'promptEditor.modeSelector.canvas': 'Canvas',
+  'promptEditor.modeSelector.line': 'Line',
+  'promptEditor.modeSelector.aria': 'Prompt input mode',
+  'promptEditor.modeSelector.trigger': 'Switch input mode',
 
   'promptSearch.placeholder': 'Search Prompt history...',
   'promptSearch.clear': 'Clear search',
@@ -1534,6 +1538,10 @@ const zhCN: LocaleTranslations = {
   'promptEditor.saveWith.red': '保存并标记为红色',
   'promptEditor.saveWith.yellow': '保存并标记为黄色',
   'promptEditor.saveWith.green': '保存并标记为绿色',
+  'promptEditor.modeSelector.canvas': '画布',
+  'promptEditor.modeSelector.line': '逐行',
+  'promptEditor.modeSelector.aria': '输入模式',
+  'promptEditor.modeSelector.trigger': '切换输入模式',
 
   'promptSearch.placeholder': '搜索历史 Prompt...',
   'promptSearch.clear': '清除搜索',

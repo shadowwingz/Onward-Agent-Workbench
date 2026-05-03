@@ -970,6 +970,10 @@ export interface DebugAPI {
   // parent+submodule pair). Empty/null in normal runs.
   autotestFixtureExtra: string | null
   perfTraceCaptureContent: boolean
+  // ONWARD_DISABLE_VIRTUAL_CURSOR=1 disables the Prompt textarea's
+  // click-anywhere virtual-cursor feature and falls back to plain
+  // line-by-line input. Emergency revert switch only.
+  virtualCursorDisabled: boolean
   log: (message: string, data?: unknown) => void
   focusWindow: () => Promise<boolean>
   getAppMetrics: () => Promise<Record<string, unknown>[]>
@@ -1691,6 +1695,7 @@ const debugAutotestSuite = process.env.ONWARD_AUTOTEST_SUITE || null
 const debugAutotestExit = process.env.ONWARD_AUTOTEST_EXIT === '1'
 const debugAutotestFixtureExtra = process.env.ONWARD_AUTOTEST_FIXTURE_EXTRA || null
 const perfTraceCaptureContent = process.env.ONWARD_PERF_TRACE_CAPTURE_CONTENT === '1'
+const virtualCursorDisabled = process.env.ONWARD_DISABLE_VIRTUAL_CURSOR === '1'
 
 const debugAPI: DebugAPI = {
   enabled: debugEnabled,
@@ -1703,6 +1708,7 @@ const debugAPI: DebugAPI = {
   autotestExit: debugAutotestExit,
   autotestFixtureExtra: debugAutotestFixtureExtra,
   perfTraceCaptureContent,
+  virtualCursorDisabled,
   log: (message: string, data?: unknown) => {
     if (!debugEnabled) return
     ipcRenderer.send(IPC.DEBUG_LOG, { message, data })
