@@ -7,7 +7,7 @@ import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, use
 import { createPortal } from 'react-dom'
 import { Editor } from '@monaco-editor/react'
 import DOMPurify from 'dompurify'
-import type { ProjectEntry } from '../../types/electron'
+import type { GitDiffResult, GitFileStatus, ProjectEntry } from '../../types/electron'
 import type { FileViewMemory, ProjectEditorState } from '../../types/tab.d.ts'
 import { useSettings } from '../../contexts/SettingsContext'
 import { useAppState } from '../../hooks/useAppState'
@@ -259,11 +259,50 @@ function resolveNavigationFilePath(params: {
   return relativePath || null
 }
 
+function joinProjectPath(root: string | null | undefined, relativePath: string | null | undefined): string | null {
+  if (!root || !relativePath) return null
+  const normalizedRoot = trimTrailingPathSeparators(normalizePath(root))
+  const normalizedRelative = normalizePath(relativePath).replace(/^\/+/, '')
+  if (!normalizedRoot || !normalizedRelative) return null
+  return `${normalizedRoot}/${normalizedRelative}`
+}
+
+function findDiffFileForEditorPath(
+  diff: GitDiffResult | null,
+  editorRoot: string | null,
+  editorFilePath: string | null
+): GitFileStatus | null {
+  if (!diff?.success || !editorRoot || !editorFilePath) return null
+  const targetAbsolute = joinProjectPath(editorRoot, editorFilePath)
+  if (!targetAbsolute) return null
+  const comparableTarget = normalizeComparablePath(targetAbsolute)
+  for (const file of diff.files) {
+    const fileAbsolute = joinProjectPath(file.repoRoot || diff.cwd, file.filename)
+    if (fileAbsolute && normalizeComparablePath(fileAbsolute) === comparableTarget) {
+      return file
+    }
+  }
+  return null
+}
+
 // Quick-file pure functions imported from ./quickFileUtils
 
 type ProjectEditorScope = {
   terminalId: string
   cwd: string | null
+}
+
+type DiffReturnContext = {
+  terminalId: string
+  filePath: string | null
+  repoRoot: string | null
+  createdAt: number
+}
+
+type DiffJumpTarget = {
+  filename: string
+  repoRoot: string | null
+  changeType: GitFileStatus['changeType']
 }
 
 type PreviewScrollMemory = {
@@ -996,8 +1035,22 @@ export function ProjectEditor({
   const markdownPurifyLogCountRef = useRef(0)
   const profileRunRef = useRef(false)
   const autotestRunRef = useRef(false)
-  const openGitDiffRef = useRef<(source?: 'user' | 'debug') => Promise<void>>(async () => {})
+  const openGitDiffRef = useRef<(source?: 'user' | 'debug', target?: { filePath?: string | null; repoRoot?: string | null }) => Promise<void>>(async () => {})
   const lastHandledOpenRequestRef = useRef<number | null>(null)
+  const [diffReturnContext, setDiffReturnContext] = useState<DiffReturnContext | null>(null)
+  const diffReturnContextRef = useRef<DiffReturnContext | null>(null)
+  const [diffJumpTarget, setDiffJumpTarget] = useState<DiffJumpTarget | null>(null)
+  const diffJumpTargetRef = useRef<DiffJumpTarget | null>(null)
+  const [diffJumpChecking, setDiffJumpChecking] = useState(false)
+  const diffJumpCheckTokenRef = useRef(0)
+
+  useEffect(() => {
+    diffReturnContextRef.current = diffReturnContext
+  }, [diffReturnContext])
+
+  useEffect(() => {
+    diffJumpTargetRef.current = diffJumpTarget
+  }, [diffJumpTarget])
 
   const originalContentRef = useRef('')
   const originalModelVersionRef = useRef<number | null>(null)
@@ -4097,6 +4150,16 @@ export function ProjectEditor({
     if (cwd && normalizeComparablePath(rootPath) !== normalizeComparablePath(cwd)) return
 
     lastHandledOpenRequestRef.current = openRequest.id
+    if (openRequest.source === 'diff' || openRequest.returnTarget === 'diff') {
+      setDiffReturnContext({
+        terminalId: openRequest.terminalId,
+        filePath: openRequest.diffFilePath ?? openRequest.filePath ?? null,
+        repoRoot: openRequest.diffRepoRoot ?? openRequest.repoRoot ?? null,
+        createdAt: Date.now()
+      })
+    } else {
+      setDiffReturnContext(null)
+    }
 
     if (!openRequest.filePath) return
 
@@ -4122,6 +4185,47 @@ export function ProjectEditor({
       missingBehavior: 'empty-state'
     })
   }, [clearActiveFileState, cwd, isOpen, locale, openFile, openRequest, rootPath, showStatus, _terminalId])
+
+  useEffect(() => {
+    if (isOpen) return
+    setDiffReturnContext(null)
+    setDiffJumpTarget(null)
+    setDiffJumpChecking(false)
+  }, [isOpen])
+
+  useEffect(() => {
+    if (!isOpen || !diffReturnContext || !rootPath || !activeFilePath) {
+      setDiffJumpTarget(null)
+      setDiffJumpChecking(false)
+      return
+    }
+
+    const token = diffJumpCheckTokenRef.current + 1
+    diffJumpCheckTokenRef.current = token
+    setDiffJumpChecking(true)
+    void window.electronAPI.git.getDiff(rootPath, { scope: 'full' })
+      .then((result) => {
+        if (diffJumpCheckTokenRef.current !== token) return
+        const match = findDiffFileForEditorPath(result as GitDiffResult, rootPath, activeFilePath)
+        setDiffJumpTarget(match
+          ? {
+              filename: match.filename,
+              repoRoot: match.repoRoot || (result as GitDiffResult).cwd || rootPath,
+              changeType: match.changeType
+            }
+          : null)
+      })
+      .catch(() => {
+        if (diffJumpCheckTokenRef.current === token) {
+          setDiffJumpTarget(null)
+        }
+      })
+      .finally(() => {
+        if (diffJumpCheckTokenRef.current === token) {
+          setDiffJumpChecking(false)
+        }
+      })
+  }, [activeFilePath, diffReturnContext, isOpen, rootPath])
 
   useEffect(() => {
     const currentScope = buildProjectEditorScope(_terminalId, cwd ?? rootRef.current ?? null)
@@ -5321,7 +5425,7 @@ export function ProjectEditor({
     let frameId = 0
     let attempts = 0
     const targetScrollTop = Math.max(0, savedScrollTop)
-    const maxAttempts = 60
+    const maxAttempts = 300
 
     const applyOutlineScroll = () => {
       const tree = modalRef.current?.querySelector('.outline-panel-tree') as HTMLElement | null
@@ -5567,7 +5671,10 @@ export function ProjectEditor({
     void handleRequestClose()
   }, [dialog, handleDialogCancel, searchOpen, handleCloseSearch, previewSearchOpen, handleRequestClose, sidebarMode, pinOverflowOpen, recentOverflowOpen])
 
-  const handleOpenGitDiff = useCallback(async (source: 'user' | 'debug' = 'user') => {
+  const handleOpenGitDiff = useCallback(async (
+    source: 'user' | 'debug' = 'user',
+    targetFile?: { filePath?: string | null; repoRoot?: string | null }
+  ) => {
     if (!_terminalId) return
     if (gitDiffOpenRef.current) {
       if (DEBUG_PROJECT_EDITOR) {
@@ -5624,10 +5731,17 @@ export function ProjectEditor({
     if (DEBUG_PROJECT_EDITOR) {
       debugLog('gitdiff:open:dispatch', { terminalId })
     }
-    const detail: SubpageNavigateEventDetail = { terminalId, target: 'diff' }
+    const detail: SubpageNavigateEventDetail = {
+      terminalId,
+      target: 'diff',
+      source: 'editor',
+      filePath: targetFile?.filePath ?? null,
+      repoRoot: targetFile?.repoRoot ?? null
+    }
     perfTrace(PERF_TRACE_EVENT.RENDERER_PROJECT_SUBPAGE_NAVIGATE, {
       target: 'diff',
-      hasTerminalId: Boolean(terminalId)
+      hasTerminalId: Boolean(terminalId),
+      hasFileTarget: Boolean(targetFile?.filePath)
     })
     window.dispatchEvent(new CustomEvent('subpage:navigate', { detail }))
   }, [
@@ -5641,6 +5755,28 @@ export function ProjectEditor({
     persistProjectEditorState,
     resetActiveFileState
   ])
+
+  const handleBackToDiff = useCallback(async () => {
+    if (!diffReturnContextRef.current) return false
+    await handleOpenGitDiff('user')
+    return true
+  }, [handleOpenGitDiff])
+
+  const handleJumpToDiff = useCallback(async () => {
+    const target = diffJumpTargetRef.current
+    if (!target) return false
+    perfTrace(PERF_TRACE_EVENT.RENDERER_PROJECT_EDITOR_JUMP_TO_DIFF, {
+      terminalId: _terminalId,
+      filename: target.filename,
+      repoRoot: target.repoRoot,
+      changeType: target.changeType
+    })
+    await handleOpenGitDiff('user', {
+      filePath: target.filename,
+      repoRoot: target.repoRoot
+    })
+    return true
+  }, [_terminalId, handleOpenGitDiff])
 
   const handleOpenGitHistory = useCallback(async (source: 'user' | 'debug' = 'user') => {
     if (!_terminalId) return
@@ -5710,6 +5846,15 @@ export function ProjectEditor({
       isOpen: () => isOpenRef.current,
       getRootPath: () => rootRef.current,
       getActiveFilePath: () => activeFilePathRef.current,
+      getDiffReturnBarState: () => ({
+        visible: Boolean(diffReturnContextRef.current),
+        backEnabled: Boolean(diffReturnContextRef.current),
+        jumpEnabled: Boolean(diffJumpTargetRef.current) && !diffJumpChecking,
+        checking: diffJumpChecking,
+        activeFilePath: activeFilePathRef.current
+      }),
+      triggerDiffReturnBack: async () => handleBackToDiff(),
+      triggerJumpToDiff: async () => handleJumpToDiff(),
       getSidebarMode: () => sidebarModeRef.current,
       setSidebarMode: (mode: 'files' | 'search') => {
         setSidebarMode(mode)
@@ -6179,8 +6324,11 @@ export function ProjectEditor({
     getImageFilePreviewState,
     getMermaidPreviewState,
     getMarkdownCodeWrapDebugState,
+    handleBackToDiff,
+    handleJumpToDiff,
     handleOutlineScrollCapture,
     isPreviewContentVisibleNow,
+    diffJumpChecking,
     scanPreviewNearestSlug,
     scheduleProjectStateSave,
     scrollFileBrowserToFraction,
@@ -6209,8 +6357,11 @@ export function ProjectEditor({
     getOutlineScrollContainer,
     getImageFilePreviewState,
     getMarkdownCodeWrapDebugState,
+    handleBackToDiff,
+    handleJumpToDiff,
     handleOutlineScrollCapture,
     isPreviewContentVisibleNow,
+    diffJumpChecking,
     scanPreviewNearestSlug,
     scheduleProjectStateSave,
     scrollFileBrowserToFraction,
@@ -7946,6 +8097,29 @@ export function ProjectEditor({
             </div>
           </div>
         </div>
+
+        {diffReturnContext && (
+          <div className="project-editor-diff-return-bar">
+            <button
+              type="button"
+              className="project-editor-diff-return-button"
+              onClick={() => void handleBackToDiff()}
+            >
+              {t('projectEditor.diffReturn.back')}
+            </button>
+            <button
+              type="button"
+              className="project-editor-diff-return-button primary"
+              onClick={() => void handleJumpToDiff()}
+              disabled={!diffJumpTarget || diffJumpChecking}
+              title={diffJumpTarget
+                ? t('projectEditor.diffReturn.jumpTitle')
+                : t('projectEditor.diffReturn.jumpDisabled')}
+            >
+              {diffJumpChecking ? t('projectEditor.diffReturn.checking') : t('projectEditor.diffReturn.jump')}
+            </button>
+          </div>
+        )}
 
         {searchOpen && (
           <div className="project-editor-search-overlay" onClick={handleCloseSearch}>

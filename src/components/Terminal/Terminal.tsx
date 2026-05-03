@@ -10,6 +10,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { SearchAddon } from '@xterm/addon-search'
 import { WebglAddon } from '@xterm/addon-webgl'
+import { installOscCwdAddon } from './oscCwdAddon'
 import { getTheme, ThemeName } from '../../themes/terminal-themes'
 import { DEFAULT_TERMINAL_FONT_SIZE, DEFAULT_TERMINAL_FONT_FAMILY } from '../../constants/terminal'
 import { requestOpenExternalHttpLink } from '../../utils/externalLink'
@@ -201,6 +202,19 @@ export function Terminal({
     searchAddonRef.current = searchAddon
     isInitialized.current = true
 
+    // GitStateMirror cwd push: parse OSC 7 / 633 / 1337 / 9 sequences from
+    // PTY output and notify the mirror worker so it can switch its watcher
+    // root and recompute. This is the renderer half of the warm-cd <50ms
+    // latency budget that GSM-01..09 asserts on.
+    const pushCwd = (terminalId: string, newCwd: string | null) => {
+      const api = (window as unknown as { electronAPI?: { git?: { pushCwd?: (id: string, cwd: string | null) => void } } }).electronAPI?.git
+      if (api?.pushCwd) api.pushCwd(terminalId, newCwd)
+    }
+    const oscDisposer = installOscCwdAddon(terminal, {
+      terminalId: id,
+      pushCwd
+    })
+
 
     // Fit after initial render
     requestAnimationFrame(() => {
@@ -208,7 +222,12 @@ export function Terminal({
       const { cols, rows } = terminal
 
       // Create PTY
-      window.electronAPI.terminal.create(id, { cols, rows })
+      const createOptions: { cols: number; rows: number; cwd?: string } = { cols, rows }
+      const autotestCwd = window.electronAPI.debug?.autotest
+        ? window.electronAPI.debug.autotestCwd?.trim()
+        : null
+      if (autotestCwd) createOptions.cwd = autotestCwd
+      window.electronAPI.terminal.create(id, createOptions)
     })
 
     // Handle user input
@@ -235,6 +254,7 @@ export function Terminal({
       container.removeEventListener('contextmenu', onContextMenu)
       unsubscribeData()
       unsubscribeExit()
+      try { oscDisposer.dispose() } catch { /* ignore */ }
       window.electronAPI.terminal.dispose(id)
       terminal.dispose()
       isInitialized.current = false

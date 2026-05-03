@@ -50,6 +50,7 @@ const STORAGE_KEY_STATE_PREFIX = 'git-history-state'
 const DEFAULT_FILE_LIST_WIDTH = 260
 const MIN_FILE_LIST_WIDTH = 180
 const MAX_FILE_LIST_WIDTH = 520
+const DIFF_INLINE_BREAKPOINT = 900
 
 const STORAGE_KEY_SUMMARY_HEIGHT = 'git-history-summary-height'
 const DEFAULT_SUMMARY_HEIGHT = 120
@@ -347,6 +348,7 @@ export function GitHistoryViewer({
   const commitsRef = useRef<GitCommitInfo[]>([])
   const filesRef = useRef<GitHistoryFile[]>([])
   const selectedFileRef = useRef<GitHistoryFile | null>(null)
+  const selectedFileContentRef = useRef<GitHistoryFileContentResult | null>(null)
   const selectedShasRef = useRef<string[]>([])
   const selectionAnchorRef = useRef<string | null>(null)
   const visibleRepoItemsRef = useRef<RepoTreeItem[]>([])
@@ -474,6 +476,10 @@ export function GitHistoryViewer({
   }, [selectedFile])
 
   useEffect(() => {
+    selectedFileContentRef.current = selectedFileContent
+  }, [selectedFileContent])
+
+  useEffect(() => {
     visibleRepoItemsRef.current = visibleRepoItems
   }, [visibleRepoItems])
 
@@ -599,6 +605,8 @@ export function GitHistoryViewer({
   }), [diffStyle])
   const imageTextDiffOptions = useMemo(() => ({
     renderSideBySide: true,
+    renderSideBySideInlineBreakpoint: DIFF_INLINE_BREAKPOINT,
+    useInlineViewWhenSpaceIsLimited: true,
     readOnly: true,
     originalEditable: false,
     minimap: { enabled: false },
@@ -1202,6 +1210,17 @@ export function GitHistoryViewer({
           isEpub: file.isEpub
         } : null
       },
+      getSelectedFileContent: () => {
+        const content = selectedFileContentRef.current
+        if (!content) return null
+        return {
+          originalContent: content.originalContent ?? null,
+          modifiedContent: content.modifiedContent ?? null,
+          isBinary: Boolean(content.isBinary),
+          loading: diffLoading,
+          error: content.error ?? null
+        }
+      },
       getImagePreviewState: () => {
         if (!selectedFile?.isImage) return null
         return {
@@ -1306,6 +1325,18 @@ export function GitHistoryViewer({
         const currentFiles = filesRef.current
         if (index < 0 || index >= currentFiles.length) return false
         const file = currentFiles[index]
+        selectedFileRef.current = file
+        selectionRef.current = {
+          ...selectionRef.current,
+          selectedFile: file.filename
+        }
+        setSelectedFile(file)
+        return true
+      },
+      selectFileByPath: (path: string) => {
+        const currentFiles = filesRef.current
+        const file = currentFiles.find((entry) => entry.filename === path || entry.originalFilename === path)
+        if (!file) return false
         selectedFileRef.current = file
         selectionRef.current = {
           ...selectionRef.current,

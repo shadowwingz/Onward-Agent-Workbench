@@ -34,7 +34,18 @@ const DEBOUNCE_MS = 180
 const LRU_LIMIT = 8
 
 interface InvalidationListener {
-  (cwd: string, reason: 'watcher' | 'force' | 'lru' | 'manual'): void
+  /**
+   * `reason` provenance:
+   *   - `watcher`  — main-process fs.watch fired (legacy path).
+   *   - `force`    — explicit `invalidate(cwd, 'force')` from a caller.
+   *   - `lru`      — entry evicted because LRU_LIMIT was exceeded.
+   *   - `manual`   — explicit `invalidate(cwd)` with default reason.
+   *   - `mirror`   — GitStateMirror worker reported a real state delta
+   *                  (its parcel-watcher is the authoritative event
+   *                  source post-Phase 2; main fs.watch is now narrowed
+   *                  to non-`.git` events as a redundant backstop).
+   */
+  (cwd: string, reason: 'watcher' | 'force' | 'lru' | 'manual' | 'mirror'): void
 }
 
 interface WatchEntry {
@@ -91,7 +102,37 @@ class GitDiffCacheInvalidator {
       entry.watcher = watch(
         normalized,
         { recursive: true, persistent: false },
-        () => this.handleRawEvent(entry)
+        (_eventType, filename) => {
+          // Drop ALL `.git/**` events at this watcher. The mirror
+          // worker's parcel-watcher is now the authoritative source
+          // for `.git` events (Phase 2 of the Codex P1-1 fix): when
+          // the worker's `recomputeStatus` produces a real delta, it
+          // emits `mirror-update`, and `GitStateMirrorRouter` calls
+          // `gitDiffCacheInvalidator.invalidate(cwd, 'mirror')` which
+          // drives this exact same listener chain. So:
+          //
+          //   - User-driven `git add`/`commit`/`checkout` →
+          //     `.git/index` event → worker filter allows it →
+          //     recompute → real delta → mirror-update → invalidate
+          //     (with reason='mirror') → GitDiffViewer refreshes ✓
+          //
+          //   - Our own `git status` write to `.git/index` → worker
+          //     filter allows → recompute → `computeDelta` finds NO
+          //     changes vs. previous → NO mirror-update → loop breaks
+          //     before reaching this listener ✓
+          //
+          // We keep this watcher's fs.watch active for non-`.git`
+          // events as a redundancy backstop until the Phase 3 cleanup
+          // retires it entirely (and migrates GitDiffViewer to consume
+          // the mirror-update stream directly via useGitStateMirror).
+          if (filename) {
+            const normalisedFilename = filename.replace(/\\/g, '/')
+            if (normalisedFilename === '.git' || normalisedFilename.startsWith('.git/')) {
+              return
+            }
+          }
+          this.handleRawEvent(entry)
+        }
       )
       entry.watcher.on('error', () => {
         // Drop the watcher; force-on-entry from the renderer remains the
@@ -130,7 +171,7 @@ class GitDiffCacheInvalidator {
   // External trigger for callers that already know the cache is stale (e.g.
   // a `force=true` request landed and we want to broadcast invalidation so any
   // sibling cwds rooted at the same superproject also drop their snapshot).
-  invalidate(cwd: string, reason: 'force' | 'manual' = 'manual'): void {
+  invalidate(cwd: string, reason: 'force' | 'manual' | 'mirror' = 'manual'): void {
     const normalized = resolve(cwd)
     this.fireListeners(normalized, reason)
   }
@@ -177,7 +218,7 @@ class GitDiffCacheInvalidator {
     }, DEBOUNCE_MS)
   }
 
-  private fireListeners(cwd: string, reason: 'watcher' | 'force' | 'lru' | 'manual'): void {
+  private fireListeners(cwd: string, reason: 'watcher' | 'force' | 'lru' | 'manual' | 'mirror'): void {
     for (const listener of this.listeners) {
       try {
         listener(cwd, reason)

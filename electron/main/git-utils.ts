@@ -159,8 +159,10 @@ export async function execFileAsync(
   )
 }
 
-export type GitChangeType = 'unstaged' | 'staged' | 'untracked'
-export type GitStatusCode = 'M' | 'A' | 'D' | 'R' | 'C' | '?'
+export type GitChangeType = 'unstaged' | 'staged' | 'untracked' | 'conflict'
+export type GitResourceGroup = 'workingTree' | 'index' | 'untracked' | 'merge'
+export type GitResourceRef = 'HEAD' | 'index' | 'workingTree' | 'empty'
+export type GitStatusCode = 'M' | 'A' | 'D' | 'R' | 'C' | '?' | '!'
 
 export interface GitSubmoduleInfo {
   name: string
@@ -188,6 +190,9 @@ export interface GitFileStatus {
   additions: number
   deletions: number
   changeType: GitChangeType
+  resourceGroup: GitResourceGroup
+  originalRef: GitResourceRef | null
+  modifiedRef: GitResourceRef | null
   repoRoot?: string
   repoLabel?: string
   isSubmoduleEntry?: boolean
@@ -1163,7 +1168,7 @@ export async function getTerminalGitInfo(terminalId: string): Promise<TerminalGi
 function normalizeGitStatusCode(raw: string): GitStatusCode {
   const code = raw.trim()
   if (!code) return 'M'
-  const lead = code.charAt(0) as GitStatusCode
+  const lead = code.charAt(0)
   switch (lead) {
     case 'A':
     case 'D':
@@ -1173,8 +1178,58 @@ function normalizeGitStatusCode(raw: string): GitStatusCode {
       return lead
     case '?':
       return '?'
+    case '!':
+    case 'U':
+      return '!'
     default:
       return 'M'
+  }
+}
+
+function buildGitResourceFields(
+  changeType: GitChangeType,
+  status: GitStatusCode
+): Pick<GitFileStatus, 'resourceGroup' | 'originalRef' | 'modifiedRef'> {
+  if (changeType === 'conflict') {
+    return { resourceGroup: 'merge', originalRef: null, modifiedRef: 'workingTree' }
+  }
+  if (changeType === 'staged') {
+    return {
+      resourceGroup: 'index',
+      originalRef: status === 'A' || status === '?' ? 'empty' : 'HEAD',
+      modifiedRef: status === 'D' ? 'empty' : 'index'
+    }
+  }
+  if (changeType === 'untracked') {
+    return { resourceGroup: 'untracked', originalRef: 'empty', modifiedRef: 'workingTree' }
+  }
+  return {
+    resourceGroup: 'workingTree',
+    originalRef: status === 'A' || status === '?' ? 'empty' : 'index',
+    modifiedRef: status === 'D' ? 'empty' : 'workingTree'
+  }
+}
+
+function createGitFileStatus(params: {
+  filename: string
+  originalFilename?: string
+  status: GitStatusCode
+  additions?: number
+  deletions?: number
+  changeType: GitChangeType
+  isSubmoduleEntry?: boolean
+  submoduleFlags?: GitFileStatus['submoduleFlags']
+}): GitFileStatus {
+  return {
+    filename: params.filename,
+    originalFilename: params.originalFilename,
+    status: params.status,
+    additions: params.additions ?? 0,
+    deletions: params.deletions ?? 0,
+    changeType: params.changeType,
+    ...buildGitResourceFields(params.changeType, params.status),
+    ...(params.isSubmoduleEntry ? { isSubmoduleEntry: true as const } : {}),
+    ...(params.submoduleFlags ? { submoduleFlags: params.submoduleFlags } : {})
   }
 }
 
@@ -1239,13 +1294,11 @@ function parseStatusPorcelainV2Z(output: string): GitFileStatus[] {
     if (record.startsWith('? ')) {
       const filename = record.slice(2)
       if (filename) {
-        files.push({
+        files.push(createGitFileStatus({
           filename,
           status: '?',
-          additions: 0,
-          deletions: 0,
           changeType: 'untracked'
-        })
+        }))
       }
       index += 1
       continue
@@ -1286,32 +1339,38 @@ function parseStatusPorcelainV2Z(output: string): GitFileStatus[] {
       continue
     }
 
-    const submoduleFields = isSubmoduleEntry && submoduleFlags
-      ? { isSubmoduleEntry: true as const, submoduleFlags }
-      : {}
+    if (type === 'u') {
+      files.push(createGitFileStatus({
+        filename,
+        status: '!',
+        changeType: 'conflict',
+        isSubmoduleEntry,
+        submoduleFlags
+      }))
+      index += 1
+      continue
+    }
 
     if (indexStatus && indexStatus !== '.') {
-      files.push({
+      files.push(createGitFileStatus({
         filename,
         originalFilename: indexStatus === 'R' || indexStatus === 'C' ? originalFilename : undefined,
         status: normalizeGitStatusCode(indexStatus),
-        additions: 0,
-        deletions: 0,
         changeType: 'staged',
-        ...submoduleFields
-      })
+        isSubmoduleEntry,
+        submoduleFlags
+      }))
     }
 
     if (worktreeStatus && worktreeStatus !== '.') {
-      files.push({
+      files.push(createGitFileStatus({
         filename,
         originalFilename: worktreeStatus === 'R' || worktreeStatus === 'C' ? originalFilename : undefined,
         status: normalizeGitStatusCode(worktreeStatus),
-        additions: 0,
-        deletions: 0,
         changeType: 'unstaged',
-        ...submoduleFields
-      })
+        isSubmoduleEntry,
+        submoduleFlags
+      }))
     }
 
     index += type === '2' ? 2 : 1

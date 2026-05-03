@@ -15,7 +15,7 @@ import { dirname, join, resolve } from 'path'
 import { isMainThread, parentPort } from 'worker_threads'
 import { tmpdir } from 'os'
 
-import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
+import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names.ts'
 
 /**
  * Worker → main trace forwarding envelope.
@@ -90,7 +90,8 @@ export const WORKER_TID = {
   PROJECT_FS: 5003,
   SQLITE: 5004,
   APP_STATE: 5005,
-  RIPGREP_SEARCH: 5006
+  RIPGREP_SEARCH: 5006,
+  GIT_STATE_MIRROR: 5007
 } as const
 
 /**

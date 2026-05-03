@@ -44,6 +44,7 @@ import { FileWatchManager } from './file-watch-manager'
 import { ImageWatchManager } from './image-watch-manager'
 import { ProjectTreeWatchManager } from './project-tree-watch-manager'
 import { gitDiffCacheInvalidator } from './git-diff-cache-invalidator'
+import { gitStateMirrorRouter } from './git-state-mirror-router'
 import { getUpdateService } from './update-service'
 import { perfTraceLogger } from './perf-trace-logger'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
@@ -451,6 +452,12 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
       }
     }, 1000)
   }
+
+  // GitStateMirror router — pub/sub bridge to the mirror Worker Thread.
+  // Initialised before the legacy GitWatchManager so its IPC handlers can
+  // start serving subscriptions immediately; the mirror's own watcher /
+  // recompute logic comes online over commits 4-9.
+  gitStateMirrorRouter.init(mainWindow)
 
   gitWatchManager = new GitWatchManager((terminalId, info) => {
     if (mainWindow.isDestroyed()) return
@@ -1523,7 +1530,32 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
 
   // Get Git file content for diff view
   ipcMain.handle(IPC.GIT_GET_FILE_CONTENT, async (_, cwd: string, file: Pick<GitFileStatus, 'filename' | 'status' | 'originalFilename' | 'changeType' | 'isSubmoduleEntry'>, repoRoot?: string) => {
-    return await gitIpcWorkerClient.getFileContent(cwd, file, repoRoot)
+    const startedAt = Date.now()
+    try {
+      const result = await gitIpcWorkerClient.getFileContent(cwd, file, repoRoot)
+      perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_IPC_GIT_GET_FILE_CONTENT, {
+        cwd,
+        repoRoot,
+        filename: file.filename,
+        status: file.status,
+        changeType: file.changeType,
+        result: result.success ? 'success' : 'error',
+        durationMs: Date.now() - startedAt
+      })
+      return result
+    } catch (error) {
+      perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_IPC_GIT_GET_FILE_CONTENT, {
+        cwd,
+        repoRoot,
+        filename: file.filename,
+        status: file.status,
+        changeType: file.changeType,
+        result: 'exception',
+        error: String(error),
+        durationMs: Date.now() - startedAt
+      })
+      throw error
+    }
   })
 
   // Save file content to workspace
@@ -1927,6 +1959,15 @@ export function cleanupIpcHandlers(): void {
   projectTreeWatchManager?.dispose()
   projectTreeWatchManager = null
   gitDiffCacheInvalidator.dispose()
+  // Tear down the GitStateMirror worker thread + parcel-watchers and remove
+  // the 5 mirror IPC handlers. Without this the worker keeps running after
+  // app quit, fds leak, and the main process hangs waiting for the thread.
+  gitStateMirrorRouter.dispose()
+  ipcMain.removeHandler(IPC.GIT_STATE_MIRROR_SUBSCRIBE)
+  ipcMain.removeAllListeners(IPC.GIT_STATE_MIRROR_UNSUBSCRIBE)
+  ipcMain.removeHandler(IPC.GIT_STATE_MIRROR_GET)
+  ipcMain.removeHandler(IPC.GIT_STATE_MIRROR_REQUEST_FILE_BODY)
+  ipcMain.removeAllListeners(IPC.GIT_STATE_PUSH_CWD)
   ipcMain.removeHandler(IPC.APP_GET_INFO)
   ipcMain.removeHandler(IPC.FEEDBACK_LOAD)
   ipcMain.removeHandler(IPC.FEEDBACK_UPDATE_PREFERENCES)

@@ -88,6 +88,30 @@ if ! grep -q "GDS-16-trace-marker-snapshot-service-expected" "$LOG_FILE"; then
   exit 1
 fi
 
+if ! grep -q "GDS-26-trace-marker-diff-file-load-expected" "$LOG_FILE"; then
+  echo "Missing GDS-26 marker; the diff file-load trace test did not run" >&2
+  tail -n 40 "$LOG_FILE" >&2
+  exit 1
+fi
+
+if ! grep -q "GDS-30-trace-marker-diff-ux-actions-expected" "$LOG_FILE"; then
+  echo "Missing GDS-30 marker; the diff UX action trace test did not run" >&2
+  tail -n 40 "$LOG_FILE" >&2
+  exit 1
+fi
+
+if ! grep -q "GDS-34-trace-marker-diff-body-prefetch-expected" "$LOG_FILE"; then
+  echo "Missing GDS-34 marker; the diff body prefetch trace test did not run" >&2
+  tail -n 40 "$LOG_FILE" >&2
+  exit 1
+fi
+
+if ! grep -q "GDS-42-trace-marker-diff-tree-editor-jumps-expected" "$LOG_FILE"; then
+  echo "Missing GDS-42 marker; the diff tree/editor jump trace test did not run" >&2
+  tail -n 40 "$LOG_FILE" >&2
+  exit 1
+fi
+
 # ---------------------------------------------------------------------------
 # GDS-11/12: post-mortem trace inspection. Verify the new trace events
 # actually fired during the test session.
@@ -133,7 +157,7 @@ expect_event() {
 }
 
 echo ""
-echo "=== Trace event coverage (GDS-11/12/16) ==="
+echo "=== Trace event coverage (GDS-11/12/16/26/30/34/42) ==="
 expect_event "GDS-11"  "main:git.diff.submodule-filter"
 expect_event "GDS-12a" "main:git.diff.fs-watch-event"
 expect_event "GDS-12b" "renderer:subpage.freshness-check"
@@ -145,6 +169,15 @@ expect_event "GDS-12b" "renderer:subpage.freshness-check"
 # snapshot still warm) that is not worth defending against test-runner
 # flake. Cache health can still be inspected post-mortem in the trace.
 expect_event "GDS-16"  "main:git.snapshot.capture"
+expect_event "GDS-26a" "main:ipc.git.get-file-content"
+expect_event "GDS-26b" "renderer:git-diff.file-load"
+expect_event "GDS-30a" "renderer:git-diff.manual-refresh"
+expect_event "GDS-30b" "renderer:git-diff.hunk-navigate"
+expect_event "GDS-30c" "renderer:git-diff.hunk-action"
+expect_event "GDS-34"  "renderer:git-diff.body-prefetch"
+expect_event "GDS-42a" "renderer:git-diff.file-list-mode-change"
+expect_event "GDS-42b" "renderer:git-diff.jump-to-editor"
+expect_event "GDS-42c" "renderer:project-editor.jump-to-diff"
 
 echo ""
 echo "Git Diff staleness + submodule filter autotest passed"

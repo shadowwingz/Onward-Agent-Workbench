@@ -8,9 +8,9 @@ import type { FSWatcher } from 'fs'
 import { readdir, stat } from 'fs/promises'
 import type { BrowserWindow } from 'electron'
 import { join, normalize } from 'path'
-import { IPC } from '../shared/ipc-channels'
-import { perfTraceLogger } from './perf-trace-logger'
-import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
+import { IPC } from '../shared/ipc-channels.ts'
+import { perfTraceLogger } from './perf-trace-logger.ts'
+import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names.ts'
 
 interface TreeEntry {
   watcher: FSWatcher | null

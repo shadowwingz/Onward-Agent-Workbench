@@ -190,7 +190,14 @@ const TabTerminalGrid = memo(function TabTerminalGrid({
   onTerminalFocus: (tabId: string, terminalId: string) => void
   onTerminalRename: (tabId: string, terminalId: string, newTitle: string) => void
   onPersistTerminalCwd: (terminalId: string, cwd: string | null) => void
-  onOpenProjectEditor: (terminalId: string) => void
+  onOpenProjectEditor: (terminalId: string, options?: {
+    filePath?: string | null
+    repoRoot?: string | null
+    source?: SubpageId | null
+    returnTarget?: SubpageId | null
+    diffFilePath?: string | null
+    diffRepoRoot?: string | null
+  }) => void
   projectEditorTerminalId: string | null
   projectEditorCwd: string | null
   focusRequest: TerminalFocusRequest | null
@@ -1164,6 +1171,10 @@ function AppContent({
     options?: {
       filePath?: string | null
       repoRoot?: string | null
+      source?: SubpageId | null
+      returnTarget?: SubpageId | null
+      diffFilePath?: string | null
+      diffRepoRoot?: string | null
     }
   ) => {
     if (
@@ -1194,7 +1205,11 @@ function AppContent({
         id: projectEditorOpenRequestIdRef.current,
         terminalId,
         filePath: options.filePath ?? null,
-        repoRoot: options.repoRoot ?? null
+        repoRoot: options.repoRoot ?? null,
+        source: options.source ?? null,
+        returnTarget: options.returnTarget ?? null,
+        diffFilePath: options.diffFilePath ?? null,
+        diffRepoRoot: options.diffRepoRoot ?? null
       })
     }
   }, [projectEditorOpen, projectEditorTerminalId, projectEditorDirty, state.tabs, t])
@@ -1255,7 +1270,11 @@ function AppContent({
       if (!terminalId) return
       void handleOpenProjectEditor(terminalId, {
         filePath: customEvent.detail?.filePath ?? null,
-        repoRoot: customEvent.detail?.repoRoot ?? null
+        repoRoot: customEvent.detail?.repoRoot ?? null,
+        source: customEvent.detail?.source ?? null,
+        returnTarget: customEvent.detail?.returnTarget ?? null,
+        diffFilePath: customEvent.detail?.diffFilePath ?? null,
+        diffRepoRoot: customEvent.detail?.diffRepoRoot ?? null
       })
     }
     window.addEventListener('project-editor:open', handler as EventListener)

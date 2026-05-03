@@ -10,12 +10,20 @@ export interface ProjectEditorOpenRequest {
   terminalId: string
   filePath: string | null
   repoRoot: string | null
+  source?: SubpageId | null
+  returnTarget?: SubpageId | null
+  diffFilePath?: string | null
+  diffRepoRoot?: string | null
 }
 
 export interface ProjectEditorOpenEventDetail {
   terminalId?: string
   filePath?: string | null
   repoRoot?: string | null
+  source?: SubpageId | null
+  returnTarget?: SubpageId | null
+  diffFilePath?: string | null
+  diffRepoRoot?: string | null
 }
 
 export interface SubpageNavigateEventDetail {
@@ -23,4 +31,8 @@ export interface SubpageNavigateEventDetail {
   target?: SubpageId
   filePath?: string | null
   repoRoot?: string | null
+  source?: SubpageId | null
+  returnTarget?: SubpageId | null
+  diffFilePath?: string | null
+  diffRepoRoot?: string | null
 }

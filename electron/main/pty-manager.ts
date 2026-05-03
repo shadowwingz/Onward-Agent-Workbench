@@ -4,9 +4,10 @@
  */
 
 import * as pty from 'node-pty'
-import { platform, homedir } from 'os'
-import { join, delimiter, basename } from 'path'
+import { platform, homedir, tmpdir } from 'os'
+import { join, delimiter, basename, resolve as pathResolve } from 'path'
 import { execFileSync } from 'child_process'
+import { mkdirSync, writeFileSync, existsSync } from 'fs'
 import { app } from 'electron'
 import { getApiPort } from './api-server'
 import { perfTraceLogger } from './perf-trace-logger'
@@ -119,6 +120,32 @@ export class PtyManager {
     if (platform() === 'win32' && !command && this.isCmdShell(shell)) {
       // $e = ESC, $P = current path, $e\ = ST (string terminator), $G = >
       shellIntegrationEnv.PROMPT = '$e]9;9;$P$e\\$P$G'
+    }
+
+    // Onward shell integration: emit OSC 633 + OSC 7 on every prompt so the
+    // xterm.js OSC parser (commit 9) can push cwd to the GitStateMirror with
+    // sub-50ms latency. Falls back to the legacy lsof / cmd-PROMPT path when
+    // the user opts out via ONWARD_SHELL_INTEGRATION=0.
+    if (!command && process.env.ONWARD_SHELL_INTEGRATION !== '0') {
+      const injection = this.prepareShellIntegrationInjection(shell)
+      if (injection) {
+        // argsReplace wins over the caller's defaults: bash specifically
+        // needs to drop the `-l` login flag so `--rcfile` is honoured.
+        // Without this branch, bash silently skips the wrapper because
+        // login mode takes precedence over --rcfile.
+        if (injection.argsReplace) {
+          execArgs = injection.argsReplace.slice()
+        }
+        if (injection.argsPrepend) execArgs = [...injection.argsPrepend, ...execArgs]
+        if (injection.argsAppend) execArgs = [...execArgs, ...injection.argsAppend]
+        Object.assign(shellIntegrationEnv, injection.env)
+        // injection.cleanupPath is the temp wrapper dir for bash / fish; it
+        // lives under tmpdir() and is cleaned up by the OS on reboot. We
+        // don't tear it down on PTY exit because re-spawn after a crash
+        // would need to recreate it anyway, and the leak is bounded (one
+        // dir per spawn, each <1 KB).
+        void injection.cleanupPath
+      }
     }
 
     const initialCwd = cwd || process.env.HOME || process.env.USERPROFILE || process.cwd()
@@ -526,6 +553,174 @@ export class PtyManager {
       return 'cmd'
     }
     return 'unknown'
+  }
+
+  /**
+   * Resolve the Onward shell-integration resource directory. Works in dev
+   * (sources live under `<repoRoot>/resources/shell-integration/`) and in
+   * the packaged app (electron-builder copies them to `process.resourcesPath`
+   * which lives at `<app>.app/Contents/Resources/` on macOS).
+   */
+  private resolveShellIntegrationDir(): string | null {
+    const candidates = [
+      // Packaged app — electron-builder's `extraResources.from: resources, to: resources`
+      // puts our scripts at `<app>/Contents/Resources/resources/shell-integration/`.
+      process.resourcesPath ? join(process.resourcesPath, 'resources', 'shell-integration') : null,
+      // Defensive fallback if a future config drops the inner `resources/` segment.
+      process.resourcesPath ? join(process.resourcesPath, 'shell-integration') : null,
+      // Dev: walk up from __dirname until we find `resources/shell-integration`.
+      pathResolve(__dirname, '..', '..', 'resources', 'shell-integration'),
+      pathResolve(__dirname, '..', '..', '..', 'resources', 'shell-integration')
+    ].filter((p): p is string => Boolean(p))
+    for (const dir of candidates) {
+      if (existsSync(join(dir, 'bash.sh'))) return dir
+    }
+    return null
+  }
+
+  /**
+   * Compose the args / env mutations needed to inject the Onward
+   * shell-integration script into the spawned shell. Returns null when
+   * the shell is unsupported (cmd.exe still uses the legacy PROMPT
+   * approach above; non-pwsh on Windows is unsupported per the platform
+   * hard requirement).
+   *
+   * `cleanupPath` is the temp directory the caller should `rm -rf` when
+   * the PTY exits — currently only zsh's ZDOTDIR injection produces one.
+   */
+  private prepareShellIntegrationInjection(shellPath: string): {
+    argsPrepend?: string[]
+    argsAppend?: string[]
+    /**
+     * When set, REPLACES the caller's existing execArgs entirely instead
+     * of being prepended/appended. Necessary for bash, where the caller's
+     * default `['-l']` (login flag) takes precedence over `--rcfile` and
+     * causes bash to silently skip the wrapper. The bash branch returns
+     * `['--rcfile', <wrapper>]` here and has its wrapper source the login
+     * file chain manually so PATH/toolchain init still happens.
+     */
+    argsReplace?: string[]
+    env: Record<string, string>
+    cleanupPath: string | null
+  } | null {
+    const integrationDir = this.resolveShellIntegrationDir()
+    if (!integrationDir) return null
+
+    const baseName = basename(shellPath).toLowerCase().replace(/\.exe$/, '')
+
+    if (baseName === 'bash') {
+      // bash doesn't read `--rcfile` when invoked as a login shell (`-l`):
+      // login mode dominates and bash sources `~/.bash_profile` →
+      // `~/.bash_login` → `~/.profile` instead, completely skipping any
+      // file pointed to by `--rcfile`. macOS Terminal.app, iTerm2, and
+      // most Linux desktops launch bash as a login shell by default, so
+      // simply prepending `--rcfile` (which the previous version did) had
+      // ZERO effect for the vast majority of users — the wrapper, our
+      // OSC-emitting `bash.sh`, and the entire shell-integration chain
+      // were silently ignored.
+      //
+      // Fix: drop the login flag for bash and have the wrapper source the
+      // login startup files manually, in the same precedence order bash
+      // itself would use, then chain to our `bash.sh`. This preserves
+      // PATH / toolchain initialisation (Homebrew, nvm, pyenv, asdf — all
+      // typically installed into `~/.bash_profile` on macOS, `~/.bashrc`
+      // on Linux) while guaranteeing our integration script actually runs.
+      const wrapperDir = this.makeTempIntegrationDir('bash')
+      const wrapperPath = join(wrapperDir, 'rcfile.sh')
+      writeFileSync(
+        wrapperPath,
+        [
+          '# Onward bash integration wrapper.',
+          '#',
+          '# Manually drives bash\'s login startup chain because we launch',
+          '# bash without `-l` (so `--rcfile` is honoured). Order matches',
+          '# bash\'s documented login behaviour: only the FIRST existing',
+          '# file in the .bash_profile / .bash_login / .profile sequence',
+          '# is sourced. We fall through to .bashrc as a final fallback so',
+          '# Linux distros that put everything in .bashrc still get their',
+          '# config loaded.',
+          'if [ -f "$HOME/.bash_profile" ]; then',
+          '  . "$HOME/.bash_profile"',
+          'elif [ -f "$HOME/.bash_login" ]; then',
+          '  . "$HOME/.bash_login"',
+          'elif [ -f "$HOME/.profile" ]; then',
+          '  . "$HOME/.profile"',
+          'elif [ -f "$HOME/.bashrc" ]; then',
+          '  . "$HOME/.bashrc"',
+          'fi',
+          '# Onward integration last so its precmd hook wraps cleanly over',
+          '# anything the user set up above.',
+          `if [ -f "${integrationDir}/bash.sh" ]; then`,
+          `  . "${integrationDir}/bash.sh"`,
+          'fi',
+          ''
+        ].join('\n'),
+        'utf8'
+      )
+      return {
+        argsReplace: ['--rcfile', wrapperPath],
+        env: {},
+        cleanupPath: wrapperDir
+      }
+    }
+
+    if (baseName === 'zsh') {
+      // ZDOTDIR injection: zsh sources <ZDOTDIR>/.zshrc which chains to user's.
+      // The committed .zshrc preserves USER_ZDOTDIR so it can chain back to
+      // the user's real config.
+      const zdotdir = join(integrationDir, 'zsh-zdotdir')
+      const env: Record<string, string> = { ZDOTDIR: zdotdir }
+      const userZdot = process.env.ZDOTDIR || homedir()
+      if (userZdot) env.USER_ZDOTDIR = userZdot
+      return { env, cleanupPath: null }
+    }
+
+    if (baseName === 'fish') {
+      // Prepend a generated dir to XDG_DATA_DIRS so fish auto-loads our
+      // vendor_conf.d entry. The committed `fish.fish` lives in
+      // `integrationDir`, but we MUST NOT write next to it: in packaged
+      // builds `integrationDir` resolves under `process.resourcesPath`
+      // which is read-only on Linux AppImage and conventionally read-only
+      // on macOS / Program Files installs — `mkdirSync` would throw
+      // EROFS / EACCES and crash terminal creation outright. Materialise
+      // the vendor tree in OS temp instead, mirroring the bash wrapper
+      // strategy. Wrap every fs op in try/catch so a failure degrades to
+      // "no fish integration" rather than aborting PTY spawn.
+      let fishVendorRoot: string
+      let vendorTarget: string
+      try {
+        fishVendorRoot = this.makeTempIntegrationDir('fish')
+        const vendorDir = join(fishVendorRoot, 'fish', 'vendor_conf.d')
+        mkdirSync(vendorDir, { recursive: true })
+        vendorTarget = join(vendorDir, 'onward.fish')
+        const src = require('fs').readFileSync(join(integrationDir, 'fish.fish'), 'utf8')
+        writeFileSync(vendorTarget, src, 'utf8')
+      } catch {
+        return null
+      }
+      const xdg = process.env.XDG_DATA_DIRS || '/usr/local/share:/usr/share'
+      return {
+        env: { XDG_DATA_DIRS: `${fishVendorRoot}:${xdg}` },
+        cleanupPath: fishVendorRoot
+      }
+    }
+
+    if (baseName === 'pwsh' || baseName === 'powershell') {
+      const psScript = join(integrationDir, 'pwsh.ps1')
+      return {
+        argsPrepend: ['-NoExit', '-Command', `. '${psScript.replace(/'/g, "''")}'`],
+        env: {},
+        cleanupPath: null
+      }
+    }
+
+    return null
+  }
+
+  private makeTempIntegrationDir(label: string): string {
+    const dir = join(tmpdir(), `onward-shell-${label}-${process.pid}-${Date.now().toString(36)}`)
+    mkdirSync(dir, { recursive: true })
+    return dir
   }
 
   disposeAll(): void {

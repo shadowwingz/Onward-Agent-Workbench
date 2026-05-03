@@ -67,6 +67,7 @@ SCRIPTS: List[str] = [
     "test/autotest/run-git-cross-platform-autotest.sh",
     "test/autotest/run-git-diff-recursive-submodules-autotest.sh",
     "test/autotest/run-git-diff-staleness-and-submodule-autotest.sh",
+    "test/autotest/run-git-state-mirror-latency-autotest.sh",
     "test/autotest/run-git-diff-subdir-autotest.sh",
     "test/autotest/run-git-diff-submodules-autotest.sh",
     "test/autotest/run-git-history-multi-terminal-scope-autotest.sh",

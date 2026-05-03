@@ -228,8 +228,10 @@ export interface AppStateAPI {
   onFlushPendingState: (callback: () => void | Promise<void>) => void
 }
 
-export type GitChangeType = 'unstaged' | 'staged' | 'untracked'
-export type GitStatusCode = 'M' | 'A' | 'D' | 'R' | 'C' | '?'
+export type GitChangeType = 'unstaged' | 'staged' | 'untracked' | 'conflict'
+export type GitResourceGroup = 'workingTree' | 'index' | 'untracked' | 'merge'
+export type GitResourceRef = 'HEAD' | 'index' | 'workingTree' | 'empty'
+export type GitStatusCode = 'M' | 'A' | 'D' | 'R' | 'C' | '?' | '!'
 
 export interface GitSubmoduleInfo {
   name: string
@@ -257,6 +259,9 @@ export interface GitFileStatus {
   additions: number
   deletions: number
   changeType: GitChangeType
+  resourceGroup: GitResourceGroup
+  originalRef: GitResourceRef | null
+  modifiedRef: GitResourceRef | null
   repoRoot?: string
   repoLabel?: string
   isSubmoduleEntry?: boolean
@@ -360,6 +365,32 @@ export interface TerminalGitInfo {
   branch: string | null
   repoName: string | null
   status: TerminalGitStatus | null
+}
+
+/**
+ * Renderer-facing snapshot of the GitStateMirror. Same shape as
+ * `MirrorState` in `electron/main/git-state-mirror-types.ts` — duplicated
+ * here so renderer code never reaches into electron/main.
+ */
+export interface GitStateMirrorSnapshot {
+  cwd: string
+  repoRoot: string | null
+  repoName: string | null
+  branch: string | null
+  status: TerminalGitStatus | null
+  files: GitFileStatus[]
+  repos?: GitRepoContext[]
+  submodulesLoading?: boolean
+  capturedAt: number
+}
+
+/**
+ * Partial-update payload broadcast on `git-state-mirror:update`. Renderer
+ * merges these into its local copy of `GitStateMirrorSnapshot`. Always
+ * carries `capturedAt` for ordering.
+ */
+export type GitStateMirrorDelta = Partial<Omit<GitStateMirrorSnapshot, 'cwd' | 'capturedAt'>> & {
+  capturedAt: number
 }
 
 export interface GitFileContentResult {
@@ -589,7 +620,17 @@ export interface GitAPI {
   notifyTerminalGitUpdate: (terminalId: string) => Promise<{ success: true }>
   warmDiffCache: (cwd: string) => Promise<{ success: boolean }>
   onTerminalInfo: (callback: (terminalId: string, info: TerminalGitInfo) => void) => () => void
-  onDiffCacheInvalidated: (callback: (cwd: string, reason: 'watcher' | 'force' | 'lru' | 'manual') => void) => () => void
+  onDiffCacheInvalidated: (callback: (cwd: string, reason: 'watcher' | 'force' | 'lru' | 'manual' | 'mirror') => void) => () => void
+
+  // GitStateMirror surface — single-source-of-truth subscriptions wired
+  // through the worker-thread mirror. See `src/hooks/useGitStateMirror.ts`
+  // for the React hook every consumer should prefer over these raw bridges.
+  subscribeMirror: (cwd: string) => Promise<GitStateMirrorSnapshot | null>
+  unsubscribeMirror: (cwd: string) => void
+  getMirror: (cwd: string) => Promise<GitStateMirrorSnapshot | null>
+  onMirrorUpdate: (callback: (cwd: string, delta: GitStateMirrorDelta) => void) => () => void
+  pushCwd: (terminalId: string, newCwd: string | null) => void
+  requestFileBody: (cwd: string, fileKey: string, force: boolean) => Promise<GitFileContentResult | null>
 }
 
 // Project Editor API

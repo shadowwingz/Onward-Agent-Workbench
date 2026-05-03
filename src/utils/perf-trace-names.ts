@@ -58,6 +58,7 @@ export const PERF_TRACE_EVENT = {
   MAIN_IPC_PROJECT_READ_FILE: 'main:ipc.project.read-file',
   MAIN_IPC_PROJECT_SAVE_FILE: 'main:ipc.project.save-file',
   MAIN_IPC_GIT_GET_DIFF: 'main:ipc.git.get-diff',
+  MAIN_IPC_GIT_GET_FILE_CONTENT: 'main:ipc.git.get-file-content',
   MAIN_IPC_GIT_GET_HISTORY: 'main:ipc.git.get-history',
   MAIN_IPC_TERMINAL_SPAWN: 'main:ipc.terminal.spawn',
 
@@ -242,7 +243,48 @@ export const PERF_TRACE_EVENT = {
   // before they become user-visible bugs.
   MAIN_GIT_SNAPSHOT_CAPTURE: 'main:git.snapshot.capture',
   MAIN_GIT_SNAPSHOT_CACHE_HIT: 'main:git.snapshot.cache-hit',
-  MAIN_GIT_SNAPSHOT_INVALIDATE: 'main:git.snapshot.invalidate'
+  MAIN_GIT_SNAPSHOT_INVALIDATE: 'main:git.snapshot.invalidate',
+
+  // ────────────────────────────────────────────────────────────────────
+  // GitStateMirror refactor (worker-thread mirror + pub/sub IPC).
+  //
+  // The mirror is the single source of truth for branch / repo name /
+  // status colour / file list / per-file diff body. These events bracket
+  // the four critical paths the GSM autotest suite asserts on:
+  //
+  //   1. cwd switch:
+  //        renderer:terminal.osc-cwd-detected   (xterm.js parses OSC)
+  //          → main:git-state-mirror.cwd-switched   (router routes to worker)
+  //          → worker:git-state-mirror.recompute-status-done   (git status)
+  //          → main:git-state-mirror.fanout   (delta to subscribers)
+  //          → renderer:terminal-title.{branch,color}-rendered   (DOM)
+  //
+  //   2. file mutation:
+  //        worker:git-state-mirror.watcher-fire (or .watcher-filtered)
+  //          → worker:git-state-mirror.recompute-status-done
+  //          → main:git-state-mirror.fanout
+  //          → renderer:git-diff.body-rendered (or terminal-title.*)
+  //
+  // The two `renderer:terminal-title.*` markers feed the GSM-01..09 latency
+  // assertions; `worker:git-state-mirror.watcher-filtered` lets GDS-39
+  // assert the .git whitelist is doing its job.
+  RENDERER_TERMINAL_OSC_CWD_DETECTED: 'renderer:terminal.osc-cwd-detected',
+  MAIN_GIT_STATE_MIRROR_CWD_SWITCHED: 'main:git-state-mirror.cwd-switched',
+  WORKER_GIT_STATE_MIRROR_WATCHER_FIRE: 'worker:git-state-mirror.watcher-fire',
+  WORKER_GIT_STATE_MIRROR_WATCHER_FILTERED: 'worker:git-state-mirror.watcher-filtered',
+  WORKER_GIT_STATE_MIRROR_RECOMPUTE_DONE: 'worker:git-state-mirror.recompute-status-done',
+  MAIN_GIT_STATE_MIRROR_FANOUT: 'main:git-state-mirror.fanout',
+  RENDERER_TERMINAL_TITLE_BRANCH_RENDERED: 'renderer:terminal-title.branch-rendered',
+  RENDERER_TERMINAL_TITLE_COLOR_RENDERED: 'renderer:terminal-title.color-rendered',
+  RENDERER_GIT_DIFF_MANUAL_REFRESH: 'renderer:git-diff.manual-refresh',
+  RENDERER_GIT_DIFF_HUNK_NAVIGATE: 'renderer:git-diff.hunk-navigate',
+  RENDERER_GIT_DIFF_HUNK_ACTION: 'renderer:git-diff.hunk-action',
+  RENDERER_GIT_DIFF_BODY_PREFETCH: 'renderer:git-diff.body-prefetch',
+  RENDERER_GIT_DIFF_FILE_LOAD: 'renderer:git-diff.file-load',
+  RENDERER_GIT_DIFF_BODY_RENDERED: 'renderer:git-diff.body-rendered',
+  RENDERER_GIT_DIFF_FILE_LIST_MODE_CHANGE: 'renderer:git-diff.file-list-mode-change',
+  RENDERER_GIT_DIFF_JUMP_TO_EDITOR: 'renderer:git-diff.jump-to-editor',
+  RENDERER_PROJECT_EDITOR_JUMP_TO_DIFF: 'renderer:project-editor.jump-to-diff'
 } as const
 
 export type PerfTraceEventName = typeof PERF_TRACE_EVENT[keyof typeof PERF_TRACE_EVENT]

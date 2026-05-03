@@ -13,8 +13,11 @@
 
 export interface GitDiffDebugApi {
   isOpen: () => boolean
-  getFileList: () => Array<{ filename: string; originalFilename?: string; status?: string; changeType?: string; repoRoot?: string; repoLabel?: string }>
-  getVisibleFileList?: () => Array<{ filename: string; originalFilename?: string; status?: string; changeType?: string; repoRoot?: string; repoLabel?: string }>
+  getFileList: () => Array<{ filename: string; originalFilename?: string; status?: string; changeType?: string; resourceGroup?: string; originalRef?: string | null; modifiedRef?: string | null; repoRoot?: string; repoLabel?: string }>
+  getVisibleFileList?: () => Array<{ filename: string; originalFilename?: string; status?: string; changeType?: string; resourceGroup?: string; originalRef?: string | null; modifiedRef?: string | null; repoRoot?: string; repoLabel?: string }>
+  getFileListViewMode?: () => 'tree' | 'flat'
+  setFileListViewMode?: (mode: 'tree' | 'flat') => boolean
+  getVisibleTreeRows?: () => Array<{ type: 'dir' | 'file'; path: string; depth: number; name: string }>
   getRepoList: () => Array<{ root: string; label: string; isSubmodule: boolean; depth: number; changeCount: number; parentRoot?: string; loading?: boolean }>
   getVisibleRepoItems?: () => Array<{ root: string; label: string; isSubmodule: boolean; depth: number; treeDepth: number; changeCount: number; parentRoot?: string; loading?: boolean; hasChildren: boolean; expanded: boolean; isCurrent: boolean }>
   setRepoExpanded?: (repoRoot: string, expanded: boolean) => boolean
@@ -23,6 +26,34 @@ export interface GitDiffDebugApi {
   selectFileByPath: (path: string) => boolean
   selectFileByIndex: (index: number) => boolean
   isSelectedReady: () => boolean
+  getSelectedFileContent?: () => {
+    originalContent: string | null
+    modifiedContent: string | null
+    draftContent: string | null
+    isBinary: boolean
+    loading: boolean
+    error: string | null
+  } | null
+  getCachedFileContentByPath?: (path: string, changeType?: string) => {
+    filename: string
+    changeType: string
+    originalContent: string | null
+    modifiedContent: string | null
+    draftContent: string | null
+    isBinary: boolean
+    loading: boolean
+    error: string | null
+  } | null
+  getPrefetchState?: () => {
+    scheduled: number
+    completed: number
+    inFlight: boolean
+    candidates: string[]
+    lastReason: string
+    lastDurationMs: number | null
+  }
+  setSelectedDraftContent?: (content: string) => boolean
+  getIsDraftDirty?: () => boolean
   getRestoreNotice: () => { type: 'missing' | 'changed'; message: string; fileName?: string } | null
   getScrollTop: () => number
   getFirstVisibleLine: () => number
@@ -43,12 +74,29 @@ export interface GitDiffDebugApi {
     cwdReadyToDiffLoadedMs: number | null
   }
   getSplitViewState?: () => {
+    mode?: 'side-by-side' | 'inline'
     ratio: number | null
     originalWidth: number
     modifiedWidth: number
   } | null
+  getDiffNavigationState?: () => { changeCount: number; currentIndex: number }
+  getResponsiveLayoutState?: () => {
+    mode: 'side-by-side' | 'inline' | null
+    containerWidth: number | null
+    inlineBreakpoint: number
+    useInlineViewWhenSpaceIsLimited: boolean
+  }
   setSplitViewRatio?: (ratio: number) => boolean
+  setFileListWidth?: (width: number) => boolean
   dragSplitViewRatio?: (ratio: number) => Promise<boolean>
+  navigateDiffChange?: (direction: 'previous' | 'next') => boolean
+  refreshChanges?: () => Promise<boolean>
+  getTermsPopoverOpen?: () => boolean
+  toggleTermsPopover?: () => boolean
+  getHunkActionWidgetCount?: () => number
+  triggerFirstHunkAction?: (action: 'stage' | 'revert' | 'unstage') => Promise<boolean>
+  setSelectedLineRangeForTest?: (start: number, end: number, side?: 'additions' | 'deletions') => boolean
+  triggerLineAction?: (action: 'keep' | 'deny') => Promise<boolean>
   getImagePreviewState?: () => {
     isImage: boolean
     isSvg: boolean
@@ -65,6 +113,9 @@ export interface GitDiffDebugApi {
     keepDisabled: boolean
     denyDisabled: boolean
     pending: boolean
+    toolbarVisible?: boolean
+    actionPanelVisible?: boolean
+    visibleLabels?: string[]
   } | null
   triggerFileAction?: (action: 'keep' | 'deny') => Promise<boolean>
   getPdfCompareState?: () => {
@@ -107,6 +158,13 @@ export interface GitHistoryDebugApi {
   getSelectedShas: () => string[]
   getFiles: () => Array<{ filename: string; status: string }>
   getSelectedFile: () => { filename: string } | null
+  getSelectedFileContent?: () => {
+    originalContent: string | null
+    modifiedContent: string | null
+    isBinary: boolean
+    loading: boolean
+    error: string | null
+  } | null
   getImagePreviewState?: () => {
     isImage: boolean
     isSvg: boolean
@@ -162,6 +220,7 @@ export interface GitHistoryDebugApi {
   }) => boolean
   selectCommitByIndex: (index: number) => boolean
   selectFileByIndex: (index: number) => boolean
+  selectFileByPath?: (path: string) => boolean
   getDiffStyle: () => 'split' | 'unified'
   setDiffStyle: (style: 'split' | 'unified') => void
   getHideWhitespace: () => boolean
@@ -233,6 +292,15 @@ export interface ProjectEditorDebugApi {
   isOpen: () => boolean
   getRootPath: () => string | null
   getActiveFilePath: () => string | null
+  getDiffReturnBarState?: () => {
+    visible: boolean
+    backEnabled: boolean
+    jumpEnabled: boolean
+    checking: boolean
+    activeFilePath: string | null
+  }
+  triggerDiffReturnBack?: () => Promise<boolean>
+  triggerJumpToDiff?: () => Promise<boolean>
   getSidebarMode?: () => 'files' | 'search'
   setSidebarMode?: (mode: 'files' | 'search') => void
   getEditorContent: () => string

@@ -331,8 +331,10 @@ export interface AppStateAPI {
   onFlushPendingState: (callback: () => void | Promise<void>) => void
 }
 
-export type GitChangeType = 'unstaged' | 'staged' | 'untracked'
-export type GitStatusCode = 'M' | 'A' | 'D' | 'R' | 'C' | '?'
+export type GitChangeType = 'unstaged' | 'staged' | 'untracked' | 'conflict'
+export type GitResourceGroup = 'workingTree' | 'index' | 'untracked' | 'merge'
+export type GitResourceRef = 'HEAD' | 'index' | 'workingTree' | 'empty'
+export type GitStatusCode = 'M' | 'A' | 'D' | 'R' | 'C' | '?' | '!'
 
 export interface GitSubmoduleInfo {
   name: string
@@ -359,6 +361,9 @@ export interface GitFileStatus {
   additions: number
   deletions: number
   changeType: GitChangeType
+  resourceGroup: GitResourceGroup
+  originalRef: GitResourceRef | null
+  modifiedRef: GitResourceRef | null
   repoRoot?: string
   repoLabel?: string
   isSubmoduleEntry?: boolean
@@ -670,7 +675,35 @@ export interface GitAPI {
   // under a watched cwd debounces (180 ms window), or when a force=true
   // request lands. Use this to refetch an open Git Diff view rather than
   // polling. Returns an unsubscribe function.
-  onDiffCacheInvalidated: (callback: (cwd: string, reason: 'watcher' | 'force' | 'lru' | 'manual') => void) => () => void
+  onDiffCacheInvalidated: (callback: (cwd: string, reason: 'watcher' | 'force' | 'lru' | 'manual' | 'mirror') => void) => () => void
+
+  // ─── GitStateMirror (worker-thread mirror, pub/sub) ──────────────────
+  // Renderer code typically goes through `useGitStateMirror(cwd)` (commit 6)
+  // rather than calling these directly, but the raw surface is here so any
+  // consumer that doesn't fit the React hook pattern (debug API, autotest)
+  // can subscribe + listen explicitly.
+  /**
+   * Subscribe to mirror updates for `cwd`. The first await resolves to
+   * the current snapshot (or null if the mirror hasn't computed it yet).
+   * Subsequent state changes arrive via `onMirrorUpdate(cwd)`.
+   */
+  subscribeMirror: (cwd: string) => Promise<unknown | null>
+  unsubscribeMirror: (cwd: string) => void
+  /** Imperative one-shot read of the current snapshot (no subscription). */
+  getMirror: (cwd: string) => Promise<unknown | null>
+  /**
+   * Listen to mirror deltas. Returns an unsubscribe function. The callback
+   * receives `(cwd, delta)` where `delta` is a partial `MirrorState`.
+   */
+  onMirrorUpdate: (callback: (cwd: string, delta: unknown) => void) => () => void
+  /**
+   * Push a cwd-changed notification (e.g. parsed from an OSC 633 / 7
+   * sequence in the renderer's xterm.js). Fire-and-forget — the mirror
+   * router routes to the worker.
+   */
+  pushCwd: (terminalId: string, newCwd: string | null) => void
+  /** Request the diff body for a single file via the mirror's stat-token cache. */
+  requestFileBody: (cwd: string, fileKey: string, force: boolean) => Promise<unknown | null>
 }
 
 // Project Editor API
@@ -1382,14 +1415,45 @@ const gitAPI: GitAPI = {
     }
   },
 
-  onDiffCacheInvalidated: (callback: (cwd: string, reason: 'watcher' | 'force' | 'lru' | 'manual') => void) => {
-    const listener = (_: Electron.IpcRendererEvent, cwd: string, reason: 'watcher' | 'force' | 'lru' | 'manual') => {
+  onDiffCacheInvalidated: (callback: (cwd: string, reason: 'watcher' | 'force' | 'lru' | 'manual' | 'mirror') => void) => {
+    const listener = (_: Electron.IpcRendererEvent, cwd: string, reason: 'watcher' | 'force' | 'lru' | 'manual' | 'mirror') => {
       callback(cwd, reason)
     }
     ipcRenderer.on(IPC.GIT_DIFF_CACHE_INVALIDATED, listener)
     return () => {
       ipcRenderer.removeListener(IPC.GIT_DIFF_CACHE_INVALIDATED, listener)
     }
+  },
+
+  // ─── GitStateMirror bridges ──────────────────────────────────────────
+  subscribeMirror: (cwd: string) => {
+    return ipcRenderer.invoke(IPC.GIT_STATE_MIRROR_SUBSCRIBE, cwd)
+  },
+
+  unsubscribeMirror: (cwd: string) => {
+    ipcRenderer.send(IPC.GIT_STATE_MIRROR_UNSUBSCRIBE, cwd)
+  },
+
+  getMirror: (cwd: string) => {
+    return ipcRenderer.invoke(IPC.GIT_STATE_MIRROR_GET, cwd)
+  },
+
+  onMirrorUpdate: (callback: (cwd: string, delta: unknown) => void) => {
+    const listener = (_: Electron.IpcRendererEvent, cwd: string, delta: unknown) => {
+      callback(cwd, delta)
+    }
+    ipcRenderer.on(IPC.GIT_STATE_MIRROR_UPDATE, listener)
+    return () => {
+      ipcRenderer.removeListener(IPC.GIT_STATE_MIRROR_UPDATE, listener)
+    }
+  },
+
+  pushCwd: (terminalId: string, newCwd: string | null) => {
+    ipcRenderer.send(IPC.GIT_STATE_PUSH_CWD, terminalId, newCwd)
+  },
+
+  requestFileBody: (cwd: string, fileKey: string, force: boolean) => {
+    return ipcRenderer.invoke(IPC.GIT_STATE_MIRROR_REQUEST_FILE_BODY, cwd, fileKey, force)
   }
 }
 

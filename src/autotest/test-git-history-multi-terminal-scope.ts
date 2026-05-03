@@ -41,6 +41,10 @@ function dispatchEscape(): void {
   }))
 }
 
+function normalizeText(value: string | null | undefined): string {
+  return (value ?? '').replace(/\r\n/g, '\n')
+}
+
 async function resolveTerminalShellKind(terminalId: string): Promise<TerminalShellKind | undefined> {
   try {
     return (await window.electronAPI.terminal.getInputCapabilities(terminalId)).shellKind
@@ -128,7 +132,13 @@ export async function testGitHistoryMultiTerminalScope(ctx: AutotestContext): Pr
       'git init | Out-Null',
       'Set-Content -LiteralPath "README.md" -Value "fixture"',
       'git add README.md',
-      'git -c user.name="Onward AutoTest" -c user.email="autotest@example.com" commit -m "fixture" | Out-Null'
+      'git -c user.name="Onward AutoTest" -c user.email="autotest@example.com" commit -m "fixture" | Out-Null',
+      'Set-Content -LiteralPath "history-vscode.txt" -Value "history base"',
+      'git add history-vscode.txt',
+      'git -c user.name="Onward AutoTest" -c user.email="autotest@example.com" commit -m "history base" | Out-Null',
+      'Set-Content -LiteralPath "history-vscode.txt" -Value "history head"',
+      'git add history-vscode.txt',
+      'git -c user.name="Onward AutoTest" -c user.email="autotest@example.com" commit -m "history head" | Out-Null'
     ].join('; ') + "\r"
     : [
       `rm -rf "${fixtureShellPath}"`,
@@ -137,7 +147,13 @@ export async function testGitHistoryMultiTerminalScope(ctx: AutotestContext): Pr
       'git init >/dev/null 2>&1',
       'printf "fixture\\n" > README.md',
       'git add README.md',
-      'git -c user.name="Onward AutoTest" -c user.email="autotest@example.com" commit -m "fixture" >/dev/null 2>&1'
+      'git -c user.name="Onward AutoTest" -c user.email="autotest@example.com" commit -m "fixture" >/dev/null 2>&1',
+      'printf "history base\\n" > history-vscode.txt',
+      'git add history-vscode.txt',
+      'git -c user.name="Onward AutoTest" -c user.email="autotest@example.com" commit -m "history base" >/dev/null 2>&1',
+      'printf "history head\\n" > history-vscode.txt',
+      'git add history-vscode.txt',
+      'git -c user.name="Onward AutoTest" -c user.email="autotest@example.com" commit -m "history head" >/dev/null 2>&1'
     ].join(' && ') + "\r"
   const shellKindA = await resolveTerminalShellKind(terminalA)
   const rootCommand = buildChangeDirectoryCommand(platform, rootShellPath, shellKindA)
@@ -241,13 +257,85 @@ export async function testGitHistoryMultiTerminalScope(ctx: AutotestContext): Pr
     finalState
   })
 
+  const headCommitIndex = getHistoryApi()?.getCommits?.().findIndex((commit) => commit.summary === 'history head') ?? -1
+  const selectedHeadCommit = headCommitIndex >= 0 && (getHistoryApi()?.selectCommitByIndex(headCommitIndex) ?? false)
+  const historyFileListed = selectedHeadCommit && await waitFor(
+    'phase3.5-history-head-file-listed',
+    () => Boolean(getHistoryApi()?.getFiles().some((file) => file.filename === 'history-vscode.txt' && file.status === 'M')),
+    10000
+  )
+  const selectedHistoryFile = historyFileListed && (getHistoryApi()?.selectFileByPath?.('history-vscode.txt') ?? false)
+  const historyFileContentReady = selectedHistoryFile && await waitFor(
+    'phase3.5-history-head-file-content',
+    () => normalizeText(getHistoryApi()?.getSelectedFileContent?.()?.modifiedContent) === 'history head\n',
+    10000
+  )
+  const selectedContent = getHistoryApi()?.getSelectedFileContent?.() ?? null
+  _assert('GHMS-11-vscode-history-provider-file-change-list', Boolean(
+    selectedHeadCommit &&
+    historyFileListed &&
+    selectedHistoryFile
+  ), {
+    headCommitIndex,
+    selectedHeadCommit,
+    files: getHistoryApi()?.getFiles() ?? []
+  })
+  _assert('GHMS-12-vscode-history-parent-to-commit-content', Boolean(
+    historyFileContentReady &&
+    normalizeText(selectedContent?.originalContent) === 'history base\n' &&
+    normalizeText(selectedContent?.modifiedContent) === 'history head\n'
+  ), {
+    selectedContent,
+    expectedOriginal: 'history base\\n',
+    expectedModified: 'history head\\n'
+  })
+
+  const selectedShaBeforeRestore = getHistoryApi()?.getSelectedShas?.()[0] ?? null
+  getHistoryApi()?.setDiffStyle('unified')
+  getHistoryApi()?.setHideWhitespace(true)
+  await sleep(500)
+  dispatchEscape()
+  const closedForRestore = await waitFor(
+    'phase3.5-history-close-for-restore',
+    () => !getHistoryApi() || !getHistoryApi()!.isOpen(),
+    4000
+  )
+  window.dispatchEvent(new CustomEvent('git-history:open', { detail: { terminalId: terminalB } }))
+  const reopenedForRestore = await waitFor(
+    'phase3.5-history-reopen-for-restore',
+    () => Boolean(getHistoryApi()?.isOpen() && !getHistoryApi()?.isLoading()),
+    12000
+  )
+  const restoredSelection = reopenedForRestore && await waitFor(
+    'phase3.5-history-selection-restored',
+    () => {
+      const api = getHistoryApi()
+      return api?.getSelectedShas?.()[0] === selectedShaBeforeRestore &&
+        api?.getSelectedFile?.()?.filename === 'history-vscode.txt'
+    },
+    12000
+  )
+  _assert('GHMS-13-vscode-history-view-state-restored', Boolean(
+    closedForRestore &&
+    reopenedForRestore &&
+    restoredSelection &&
+    getHistoryApi()?.getDiffStyle() === 'unified' &&
+    getHistoryApi()?.getHideWhitespace() === true
+  ), {
+    selectedShaBeforeRestore,
+    selectedShasAfterRestore: getHistoryApi()?.getSelectedShas?.() ?? [],
+    selectedFileAfterRestore: getHistoryApi()?.getSelectedFile?.() ?? null,
+    diffStyle: getHistoryApi()?.getDiffStyle?.() ?? null,
+    hideWhitespace: getHistoryApi()?.getHideWhitespace?.() ?? null
+  })
+
   dispatchEscape()
   const closed = await waitFor(
     'phase3.5-history-close',
     () => !getHistoryApi() || !getHistoryApi()!.isOpen(),
     4000
   )
-  _assert('GHMS-11-esc-close-history', closed, { closed })
+  _assert('GHMS-14-esc-close-history', closed, { closed })
   await sleep(300)
 
   log('phase3.5:done', {

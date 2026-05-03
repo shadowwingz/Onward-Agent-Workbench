@@ -7,6 +7,7 @@ import { Terminal as XTerm } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { SearchAddon } from '@xterm/addon-search'
+import { installOscCwdAddon } from '../components/Terminal/oscCwdAddon'
 import { getTheme, ThemeName } from '../themes/terminal-themes'
 import type { TerminalStyleConfig } from '../types/settings.d.ts'
 import type { TerminalBufferOptions, TerminalBufferResult } from '../types/electron.d.ts'
@@ -702,6 +703,34 @@ export class TerminalSessionManager {
     terminal.loadAddon(webLinksAddon)
     terminal.loadAddon(searchAddon)
 
+    // GitStateMirror cwd push: parse OSC 7 / 633 / 1337 / 9 from PTY data
+    // and notify both the worker (so it can switch its watcher root) AND
+    // the renderer-side TerminalGrid (so the chip immediately reflects the
+    // new cwd without waiting for a fanout round-trip). The IDisposable
+    // returned by `installOscCwdAddon` is tied to the parser; xterm.js
+    // tears down all parser handlers in `terminal.dispose()` so explicit
+    // cleanup here would only matter if we wanted to swap the addon mid-
+    // session, which we don't.
+    installOscCwdAddon(terminal, {
+      terminalId: id,
+      pushCwd: (terminalId, cwd) => {
+        try {
+          (window as unknown as { electronAPI?: { git?: { pushCwd?: (id: string, cwd: string | null) => void } } })
+            .electronAPI?.git?.pushCwd?.(terminalId, cwd)
+        } catch { /* ignore */ }
+        // Local synchronous notification — TerminalGrid listens on
+        // 'onward:terminal-cwd-detected' so the chip's branch + colour can
+        // clear-then-fill in the gap before the mirror fanout lands. This
+        // is the renderer-side analogue of `pushCwd` but stays in the
+        // single renderer process via a CustomEvent rather than IPC.
+        try {
+          window.dispatchEvent(new CustomEvent('onward:terminal-cwd-detected', {
+            detail: { terminalId, cwd }
+          }))
+        } catch { /* ignore */ }
+      }
+    })
+
     // Windows / Linux: Ctrl+C copies selected text, otherwise sends interrupt;
     // Ctrl+V pastes from clipboard. On macOS these shortcuts are handled by
     // Cmd+C / Cmd+V natively, so we leave Ctrl+C as pure SIGINT.
@@ -1277,7 +1306,12 @@ export class TerminalSessionManager {
 
     session.readyPromise = (async () => {
       const { cols, rows } = this.getCreateSize(session)
-      const result = await window.electronAPI.terminal.create(id, { cols, rows })
+      const createOptions: { cols: number; rows: number; cwd?: string } = { cols, rows }
+      const autotestCwd = window.electronAPI.debug?.autotest
+        ? window.electronAPI.debug.autotestCwd?.trim()
+        : null
+      if (autotestCwd) createOptions.cwd = autotestCwd
+      const result = await window.electronAPI.terminal.create(id, createOptions)
 
       if (session.status === 'disposed') {
         window.electronAPI.terminal.dispose(id)

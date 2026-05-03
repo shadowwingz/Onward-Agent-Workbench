@@ -23,7 +23,9 @@ APP_BIN="${1:?usage: $0 <APP_BIN> [LOG_FILE]}"
 LOG_FILE="${2:-$REPO_ROOT/traces/test-logs/trace-infra-self-check-autotest.log}"
 TRACE_DIR="$REPO_ROOT/traces/perf"
 USER_DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/onward-tracechk.XXXXXX")"
+TRACECHK_CWD="$USER_DATA_DIR/workspace"
 mkdir -p "$(dirname "$LOG_FILE")" "$TRACE_DIR"
+mkdir -p "$TRACECHK_CWD"
 
 # Cleanup shield — even on SIGINT the user's mktemp scratch is removed.
 cleanup() {
@@ -49,6 +51,7 @@ ONWARD_AUTOTEST=1 \
   ONWARD_PERF_TRACE=1 \
   ONWARD_REPO_ROOT="$REPO_ROOT" \
   ONWARD_USER_DATA_DIR="$USER_DATA_DIR" \
+  ONWARD_AUTOTEST_CWD="$TRACECHK_CWD" \
   "$APP_BIN" > "$LOG_FILE" 2>&1 &
 APP_PID=$!
 

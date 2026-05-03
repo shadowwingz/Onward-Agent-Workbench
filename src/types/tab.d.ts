@@ -225,6 +225,7 @@ export interface UIPreferences {
   projectEditorOutlineTarget?: 'editor' | 'preview'
   // Git Diff Viewer
   gitDiffFileListWidth?: number
+  gitDiffFileListViewMode?: 'tree' | 'flat'
   gitDiffModalSize?: { width: number; height: number }
   gitDiffSplitViewRatio?: number
   gitDiffImageDisplayMode?: string

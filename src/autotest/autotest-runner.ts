@@ -29,6 +29,7 @@ import { testGitDiffSubdir } from './test-git-diff-subdir'
 import { testGitDiffSubmodules } from './test-git-diff-submodules'
 import { testGitDiffRecursiveSubmodules } from './test-git-diff-recursive-submodules'
 import { testGitDiffStalenessAndSubmodule } from './test-git-diff-staleness-and-submodule'
+import { testGitStateMirrorLatency } from './test-git-state-mirror-latency'
 import { testGitNestedSubmodules } from './test-git-nested-submodules'
 import { testGitCrossPlatform } from './test-git-cross-platform'
 import { testProjectEditorMultiTerminalScope } from './test-project-editor-multi-terminal-scope'
@@ -522,6 +523,16 @@ export async function runAllTests(ctx: AutotestContext): Promise<void> {
       const results = await testGitDiffStalenessAndSubmodule(ctx)
       collectSuiteResults('GitDiffStalenessAndSubmodule', results)
       await ctx.reopenProjectEditor('phase5.49-cleanup')
+      await sleep(500)
+    }
+
+    if (!ctx.cancelled() && shouldRun('git-state-mirror-latency')) {
+      log('phase5.495:begin')
+      await ctx.reopenProjectEditor('phase5.495-setup')
+      await sleep(300)
+      const results = await testGitStateMirrorLatency(ctx)
+      collectSuiteResults('GitStateMirrorLatency', results)
+      await ctx.reopenProjectEditor('phase5.495-cleanup')
       await sleep(500)
     }
 

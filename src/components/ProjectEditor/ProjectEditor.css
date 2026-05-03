@@ -435,6 +435,54 @@
   min-width: 0;
 }
 
+.project-editor-diff-return-bar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-1);
+  flex-shrink: 0;
+}
+
+.project-editor-diff-return-button {
+  appearance: none;
+  -webkit-appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--font-sm);
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.project-editor-diff-return-button:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--text-1);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.project-editor-diff-return-button.primary {
+  color: color-mix(in srgb, var(--accent) 90%, white);
+  border-color: color-mix(in srgb, var(--accent) 34%, transparent);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.project-editor-diff-return-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .project-editor-tree-loading {
   margin-left: auto;
   font-size: var(--font-xs);

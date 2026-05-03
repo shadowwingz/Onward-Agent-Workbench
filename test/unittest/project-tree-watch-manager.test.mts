@@ -17,7 +17,7 @@ import { mkdtempSync, writeFileSync, unlinkSync, rmSync, mkdirSync, renameSync }
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { ProjectTreeWatchManager } from '../electron/main/project-tree-watch-manager.ts'
+import { ProjectTreeWatchManager } from '../../electron/main/project-tree-watch-manager.ts'
 
 interface CapturedEvent {
   channel: string
