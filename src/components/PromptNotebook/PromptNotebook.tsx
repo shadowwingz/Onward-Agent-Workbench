@@ -245,6 +245,7 @@ export const PromptNotebook = memo(function PromptNotebook({
   // does not need editorContent / editorTitle in its dependency array.
   const editorContentRef = useRef(editorContent)
   const editorTitleRef = useRef(editorTitle)
+  const lastEditorSendToTaskRef = useRef<{ content: string; terminalId: string } | null>(null)
   editorContentRef.current = editorContent
   editorTitleRef.current = editorTitle
   const [clearEditorTrigger, setClearEditorTrigger] = useState(0)
@@ -414,6 +415,7 @@ export const PromptNotebook = memo(function PromptNotebook({
         taskNumbers: promptTaskHistory.promptTaskNumbers.get(p.id) ?? []
       })),
       getSelectedPromptId: () => selectedId,
+      getLastEditorSendToTask: () => lastEditorSendToTaskRef.current,
       selectPrompt: (promptId: string) => {
         if (!prompts.some(prompt => prompt.id === promptId)) return false
         setSelectedId(promptId)
@@ -613,19 +615,24 @@ export const PromptNotebook = memo(function PromptNotebook({
   ])
 
   // Get the content to be sent: use the editor content first, otherwise use the selected Prompt content
-  const contentToSend = useMemo(() => {
-    return editorContent.trim() || selectedPrompt?.content || ''
-  }, [editorContent, selectedPrompt])
-
-  const hasEditorContent = useMemo(() => {
-    return !!editorContent.trim()
+  const editorContentForSend = useMemo(() => {
+    return transformVirtualPaddingForSend(editorContent)
   }, [editorContent])
 
+  const contentToSend = useMemo(() => {
+    return editorContentForSend || selectedPrompt?.content || ''
+  }, [editorContentForSend, selectedPrompt])
+
+  const hasEditorContent = useMemo(() => {
+    return !!editorContentForSend
+  }, [editorContentForSend])
+
   const saveEditorContentAsNewPrompt = useCallback((color?: Prompt['color'], sendRecords?: PromptSendRecord[]) => {
-    if (!editorContent.trim()) return
+    const sendContent = transformVirtualPaddingForSend(editorContent)
+    if (!sendContent) return
     onAddPrompt({
       title: editorTitle.trim(),
-      content: editorContent.trim(),
+      content: sendContent,
       pinned: false,
       color: color ?? undefined,
       sendHistory: sendRecords
@@ -1073,7 +1080,10 @@ export const PromptNotebook = memo(function PromptNotebook({
   // Right-click "Send to Task" from inside the editor (not a saved Prompt).
   // The plain text path; does not annotate any Prompt's sendHistory.
   const handleSendEditorToTask = useCallback((content: string, terminalId: string) => {
-    void handleSendAndExecute([terminalId], content)
+    const sendContent = transformVirtualPaddingForSend(content)
+    if (!sendContent) return
+    lastEditorSendToTaskRef.current = { content: sendContent, terminalId }
+    void handleSendAndExecute([terminalId], sendContent)
   }, [handleSendAndExecute])
 
   // Pinned prompt list (sorted by lastUsed desc) feeds the menu's "Import
@@ -1893,6 +1903,8 @@ const PromptEditorWithAppend = memo(function PromptEditorWithAppend({
   // happen first.
   const handleCanvasMouseDown = useCallback((e: React.MouseEvent<HTMLTextAreaElement>) => {
     if (VIRTUAL_CURSOR_DISABLED) return
+    if (e.button !== 0) return
+    if (e.shiftKey || e.altKey || e.ctrlKey || e.metaKey) return
     // Per-tab user preference: when the dropdown selects 'line', treat the
     // textarea as a plain native input — no virtual-cursor padding.
     if (promptInputMode === 'line') return
@@ -1906,6 +1918,7 @@ const PromptEditorWithAppend = memo(function PromptEditorWithAppend({
     const measureStartedAt = startedAt
     const wasMetricsCached = metricsRef.current !== null
     const m = metricsRef.current ?? (metricsRef.current = measureCellMetrics(ta))
+    if (m.cw <= 0 || m.lh <= 0) return
     const measureMs = performance.now() - measureStartedAt
     const rect = ta.getBoundingClientRect()
     const x = e.clientX - rect.left - m.padL + ta.scrollLeft

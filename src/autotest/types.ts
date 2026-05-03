@@ -87,6 +87,7 @@ export interface GitDiffDebugApi {
 
 export interface PromptSenderDebugApi {
   getTerminalCards: () => Array<{ id: string; title: string; isSelected: boolean }>
+  getPromptContent: () => string
   getSelectedCount: () => number
   getSelectionIndicatorStates: () => Array<{ id: string; isActive: boolean }>
   getSelectedTerminalIds: () => string[]
@@ -188,9 +189,10 @@ export interface ScheduleDebugInfo {
 
 export interface PromptNotebookDebugApi {
   getPromptCount: () => number
-  getPrompts: () => Array<{ id: string; title: string; pinned: boolean; color?: string; lastUsedAt: number; taskNumbers: number[] }>
+  getPrompts: () => Array<{ id: string; title: string; content: string; pinned: boolean; color?: string; lastUsedAt: number; taskNumbers: number[] }>
   getVisiblePromptItems?: () => Array<{ id: string; title: string; color?: string; taskNumbers: number[] }>
   getSelectedPromptId?: () => string | null
+  getLastEditorSendToTask?: () => { content: string; terminalId: string } | null
   selectPrompt?: (promptId: string) => boolean
   setPromptColor?: (promptId: string, color: 'red' | 'yellow' | 'green' | null) => boolean
   copyPrompt?: (promptId: string) => Promise<boolean>

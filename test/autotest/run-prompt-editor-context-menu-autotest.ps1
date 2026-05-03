@@ -65,7 +65,7 @@ if ($logContent -match "\[AutoTest\] FAIL") {
   exit 1
 }
 
-if ($logContent -notmatch "PECM-16-undo-restores-prior-state") {
+if ($logContent -notmatch "PECM-34-context-send-to-task-transform") {
   Write-Error "Prompt editor context-menu autotest did not complete. Log: $LogFile"
   Get-Content $LogFile -Tail 200
   exit 1

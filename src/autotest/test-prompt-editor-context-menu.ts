@@ -26,13 +26,23 @@ export async function testPromptEditorContextMenu(ctx: AutotestContext): Promise
       getPrompts: () => Array<{ id: string; title: string; content: string; pinned: boolean }>
       setEditorContent: (content: string) => void
       getEditorContent: () => string
+      getLastEditorSendToTask?: () => { content: string; terminalId: string } | null
     }
   }).__onwardPromptNotebookDebug
   const senderApi = () => (window as unknown as {
     __onwardPromptSenderDebug?: {
       getTerminalCards: () => Array<{ id: string; title: string }>
+      getPromptContent?: () => string
+      selectTerminal?: (id: string) => boolean
+      deselectAllTerminals?: () => void
+      clickAction?: (action: 'sendAndExecute' | 'execute' | 'send' | 'sendAllAndExecute') => Promise<boolean>
     }
   }).__onwardPromptSenderDebug
+  const terminalApi = () => (window as unknown as {
+    __onwardTerminalDebug?: {
+      getTailText: (terminalId?: string, lastLines?: number) => string | null
+    }
+  }).__onwardTerminalDebug
 
   const apisReady = await waitFor('pecm-apis', () => Boolean(notebookApi() && senderApi()), 8000, 120)
   if (!apisReady) {
@@ -103,14 +113,21 @@ export async function testPromptEditorContextMenu(ctx: AutotestContext): Promise
     if (!ta) return null
     ta.focus()
     const rect = ta.getBoundingClientRect()
-    ta.dispatchEvent(new MouseEvent('contextmenu', {
-      bubbles: true,
-      cancelable: true,
-      button: 2,
-      clientX: rect.left + 10,
-      clientY: rect.top + 10
-    }))
-    const ready = await waitFor('pecm-menu-open', () => findMenu() !== null, 2500, 40)
+    const dispatch = () => {
+      ta.dispatchEvent(new MouseEvent('contextmenu', {
+        bubbles: true,
+        cancelable: true,
+        button: 2,
+        clientX: rect.left + 10,
+        clientY: rect.top + 10
+      }))
+    }
+    dispatch()
+    const ready = await waitFor('pecm-menu-open', () => {
+      if (findMenu() !== null) return true
+      dispatch()
+      return false
+    }, 2500, 40)
     if (!ready) return null
     return findMenu()
   }
@@ -135,14 +152,28 @@ export async function testPromptEditorContextMenu(ctx: AutotestContext): Promise
       // setSelectionRange can throw on Firefox/detached nodes; ignore.
     }
     const rect = ta.getBoundingClientRect()
-    ta.dispatchEvent(new MouseEvent('contextmenu', {
-      bubbles: true,
-      cancelable: true,
-      button: 2,
-      clientX: rect.left + 10,
-      clientY: rect.top + 10
-    }))
-    const ready = await waitFor('pecm-menu-open', () => findMenu() !== null, 2500, 40)
+    const dispatch = () => {
+      valueSetter?.call(ta, text)
+      ta.dispatchEvent(new Event('input', { bubbles: true }))
+      try {
+        ta.setSelectionRange(cursorStart, cursorEnd)
+      } catch {
+        // Best effort.
+      }
+      ta.dispatchEvent(new MouseEvent('contextmenu', {
+        bubbles: true,
+        cancelable: true,
+        button: 2,
+        clientX: rect.left + 10,
+        clientY: rect.top + 10
+      }))
+    }
+    dispatch()
+    const ready = await waitFor('pecm-menu-open', () => {
+      if (findMenu() !== null) return true
+      dispatch()
+      return false
+    }, 2500, 40)
     if (!ready) return null
     return findMenu()
   }
@@ -408,19 +439,74 @@ export async function testPromptEditorContextMenu(ctx: AutotestContext): Promise
       padT: parseFloat(cs.paddingTop) || 0
     }
   }
-  const virtualClickAt = (row: number, col: number, mods?: { shift?: boolean }): boolean => {
+  const mousePointFor = (row: number, col: number) => {
     const ta = findTextarea()
     const m = measureCell()
     if (!ta || !m) return false
     const rect = ta.getBoundingClientRect()
-    const clientX = rect.left + m.padL + col * m.cw + m.cw * 0.05
-    const clientY = rect.top + m.padT + row * m.lh + m.lh * 0.05
+    return {
+      clientX: rect.left + m.padL + col * m.cw + m.cw * 0.05,
+      clientY: rect.top + m.padT + row * m.lh + m.lh * 0.05,
+      metrics: m
+    }
+  }
+  const buildExpectedVirtualClick = (value: string, row: number, col: number) => {
+    const lines = value.split('\n')
+    while (lines.length <= row) lines.push('')
+    const line = lines[row]
+    if (line.length < col) {
+      lines[row] = line + ' '.repeat(col - line.length)
+    }
+    return {
+      value: lines.join('\n'),
+      pos: lines.slice(0, row).reduce((n, l) => n + l.length + 1, 0) + lines[row].length
+    }
+  }
+  const getSelectionState = () => {
+    const ta = findTextarea()
+    return {
+      start: ta?.selectionStart ?? -1,
+      end: ta?.selectionEnd ?? -1
+    }
+  }
+  const virtualClickAt = (row: number, col: number, mods?: { shift?: boolean; alt?: boolean; ctrl?: boolean; meta?: boolean }): boolean => {
+    const ta = findTextarea()
+    const point = mousePointFor(row, col)
+    if (!ta || !point) return false
     ta.focus()
     ta.dispatchEvent(new MouseEvent('mousedown', {
-      bubbles: true, cancelable: true, button: 0, clientX, clientY,
-      shiftKey: Boolean(mods?.shift)
+      bubbles: true,
+      cancelable: true,
+      button: 0,
+      clientX: point.clientX,
+      clientY: point.clientY,
+      shiftKey: Boolean(mods?.shift),
+      altKey: Boolean(mods?.alt),
+      ctrlKey: Boolean(mods?.ctrl),
+      metaKey: Boolean(mods?.meta)
     }))
     return true
+  }
+  const realRightClickAt = async (row: number, col: number): Promise<boolean> => {
+    const ta = findTextarea()
+    const point = mousePointFor(row, col)
+    if (!ta || !point) return false
+    ta.focus()
+    ta.dispatchEvent(new MouseEvent('mousedown', {
+      bubbles: true,
+      cancelable: true,
+      button: 2,
+      clientX: point.clientX,
+      clientY: point.clientY
+    }))
+    ta.dispatchEvent(new MouseEvent('contextmenu', {
+      bubbles: true,
+      cancelable: true,
+      button: 2,
+      clientX: point.clientX,
+      clientY: point.clientY
+    }))
+    return waitFor('pecm-real-right-click-menu', () => findMenu() !== null, 2500, 40)
   }
 
   // ─────────── PECM-16: Undo restores prior state from menu mutation ───────────
@@ -684,6 +770,154 @@ export async function testPromptEditorContextMenu(ctx: AutotestContext): Promise
     found: Boolean(submitted27)
   })
   // Restore the default Canvas mode so subsequent suites start from a clean state.
+  await clickModeOption('canvas')
+  await waitForMode('canvas')
+
+  // ─────────── PECM-28: real right-click sequence does not trigger virtual padding ───────────
+  // A physical right-click sends mousedown(button=2) before contextmenu. The
+  // virtual-cursor handler must ignore that prelude; otherwise merely opening
+  // the menu past EOF mutates the editor and pushes a bogus undo entry.
+  await setText('')
+  const rightMenuOpened28 = await realRightClickAt(2, 4)
+  await sleep(60)
+  const afterRightClick28 = getContent()
+  record('PECM-28-real-right-click-does-not-pad', rightMenuOpened28 && afterRightClick28 === '', {
+    menuOpened: rightMenuOpened28,
+    actual: JSON.stringify(afterRightClick28)
+  })
+  await closeMenu()
+
+  // ─────────── PECM-29: modified left-clicks keep native textarea semantics ───────────
+  // Shift/Alt/Ctrl/Meta clicks are selection/navigation gestures, not virtual
+  // insertion requests. They must not create padding.
+  await setText('')
+  const modifiedClick29 = virtualClickAt(2, 4, { shift: true })
+  await sleep(60)
+  const afterModifiedClick29 = getContent()
+  record('PECM-29-modified-left-click-does-not-pad', modifiedClick29 && afterModifiedClick29 === '', {
+    clicked: modifiedClick29,
+    actual: JSON.stringify(afterModifiedClick29)
+  })
+
+  // ─────────── PECM-30: virtual click sets caret and selection exactly ───────────
+  await setText('')
+  const expected30 = buildExpectedVirtualClick('', 3, 6)
+  virtualClickAt(3, 6)
+  await waitFor('pecm-30-caret', () => {
+    const s = getSelectionState()
+    return getContent() === expected30.value && s.start === expected30.pos && s.end === expected30.pos
+  }, 2000, 40)
+  const selection30 = getSelectionState()
+  record('PECM-30-virtual-click-caret-selection', getContent() === expected30.value && selection30.start === expected30.pos && selection30.end === expected30.pos, {
+    actual: JSON.stringify(getContent()),
+    expected: JSON.stringify(expected30.value),
+    selection: selection30,
+    expectedPos: expected30.pos
+  })
+
+  // ─────────── PECM-31: repeated virtual clicks are stable as a group ───────────
+  // Timing-sensitive path: repeat inside the test and assert every trial. This
+  // catches stale controlled-textarea commits and history/rAF races that a
+  // single click cannot expose.
+  await setText('')
+  const repeatedTargets31 = [
+    { row: 0, col: 3 },
+    { row: 1, col: 2 },
+    { row: 1, col: 5 },
+    { row: 3, col: 1 },
+    { row: 2, col: 4 }
+  ]
+  const repeatedDetails31: Array<Record<string, unknown>> = []
+  let repeatedAll31 = true
+  for (const target of repeatedTargets31) {
+    const expected = buildExpectedVirtualClick(getContent(), target.row, target.col)
+    virtualClickAt(target.row, target.col)
+    const ok = await waitFor(`pecm-31-repeat-${target.row}-${target.col}`, () => {
+      const s = getSelectionState()
+      return getContent() === expected.value && s.start === expected.pos && s.end === expected.pos
+    }, 2000, 40)
+    const s = getSelectionState()
+    repeatedDetails31.push({
+      target,
+      ok,
+      value: JSON.stringify(getContent()),
+      expected: JSON.stringify(expected.value),
+      selection: s,
+      expectedPos: expected.pos
+    })
+    repeatedAll31 = repeatedAll31 && ok
+  }
+  record('PECM-31-repeated-virtual-clicks-stable', repeatedAll31, {
+    trials: repeatedDetails31
+  })
+
+  // ─────────── PECM-32: scroll offset is included in row calculation ───────────
+  const scrollRows32 = Array.from({ length: 40 }, (_, i) => `row${i}`)
+  await setText(scrollRows32.join('\n'))
+  const ta32 = findTextarea()
+  const m32 = measureCell()
+  let scrollPass32 = false
+  let scrollDetail32: Record<string, unknown> = { reason: 'textarea or metrics unavailable' }
+  if (ta32 && m32) {
+    ta32.scrollTop = Math.round(m32.lh * 20)
+    const targetRow32 = Math.max(0, Math.floor((2 * m32.lh + ta32.scrollTop) / m32.lh))
+    const expected32 = buildExpectedVirtualClick(getContent(), targetRow32, 8)
+    virtualClickAt(2, 8)
+    await waitFor('pecm-32-scroll-offset', () => {
+      const s = getSelectionState()
+      return getContent() === expected32.value && s.start === expected32.pos && s.end === expected32.pos
+    }, 2000, 40)
+    const s = getSelectionState()
+    scrollPass32 = getContent() === expected32.value && s.start === expected32.pos && s.end === expected32.pos
+    scrollDetail32 = {
+      scrollTop: ta32.scrollTop,
+      targetRow: targetRow32,
+      line: getContent().split('\n')[targetRow32],
+      selection: s,
+      expectedPos: expected32.pos
+    }
+  }
+  record('PECM-32-scroll-offset-virtual-click', scrollPass32, scrollDetail32)
+
+  // ─────────── PECM-33: PromptSender receives stripped editor content ───────────
+  const senderMarker33 = `sender-preview-${Date.now()}`
+  await setText(`${senderMarker33}\n\n   `)
+  const senderPreviewReady33 = await waitFor('pecm-33-sender-preview', () => {
+    return senderApi()?.getPromptContent?.() === senderMarker33
+  }, 4000, 80)
+  record('PECM-33-prompt-sender-content-transform', senderPreviewReady33 && senderApi()?.getPromptContent?.() === senderMarker33, {
+    actual: JSON.stringify(senderApi()?.getPromptContent?.() ?? null),
+    expected: JSON.stringify(senderMarker33)
+  })
+
+  // ─────────── PECM-34: context-menu Send-to-Task sends the stripped snapshot ───────────
+  await setText('')
+  const ctxMarker34 = `ctx-send-${Date.now()}`
+  await setText(`${ctxMarker34}\n\n   `)
+  menu = await openMenu()
+  const targetTerminal34 = cards[0]?.id ?? null
+  const sendTrigger34 = menu?.querySelector('[data-testid="pecm-send-to-task"]') as HTMLElement | null
+  sendTrigger34?.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true, cancelable: true }))
+  sendTrigger34?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+  await waitFor('pecm-34-submenu', () => {
+    return document.querySelector('[data-testid="pecm-send-to-task-submenu"]') !== null
+  }, 1500, 40)
+  const submenu34 = document.querySelector('[data-testid="pecm-send-to-task-submenu"]') as HTMLElement | null
+  const firstTask34 = submenu34?.querySelector('[role="menuitem"]') as HTMLButtonElement | null
+  firstTask34?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+  await waitFor('pecm-34-send-debug', () => {
+    return notebookApi()?.getLastEditorSendToTask?.()?.content === ctxMarker34
+  }, 3000, 80).catch(() => false)
+  const tail34 = targetTerminal34 ? terminalApi()?.getTailText(targetTerminal34, 40) ?? '' : ''
+  const sentDebug34 = notebookApi()?.getLastEditorSendToTask?.() ?? null
+  record('PECM-34-context-send-to-task-transform', sentDebug34?.content === ctxMarker34 && sentDebug34.terminalId === targetTerminal34, {
+    sentDebug: sentDebug34,
+    expectedContent: ctxMarker34,
+    expectedTerminalId: targetTerminal34,
+    tailHasMarker: tail34.includes(ctxMarker34)
+  })
+
+  // Restore the default Canvas mode and empty editor so subsequent suites start clean.
   await clickModeOption('canvas')
   await waitForMode('canvas')
   await setText('')

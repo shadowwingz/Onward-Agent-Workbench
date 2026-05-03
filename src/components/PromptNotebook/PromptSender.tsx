@@ -41,6 +41,7 @@ export const PromptSender = memo(function PromptSender({
   const submittingRef = useRef(false)
   // Keep debug automation on the latest state without recreating the API object.
   const terminalsRef = useRef(terminals)
+  const promptContentRef = useRef(promptContent)
   const selectedTerminalsRef = useRef(selectedTerminals)
   const selectionNoticeRef = useRef(selectionNotice)
   const isSubmittingRef = useRef(isSubmitting)
@@ -54,6 +55,7 @@ export const PromptSender = memo(function PromptSender({
   const selectedCount = selectedTerminals.size
 
   terminalsRef.current = terminals
+  promptContentRef.current = promptContent
   selectedTerminalsRef.current = selectedTerminals
   selectionNoticeRef.current = selectionNotice
   isSubmittingRef.current = isSubmitting
@@ -280,6 +282,7 @@ export const PromptSender = memo(function PromptSender({
         title: t.title || `Task`,
         isSelected: selectedTerminalsRef.current.has(t.id)
       })),
+      getPromptContent: () => promptContentRef.current,
       getSelectedCount: () => selectedTerminalsRef.current.size,
       getSelectionIndicatorStates: () => terminalsRef.current.map((terminal) => ({
         id: terminal.id,

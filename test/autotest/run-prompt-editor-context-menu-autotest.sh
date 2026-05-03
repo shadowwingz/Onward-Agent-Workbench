@@ -53,8 +53,8 @@ if grep -q "\[AutoTest\] FAIL" "$LOG_FILE"; then
 fi
 
 # Final sentinel assertion id — if we never see it, the suite did not run end-to-end.
-if ! grep -q "PECM-27-mode-line-still-submits" "$LOG_FILE"; then
-  echo "Missing PECM-27 result; the test may not have executed correctly" >&2
+if ! grep -q "PECM-34-context-send-to-task-transform" "$LOG_FILE"; then
+  echo "Missing PECM-34 result; the test may not have executed correctly" >&2
   tail -n 80 "$LOG_FILE" >&2
   exit 1
 fi
