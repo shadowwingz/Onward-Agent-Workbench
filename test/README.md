@@ -113,7 +113,7 @@ point at files under `test/unittest/`.
 | Trace markers emitted on watcher / freshness / snapshot paths | `run-git-diff-staleness-and-submodule` (GDS-12, GDS-16) |
 | Image diff (PNG / SVG) in Diff modes 2up / swipe / onion | `run-image-diff` (ID-01, ID-02, ID-03, ID-19) |
 | Image diff in Git History (PNG / SVG) | `run-image-diff` (ID-13..18) |
-| PDF / EPUB compare in Diff (added / deleted / modified) | `run-pdf-epub-diff` (`git-diff-pdf-*`, `git-diff-epub-*`) |
+| PDF / EPUB compare in Diff + Git History (added / deleted / modified, single-pane collapse) | `run-pdf-epub-diff` (`git-diff-pdf-*`, `git-diff-epub-*`, `git-history-pdf-*`, `git-history-epub-*`) |
 | Cross-platform Git behaviour (CRLF / paths / locale) | `run-git-cross-platform` (XP-*) |
 
 ### 2.4 Git History
@@ -161,7 +161,7 @@ point at files under `test/unittest/`.
 | Mermaid pan / zoom / fullscreen in preview | `run-mermaid-panzoom` (MPZ-01..02) |
 | Preview position restore across file switch (incl. Mermaid layout) | `run-preview-position-restore` (PPR-01..12) |
 | In-preview search (next / prev / wrap, centering) | `run-preview-search` (PS-01..12) |
-| PDF reader / EPUB reader inside editor | `run-pdf-epub-preview` (`pdf-reader-*`, `epub-*`) |
+| PDF reader / EPUB reader inside editor (incl. iframe → host keyboard forwarding) | `run-pdf-epub-preview` (`pdf-reader-*`, `epub-*`) |
 | PDF / EPUB full-mode read flow | `run-pdf-epub-full` (no fixed prefix) |
 
 ### 2.7 Prompt system

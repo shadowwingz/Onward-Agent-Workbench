@@ -5,6 +5,7 @@
 
 import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef } from 'react'
 import { useI18n } from '../../i18n/useI18n'
+import { redispatchPdfHostKey } from '../../utils/pdfHostKey'
 import type { OutlineItem } from './Outline/types'
 import { OutlineSymbolKind } from './Outline/types'
 
@@ -204,6 +205,8 @@ export const PdfReader = forwardRef<PdfReaderHandle, PdfReaderProps>(function Pd
           lastPageRef.current = page
           onPageChangeRef.current?.(page)
         }
+      } else if (data.type === 'onward:pdf:hostKey') {
+        redispatchPdfHostKey(data)
       }
     }
     const postThemeAndI18n = () => {

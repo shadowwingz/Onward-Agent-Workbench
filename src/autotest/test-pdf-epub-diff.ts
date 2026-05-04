@@ -156,6 +156,12 @@ export async function testPdfEpubDiff(ctx: AutotestContext): Promise<TestResult[
     Boolean(pdfState?.originalSrc && pdfState?.modifiedSrc && pdfState.originalSrc !== pdfState.modifiedSrc),
     { original: pdfState?.originalSrc?.slice(0, 80), modified: pdfState?.modifiedSrc?.slice(0, 80) }
   )
+  // 'modified' status must always render two panes side-by-side (the
+  // single-pane collapse only applies to 'added' / 'deleted').
+  record('git-diff-pdf-modified-two-panes',
+    pdfState?.paneCount === 2 && pdfState?.isSinglePane === false,
+    { state: pdfState }
+  )
 
   // ---------- Git Diff: click the EPUB ----------
 
@@ -299,6 +305,10 @@ export async function testPdfEpubDiff(ctx: AutotestContext): Promise<TestResult[
     Boolean(historyPdfState?.originalSrc && historyPdfState?.modifiedSrc && !historyPdfState?.originalHasEmpty && !historyPdfState?.modifiedHasEmpty),
     { state: historyPdfState }
   )
+  record('git-history-pdf-modified-two-panes',
+    historyPdfState?.paneCount === 2 && historyPdfState?.isSinglePane === false,
+    { state: historyPdfState }
+  )
 
   // Select EPUB in history viewer.
   getGitHistoryApi()?.selectFileByIndex?.(hEpubIdx)
@@ -324,6 +334,92 @@ export async function testPdfEpubDiff(ctx: AutotestContext): Promise<TestResult[
   // Close Git History.
   document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
   await waitFor('git-history-close', () => !getGitHistoryApi()?.isOpen?.(), 5000)
+
+  // ---------- PDF compare single-pane for added / deleted ----------
+  // Mutate the working tree to create one 'added' (untracked new PDF) and
+  // one 'deleted' (removed tracked PDF) scenario, then open Git Diff and
+  // verify each renders as a SINGLE pane (not two half-width panes with
+  // one empty side).
+
+  const FRESH_PDF = 'fresh.pdf'
+  const fixturesDir = `${rootPath}/${FIXTURE_REL_DIR}`
+  const addPdfCmd = platform === 'win32'
+    ? `powershell -Command "Copy-Item -LiteralPath '${windowsPath(fixturesDir)}\\${PDF_BASE_FIXTURE}' -Destination (Join-Path '${windowsPath(repoPath)}' '${FRESH_PDF}') -Force"`
+    : `cp "${fixturesDir}/${PDF_BASE_FIXTURE}" '${repoPath}/${FRESH_PDF}'`
+  await termExec(addPdfCmd, 'fresh-pdf:create', 1500)
+
+  const delPdfCmd = platform === 'win32'
+    ? `powershell -Command "Remove-Item -LiteralPath '${windowsPath(repoPath)}\\${PDF_NAME}' -Force"`
+    : `rm -f '${repoPath}/${PDF_NAME}'`
+  await termExec(delPdfCmd, 'pdf:delete', 1500)
+
+  await window.electronAPI.git.notifyTerminalActivity(terminalId)
+  await sleep(800)
+
+  window.dispatchEvent(new CustomEvent('git-diff:open', { detail: { terminalId, source: 'debug' } }))
+  await waitFor('git-diff-reopen-single-pane', () => Boolean(getGitDiffApi()?.isOpen?.()), 8000)
+  const singlePaneFilesLoaded = await waitFor(
+    'git-diff-single-pane-files-loaded',
+    () => {
+      const list = getGitDiffApi()?.getFileList?.() || []
+      return list.some(f => f.filename === FRESH_PDF) && list.some(f => f.filename === PDF_NAME && f.status === 'D')
+    },
+    10000
+  )
+  record('git-diff-single-pane-files-loaded', singlePaneFilesLoaded, {
+    fileList: getGitDiffApi()?.getFileList?.().map(f => ({ name: f.filename, status: f.status })) ?? []
+  })
+
+  if (singlePaneFilesLoaded) {
+    // Added scenario: select fresh.pdf
+    const freshIdx = (getGitDiffApi()?.getFileList?.() ?? []).findIndex(f => f.filename === FRESH_PDF)
+    getGitDiffApi()?.selectFileByIndex(freshIdx)
+    await waitFor(
+      'git-diff-pdf-added-visible',
+      () => {
+        const s = getGitDiffApi()?.getPdfCompareState?.()
+        return Boolean(s?.visible) && s?.status === 'added'
+      },
+      10000,
+      200
+    )
+    const addedState = getGitDiffApi()?.getPdfCompareState?.() ?? null
+    record('git-diff-pdf-added-single-pane',
+      addedState?.paneCount === 1
+        && addedState?.isSinglePane === true
+        && Boolean(addedState?.modifiedSrc)
+        && !addedState?.originalSrc,
+      { state: addedState }
+    )
+
+    // Deleted scenario: select book.pdf (now status='D')
+    const delIdx = (getGitDiffApi()?.getFileList?.() ?? []).findIndex(f => f.filename === PDF_NAME && f.status === 'D')
+    getGitDiffApi()?.selectFileByIndex(delIdx)
+    await waitFor(
+      'git-diff-pdf-deleted-visible',
+      () => {
+        const s = getGitDiffApi()?.getPdfCompareState?.()
+        return Boolean(s?.visible) && s?.status === 'deleted'
+      },
+      10000,
+      200
+    )
+    const deletedState = getGitDiffApi()?.getPdfCompareState?.() ?? null
+    record('git-diff-pdf-deleted-single-pane',
+      deletedState?.paneCount === 1
+        && deletedState?.isSinglePane === true
+        && Boolean(deletedState?.originalSrc)
+        && !deletedState?.modifiedSrc,
+      { state: deletedState }
+    )
+  } else {
+    record('git-diff-pdf-added-single-pane', false, { reason: 'files-not-loaded' })
+    record('git-diff-pdf-deleted-single-pane', false, { reason: 'files-not-loaded' })
+  }
+
+  // Close Git Diff before cleanup.
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+  await waitFor('git-diff-close-single-pane', () => !getGitDiffApi()?.isOpen?.(), 5000)
 
   // ---------- Cleanup ----------
   // Step out of the test repo before nuking it so subsequent suites inherit a

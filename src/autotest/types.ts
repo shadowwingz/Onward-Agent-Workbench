@@ -74,6 +74,8 @@ export interface GitDiffDebugApi {
     modifiedSrc: string | null
     originalHasEmpty: boolean
     modifiedHasEmpty: boolean
+    paneCount: number
+    isSinglePane: boolean
   } | null
   getEpubCompareState?: () => {
     visible: boolean
@@ -128,6 +130,8 @@ export interface GitHistoryDebugApi {
     modifiedSrc: string | null
     originalHasEmpty: boolean
     modifiedHasEmpty: boolean
+    paneCount: number
+    isSinglePane: boolean
   } | null
   getEpubCompareState?: () => {
     visible: boolean

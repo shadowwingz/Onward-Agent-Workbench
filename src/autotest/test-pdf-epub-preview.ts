@@ -185,6 +185,186 @@ export async function testPdfEpubPreview(ctx: AutotestContext): Promise<TestResu
   )
   record('pdf-reader-reopen', pdfVisibleAgain)
 
+  // ---------- PDF: keyboard shortcut forwarding (iframe → host) ----------
+  // Verifies that Cmd/Ctrl+P and Escape originating inside the sandboxed
+  // pdf.js viewer iframe reach the host's existing keyboard handlers.
+  // Boolean-correctness assertions run as N trials with all-must-succeed
+  // (CLAUDE.md timing-sensitive autotest rule).
+  //
+  // Cross-realm dispatchEvent on iframe.contentWindow doesn't reliably
+  // trigger window-level keydown listeners in Chromium, so we call into
+  // the iframe's own realm via `window.__onwardPdfTest` (a viewer.js test
+  // hook) to exercise the postMessage forwarding path.
+  const dispatchOnIframe = (key: string, opts: { metaKey?: boolean; ctrlKey?: boolean } = {}) => {
+    const iframe = document.querySelector('.project-editor-pdf-reader-iframe') as HTMLIFrameElement | null
+    const helper = (iframe?.contentWindow as unknown as {
+      __onwardPdfTest?: { forwardHostKey: (key: string, opts: { metaKey?: boolean; ctrlKey?: boolean }) => void }
+    } | undefined)?.__onwardPdfTest
+    if (!helper?.forwardHostKey) return false
+    helper.forwardHostKey(key, opts)
+    return true
+  }
+
+  // After the reopen above, ProjectEditor has just remounted the PdfReader
+  // (since switching to the marker file unmounted it). The iframe element,
+  // its contentWindow, and viewer.js's `__onwardPdfTest` helper all attach
+  // asynchronously. Wait for the helper to be present before running any
+  // forwarding-mechanism assertions, otherwise we'd race the iframe load.
+  const helperReady = await waitFor(
+    'pdf-reader-test-helper-attached',
+    () => {
+      const iframe = document.querySelector('.project-editor-pdf-reader-iframe') as HTMLIFrameElement | null
+      const cw = iframe?.contentWindow as unknown as { __onwardPdfTest?: { forwardHostKey?: unknown } } | undefined
+      return typeof cw?.__onwardPdfTest?.forwardHostKey === 'function'
+    },
+    15000,
+    100
+  )
+  record('pdf-reader-test-helper-present',
+    helperReady,
+    (() => {
+      const iframe = document.querySelector('.project-editor-pdf-reader-iframe') as HTMLIFrameElement | null
+      const cw = iframe?.contentWindow as unknown as { __onwardPdfTest?: { forwardHostKey?: unknown } } | undefined
+      return {
+        hasIframe: Boolean(iframe),
+        hasContentWindow: Boolean(iframe?.contentWindow),
+        helperType: typeof cw?.__onwardPdfTest,
+        forwardHostKeyType: typeof cw?.__onwardPdfTest?.forwardHostKey
+      }
+    })()
+  )
+
+  // (a) Cmd/Ctrl+P forwarded → ProjectEditor's Quick Open (file search) opens.
+  // Quick Open does not close the editor, so we close it (Escape on the host
+  // document, which Quick Open captures internally) and repeat 5 trials.
+  {
+    const TRIALS = 5
+    let successes = 0
+    let attempted = 0
+    for (let i = 0; i < TRIALS; i++) {
+      if (!getApi()?.isPdfReaderVisible?.()) break
+      const dispatched = dispatchOnIframe('p', { metaKey: true, ctrlKey: true })
+      if (!dispatched) break
+      attempted++
+      const opened = await waitFor(
+        `pdf-reader-cmd-p-trial-${i}`,
+        () => getApi()?.isGlobalFilenameSearchOpen?.() === true,
+        2000,
+        50
+      )
+      if (opened) {
+        successes++
+        // Close Quick Open by dispatching Escape on the host (Quick Open's
+        // own listener consumes it). The PDF stays open.
+        document.dispatchEvent(new KeyboardEvent('keydown', {
+          key: 'Escape', bubbles: true, cancelable: true
+        }))
+        await waitFor(
+          `pdf-reader-cmd-p-close-${i}`,
+          () => getApi()?.isGlobalFilenameSearchOpen?.() === false,
+          2000,
+          50
+        )
+      }
+    }
+    record('pdf-reader-cmd-p-quick-open',
+      successes === TRIALS && attempted === TRIALS,
+      { successes, attempted, trials: TRIALS }
+    )
+  }
+
+  // (b) Escape forwarded → useSubpageEscape closes the editor. Use a
+  // postMessage probe to count host-side receipt of `onward:pdf:hostKey`
+  // with key='Escape' across N=3 trials (lower than N=5 because each
+  // trial is destructive — closes the editor — and re-opening between
+  // trials adds substantial setup cost). 3 still detects intermittent
+  // failures while keeping total runtime under the 300s suite budget.
+  {
+    let escForwardedCount = 0
+    const probe = (e: MessageEvent) => {
+      if (e?.data?.type === 'onward:pdf:hostKey' && e.data?.key === 'Escape') {
+        escForwardedCount++
+      }
+    }
+    window.addEventListener('message', probe)
+
+    const TRIALS = 3
+    let trials = 0
+    const waitForHelper = (label: string) => waitFor(
+      label,
+      () => {
+        const iframe = document.querySelector('.project-editor-pdf-reader-iframe') as HTMLIFrameElement | null
+        const cw = iframe?.contentWindow as unknown as { __onwardPdfTest?: { forwardHostKey?: unknown } } | undefined
+        return typeof cw?.__onwardPdfTest?.forwardHostKey === 'function'
+      },
+      15000,
+      100
+    )
+    for (let i = 0; i < TRIALS; i++) {
+      if (!getApi()?.isOpen?.()) {
+        window.dispatchEvent(new CustomEvent('project-editor:open', { detail: { terminalId } }))
+        await waitFor(`pdf-reader-esc-reopen-editor-${i}`, () => Boolean(getApi()?.isOpen?.()), 8000)
+      }
+      if (!getApi()?.isPdfReaderVisible?.()) {
+        await getApi()?.openFileByPathAsUser?.(pdfPath)
+        await waitFor(`pdf-reader-esc-reopen-pdf-${i}`, () => getApi()?.isPdfReaderVisible?.() === true, 8000)
+      }
+      // Wait for the iframe + viewer.js init so the test helper is attached
+      // before each trial. Reopening the PDF remounts a fresh iframe.
+      await waitForHelper(`pdf-reader-esc-helper-ready-${i}`)
+
+      const dispatched = dispatchOnIframe('Escape')
+      if (!dispatched) break
+      trials++
+
+      await waitFor(
+        `pdf-reader-esc-msg-${i}`,
+        () => escForwardedCount > i,
+        2000,
+        30
+      )
+      await waitFor(
+        `pdf-reader-esc-closed-${i}`,
+        () => !getApi()?.isPdfReaderVisible?.(),
+        2000,
+        50
+      )
+    }
+    window.removeEventListener('message', probe)
+
+    record('pdf-reader-escape-forwarded',
+      escForwardedCount === TRIALS && trials === TRIALS,
+      { received: escForwardedCount, trials: TRIALS }
+    )
+  }
+
+  // (c) State integrity: after the burst of trials above, exactly one PDF
+  // iframe should be present in the DOM (no zombie accumulation, no leak
+  // of the previous iframe instance after re-opens).
+  {
+    if (!getApi()?.isOpen?.()) {
+      window.dispatchEvent(new CustomEvent('project-editor:open', { detail: { terminalId } }))
+      await waitFor('pdf-reader-leak-reopen-editor', () => Boolean(getApi()?.isOpen?.()), 8000)
+    }
+    if (!getApi()?.isPdfReaderVisible?.()) {
+      await getApi()?.openFileByPathAsUser?.(pdfPath)
+      await waitFor('pdf-reader-leak-reopen-pdf', () => getApi()?.isPdfReaderVisible?.() === true, 8000)
+    }
+    // Wait for the iframe to actually mount in the DOM before counting —
+    // React state can flip ahead of the commit.
+    await waitFor(
+      'pdf-reader-leak-iframe-mounted',
+      () => document.querySelectorAll('.project-editor-pdf-reader-iframe').length >= 1,
+      5000,
+      100
+    )
+    const iframeCount = document.querySelectorAll('.project-editor-pdf-reader-iframe').length
+    record('pdf-reader-no-zombie-iframes',
+      iframeCount === 1,
+      { iframeCount }
+    )
+  }
+
   // ---------- EPUB preview ----------
 
   log('epub:open', { epubPath })
