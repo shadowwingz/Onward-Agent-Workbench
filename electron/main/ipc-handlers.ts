@@ -48,6 +48,7 @@ import {
   fetchFileContentWithCache,
   gitDiffContentCache,
   gitDiffPrecomputeScheduler,
+  inspectContentCacheStats,
   installContentCacheInvalidatorOnce
 } from './git-diff-content-cache-wiring'
 import { gitStateMirrorRouter } from './git-state-mirror-router'
@@ -591,6 +592,9 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   })
   ipcMain.handle(IPC.DEBUG_GET_PERF_TRACE_INFO, () => {
     return perfTraceLogger.getInfo()
+  })
+  ipcMain.handle(IPC.DEBUG_GIT_DIFF_GET_DEBUG_STATS, () => {
+    return inspectContentCacheStats()
   })
   ipcMain.handle(IPC.DEBUG_RESET_PERF_TRACE_METRICS, () => {
     return perfTraceLogger.resetEventLoopMetrics()

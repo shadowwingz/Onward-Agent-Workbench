@@ -241,6 +241,12 @@ whitelist drops it) → `recompute-status-done` → `fanout` →
 | `RENDERER_GIT_DIFF_JUMP_TO_EDITOR` | `renderer:git-diff.jump-to-editor` | `i` | Same file — user opened the selected diff file in Project Editor. Tagged `cwd`, `terminalId`, `filename`, `repoRoot`. |
 | `RENDERER_GIT_DIFF_SPLIT_MODE_TOGGLE` | `renderer:git-diff.split-mode-toggle` | `i` | Same file — user switched the diff display between Auto, Side-by-side, and Inline using the toggle in the working-directory bar. Tagged `cwd`, `terminalId`, `mode`. |
 | `RENDERER_PROJECT_EDITOR_JUMP_TO_DIFF` | `renderer:project-editor.jump-to-diff` | `i` | `src/components/ProjectEditor/ProjectEditor.tsx` — Project Editor routed the current file back to Git Diff. Tagged `terminalId`, `filename`, `repoRoot`, `changeType`. |
+| `RENDERER_GIT_DIFF_CLICK_PHASE_IPC` | `renderer:git-diff.click-phase.ipc` | `X` | `src/components/GitDiffViewer/clickLatencyTracker.ts` — span covering `getFileContent` IPC round-trip (`ipcEnd - ipcStart`). Payload: `durationMs`, `fileKey`, `filename`, `cacheState`, `totalMs`. Auto-routed to `ph='X'` by `perf-trace-logger::resolvePhase` because of `durationMs`. |
+| `RENDERER_GIT_DIFF_CLICK_PHASE_STATE_SET` | `renderer:git-diff.click-phase.state-set` | `X` | Same emitter — span between IPC end and React `setState` actually applied (`stateSet - ipcEnd`). Payload identical to the IPC phase. |
+| `RENDERER_GIT_DIFF_CLICK_PHASE_MOUNT` | `renderer:git-diff.click-phase.mount` | `X` | Same emitter — span between state set and Monaco DiffEditor `editorReady` (`editorReady - stateSet`). |
+| `RENDERER_GIT_DIFF_CLICK_PHASE_DIFF_COMPUTE` | `renderer:git-diff.click-phase.diff-compute` | `X` | Same emitter — span between editor ready and Monaco's `onDidUpdateDiff` (`diffComputed - editorReady`). |
+| `RENDERER_GIT_DIFF_CLICK_PHASE_PAINT` | `renderer:git-diff.click-phase.paint` | `X` | Same emitter — span between diff computed and the rAF callback that proxies for "paint visible to user" (`paintReady - diffComputed`). |
+| `RENDERER_GIT_DIFF_CLICK_TOTAL` | `renderer:git-diff.click-phase.total` | `X` | Same emitter — total click→paint span (`paintReady - clickAt`). Use this for percentile / regression queries; the per-phase events are for attribution. |
 
 These events are registered in `src/utils/perf-trace-names.ts` (commit 2 of
 the GitStateMirror PR). The autotest gates on the final visible branch /

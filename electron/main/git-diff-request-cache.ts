@@ -17,16 +17,48 @@ export interface GitDiffRequestCacheGetOptions<T> {
   onForceInvalidate?: (entriesCleared: number) => void
 }
 
+export interface GitDiffRequestCacheStats {
+  /** Current number of resident cached entries. */
+  entries: number
+  /** Currently in-flight load Promises (deduped requests). */
+  inFlight: number
+  /** Cumulative cache hits since startup (force-bypass counted in `forces`). */
+  hits: number
+  /** Cumulative cache misses (key absent or expired). */
+  misses: number
+  /** Cumulative force-invalidations (caller passed `force: true`). */
+  forces: number
+  /** TTL configured for entries, in ms. */
+  ttlMs: number
+  /** Soft cap on resident entries before pruning expired ones. */
+  maxEntries: number
+}
+
 export class GitDiffRequestCacheController<T> {
   private readonly options: GitDiffRequestCacheOptions<T>
   private readonly cache = new Map<string, { value: T; at: number }>()
   private readonly inFlight = new Map<string, Promise<T>>()
   private readonly generations = new Map<string, number>()
   private readonly now: () => number
+  private hits = 0
+  private misses = 0
+  private forces = 0
 
   constructor(options: GitDiffRequestCacheOptions<T>) {
     this.options = options
     this.now = options.now ?? (() => Date.now())
+  }
+
+  inspectStats(): GitDiffRequestCacheStats {
+    return {
+      entries: this.cache.size,
+      inFlight: this.inFlight.size,
+      hits: this.hits,
+      misses: this.misses,
+      forces: this.forces,
+      ttlMs: this.options.ttlMs,
+      maxEntries: this.options.maxEntries
+    }
   }
 
   async get(key: string, options: GitDiffRequestCacheGetOptions<T>): Promise<T> {
@@ -34,13 +66,18 @@ export class GitDiffRequestCacheController<T> {
     const now = this.now()
     const cached = this.cache.get(key)
     if (!force && cached && now - cached.at < this.options.ttlMs) {
+      this.hits += 1
       options.onCacheHit?.(now - cached.at)
       return this.options.clone(cached.value)
     }
+    this.misses += 1
 
     if (force) {
       const cleared = this.invalidateKey(key)
-      if (cleared) options.onForceInvalidate?.(1)
+      if (cleared) {
+        this.forces += 1
+        options.onForceInvalidate?.(1)
+      }
     } else {
       const existing = this.inFlight.get(key)
       if (existing) {
@@ -76,6 +113,16 @@ export class GitDiffRequestCacheController<T> {
     this.cache.clear()
     this.inFlight.clear()
     this.generations.clear()
+  }
+
+  /**
+   * Reset the running hit / miss / force counters without clearing
+   * the cache. Used by the in-app debug panel's "Reset" button.
+   */
+  resetStats(): void {
+    this.hits = 0
+    this.misses = 0
+    this.forces = 0
   }
 
   inspectForTest(key: string): { cached: boolean; inFlight: boolean; generation: number } {

@@ -115,9 +115,16 @@ export class GitDiffClickLatencyTracker {
     this.active.diffComputedAt = this.now()
     // Schedule paint signal on the next frame. requestAnimationFrame fires
     // right before paint, so capturing inside its callback is the closest
-    // proxy we have for "the user can now see this content".
+    // proxy we have for "the user can now see this content". A setTimeout
+    // fallback covers the case where rAF is throttled (background window,
+    // autotest harness running with the app off-screen, or a paused
+    // compositor). Without the fallback those measurements stall forever
+    // and the entire history collects as cancelled entries.
     const target = this.active
-    requestAnimationFrame(() => {
+    let sealed = false
+    const seal = () => {
+      if (sealed) return
+      sealed = true
       if (this.active === target && target.paintReadyAt === null) {
         target.paintReadyAt = this.now()
         target.totalMs = +(target.paintReadyAt - target.clickAt).toFixed(2)
@@ -132,7 +139,9 @@ export class GitDiffClickLatencyTracker {
         }
         this.active = null
       }
-    })
+    }
+    requestAnimationFrame(seal)
+    setTimeout(seal, 80)
   }
 
   cancelActive(): void {

@@ -39,6 +39,8 @@ import {
 } from './gitDiffHunkActions'
 import { resolveMonacoLanguageId } from './monacoLanguageMap'
 import { GitDiffClickLatencyTracker, type ClickLatencyMeasurement } from './clickLatencyTracker'
+import { buildClickPhaseTraceRecords } from './clickLatencyTraceEmitter'
+import { GitDiffDebugPanel } from './GitDiffDebugPanel'
 import { createThemedSetiFileIconResolver, sanitizeSetiSvgOnce } from '../ProjectEditor/setiFileIconTheme'
 import { perfTrace } from '../../utils/perf-trace'
 import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
@@ -64,6 +66,7 @@ const STORAGE_KEY_FILE_LIST_VIEW_MODE = 'git-diff-file-list-view-mode'
 const STORAGE_KEY_MODAL_SIZE = 'git-diff-modal-size'
 const STORAGE_KEY_DIFF_SPLIT_RATIO = 'git-diff-split-view-ratio'
 const STORAGE_KEY_DIFF_SPLIT_VIEW_MODE = 'git-diff-split-view-mode'
+const STORAGE_KEY_DIFF_DEBUG_PANEL_COLLAPSED = 'git-diff-debug-panel-collapsed'
 
 // File list width limit
 const DEFAULT_FILE_LIST_WIDTH = 280
@@ -1093,6 +1096,24 @@ export function GitDiffViewer({
   // Click → render latency tracker. One per component instance so two
   // GitDiffViewer panels (different terminals) keep independent histories.
   const clickLatencyTrackerRef = useRef<GitDiffClickLatencyTracker>(new GitDiffClickLatencyTracker())
+  // Collapse state for the in-app debug panel. Persisted globally because
+  // operators want the same setting across projects / terminals.
+  const [debugPanelCollapsed, setDebugPanelCollapsed] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false
+    try {
+      return window.localStorage.getItem(STORAGE_KEY_DIFF_DEBUG_PANEL_COLLAPSED) === '1'
+    } catch {
+      return false
+    }
+  })
+  const handleDebugPanelToggle = useCallback((next: boolean) => {
+    setDebugPanelCollapsed(next)
+    try {
+      window.localStorage.setItem(STORAGE_KEY_DIFF_DEBUG_PANEL_COLLAPSED, next ? '1' : '0')
+    } catch {
+      /* localStorage may be unavailable in restricted contexts */
+    }
+  }, [])
   // Lightweight prefetch state for the autotest debug surface.
   const rendererPrefetchSnapshotRef = useRef<BodyPrefetchSnapshot>({
     scheduled: 0,
@@ -1201,6 +1222,24 @@ export function GitDiffViewer({
   const getFileKey = useCallback((file: GitFileStatus, repoRoot = activeCwd || '') => {
     return buildFileKey(file.repoRoot || repoRoot, file)
   }, [activeCwd])
+
+  // Whenever a click measurement seals, emit one perf-trace span per phase
+  // (plus a total span) so a Perfetto capture carries the same JadeTree
+  // chain that the in-app debug panel surfaces. `addListener` returns the
+  // unsubscribe handle; we re-subscribe whenever cwd / terminalId change so
+  // the trace context tag matches the current selection.
+  useEffect(() => {
+    const tracker = clickLatencyTrackerRef.current
+    return tracker.addListener((measurement) => {
+      const records = buildClickPhaseTraceRecords(measurement, {
+        cwd: activeCwd ?? '',
+        terminalId
+      })
+      for (const record of records) {
+        perfTrace(record.event, record.payload)
+      }
+    })
+  }, [activeCwd, terminalId])
 
   const selectedFileKey = selectedFile ? getFileKey(selectedFile) : null
   const selectedFileState = selectedFileKey ? fileContents[selectedFileKey] : null
@@ -2656,6 +2695,12 @@ export function GitDiffViewer({
     const fileKey = getFileKey(file)
     const cached = fileContentsRef.current[fileKey]
     if (cached && !cached.loading && !force) {
+      // Cached early-return: the file's content is already in state, so
+      // there is no placeholder→real transition. Mark stateSet anyway so
+      // the click-latency tracker's `markDiffComputedIfReal` gate accepts
+      // the next onDidUpdateDiff (Monaco swaps the DiffEditor's modified
+      // model when selectedFile changes, even when content was cached).
+      clickLatencyTrackerRef.current.markStateSet(fileKey)
       return
     }
     if (inFlightRef.current[fileKey]) {
@@ -3291,9 +3336,30 @@ export function GitDiffViewer({
       // content lands, the user sees it on the next paint, regardless
       // of Monaco's higher-level diff scheduler.
       const modifiedEditorForTracker = editor.getModifiedEditor()
+      // Helper: skip the placeholder pass. Uncached clicks transition the
+      // selected file's state through `loading: true` (empty original /
+      // modified) before the worker returns the real bodies. Monaco fires
+      // `onDidUpdateDiff` for that empty pass and would otherwise be the
+      // first — and thus winning — call to `markDiffComputed`. We can NOT
+      // gate on `fileContentsRef.current[fileKey].loading` because that
+      // ref is synced through a useEffect that runs *after* the commit
+      // phase that triggered onDidUpdateDiff in the first place — at the
+      // moment the diff-update fires, the ref still reflects the
+      // placeholder. Instead, gate on the tracker's own `stateSetAt`:
+      // markStateSet fires synchronously in `ensureFileContent` (success
+      // path) and in the cached early-return below, so by the time the
+      // real onDidUpdateDiff lands, stateSetAt is set, the gate passes,
+      // and the placeholder pass (which preceded both) has been ignored.
+      const markDiffComputedIfReal = (liveFileKey: string | null) => {
+        if (!liveFileKey) return
+        const active = clickLatencyTrackerRef.current.getActive()
+        if (!active || active.fileKey !== liveFileKey) return
+        if (active.stateSetAt === null) return
+        clickLatencyTrackerRef.current.markDiffComputed(liveFileKey)
+      }
       diffEditorBindingDisposablesRef.current.push(modifiedEditorForTracker.onDidChangeModelContent(() => {
         const liveFileKey = selectedFileRef.current ? getFileKey(selectedFileRef.current) : null
-        if (liveFileKey) clickLatencyTrackerRef.current.markDiffComputed(liveFileKey)
+        markDiffComputedIfReal(liveFileKey)
       }))
 
       // Transition from waiting-diff to restoring-scroll when Monaco finishes computing changes
@@ -3305,7 +3371,7 @@ export function GitDiffViewer({
         diffNavigationIndexRef.current = -1
         installDiffHunkActionWidgets(editor, monaco)
         const liveFileKey = selectedFileRef.current ? getFileKey(selectedFileRef.current) : null
-        if (liveFileKey) clickLatencyTrackerRef.current.markDiffComputed(liveFileKey)
+        markDiffComputedIfReal(liveFileKey)
       }))
 
       // Reset decoration refs (the old editor was destroyed, the old collection is no longer valid)
@@ -5781,28 +5847,42 @@ export function GitDiffViewer({
           </>
         )}
 
-        {useSharedPanelHeader ? (
-          <SubpagePanelShell
-            current="diff"
-            onSelect={handleSelectSubpage}
-            workingDirectoryLabel={t('gitDiff.workingDirectory')}
-            workingDirectoryPath={displayedWorkingDirectory}
-            workingDirectoryTitle={cwdTitle}
-            onWorkingDirectoryDoubleClick={handleCwdDblClick}
-            workingDirectoryFeedback={cwdFeedback}
-            taskTitle={taskTitle}
-            actions={renderTopHeaderActions(true)}
-            metaExtra={renderCwdBarActions()}
-          >
-            <div className="git-diff-body">
-              {renderContent()}
-            </div>
-          </SubpagePanelShell>
-        ) : panelShellMode === 'external' && isPanel ? (
-          <div className="git-diff-body">
-            {renderContent()}
-          </div>
-        ) : (
+        {(() => {
+          const debugPanel = (
+            <GitDiffDebugPanel
+              tracker={clickLatencyTrackerRef.current}
+              cwd={activeCwd ?? ''}
+              terminalId={terminalId}
+              collapsed={debugPanelCollapsed}
+              onToggleCollapsed={handleDebugPanelToggle}
+            />
+          )
+          return useSharedPanelHeader ? (
+            <SubpagePanelShell
+              current="diff"
+              onSelect={handleSelectSubpage}
+              workingDirectoryLabel={t('gitDiff.workingDirectory')}
+              workingDirectoryPath={displayedWorkingDirectory}
+              workingDirectoryTitle={cwdTitle}
+              onWorkingDirectoryDoubleClick={handleCwdDblClick}
+              workingDirectoryFeedback={cwdFeedback}
+              taskTitle={taskTitle}
+              actions={renderTopHeaderActions(true)}
+              metaExtra={renderCwdBarActions()}
+            >
+              {debugPanel}
+              <div className="git-diff-body">
+                {renderContent()}
+              </div>
+            </SubpagePanelShell>
+          ) : panelShellMode === 'external' && isPanel ? (
+            <>
+              {debugPanel}
+              <div className="git-diff-body">
+                {renderContent()}
+              </div>
+            </>
+          ) : (
           <>
             {/* Header */}
             <div className="git-diff-header">
@@ -5840,12 +5920,16 @@ export function GitDiffViewer({
               </div>
             </div>
 
+            {/* Performance diagnostics panel (always visible) */}
+            {debugPanel}
+
             {/* Body */}
             <div className="git-diff-body">
               {renderContent()}
             </div>
           </>
-        )}
+          )
+        })()}
 
         {/* right click menu */}
         {contextMenu && (

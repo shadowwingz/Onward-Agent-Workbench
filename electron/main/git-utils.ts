@@ -1637,6 +1637,16 @@ function invalidateGitDiffRequestKey(key: string): boolean {
   return getGitDiffRequestCacheController().invalidateKey(key)
 }
 
+/**
+ * Snapshot of the list-level (`getDiff`) request cache. Exposed to the
+ * in-app debug panel so users can see entries / hit-rate / in-flight
+ * dedupe activity for the layer that sits in front of the worker's
+ * `git status -z` + `git diff` call chain.
+ */
+export function getGitDiffRequestCacheStats() {
+  return getGitDiffRequestCacheController().inspectStats()
+}
+
 function isGitPathAtOrInside(pathValue: string, parentPath: string): boolean {
   return pathValue === parentPath || pathValue.startsWith(`${parentPath}/`)
 }

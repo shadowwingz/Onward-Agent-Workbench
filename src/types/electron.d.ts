@@ -831,6 +831,39 @@ export interface PerfTraceInfo {
   eventLoop: EventLoopStallMetrics
 }
 
+export interface GitDiffDebugStats {
+  cache: {
+    projects: Array<{
+      project: string
+      bytes: number
+      entries: number
+      lastTouchedAt: number
+    }>
+    totalBytes: number
+    totalEntries: number
+    projectByteLimit: number
+    maxProjects: number
+    singleFileByteLimit: number
+  }
+  scheduler: {
+    totalBursts: number
+    totalCancelled: number
+    totalCompleted: number
+    totalSkipped: number
+    pendingProjects: string[]
+    inFlightProjects: string[]
+  }
+  listCache: {
+    entries: number
+    inFlight: number
+    hits: number
+    misses: number
+    forces: number
+    ttlMs: number
+    maxEntries: number
+  }
+}
+
 export interface DebugAPI {
   enabled: boolean
   perfTraceEnabled: boolean
@@ -848,6 +881,7 @@ export interface DebugAPI {
   getGitRuntimeMetrics: () => Promise<GitRuntimeMetrics>
   getMainWorkMetrics: () => Promise<Record<string, unknown>>
   getPerfTraceInfo: () => Promise<PerfTraceInfo>
+  getGitDiffDebugStats: () => Promise<GitDiffDebugStats>
   resetPerfTraceMetrics: () => Promise<EventLoopStallMetrics>
   perfTrace: (event: string, data?: Record<string, unknown>, terminalId?: string) => void
   getApiServerPort: () => Promise<number>

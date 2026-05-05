@@ -23,6 +23,7 @@
 //     so it inherits the existing list-level cache and FS-watch invalidation.
 
 import type { GitFileContentResult, GitFileStatus } from './git-utils'
+import { getGitDiffRequestCacheStats } from './git-utils'
 import { GitDiffContentCache } from './git-diff-content-cache'
 import { GitDiffPrecomputeScheduler, type DiffFile } from './git-diff-precompute-scheduler'
 import { gitIpcWorkerClient } from './git-ipc-worker-client'
@@ -198,6 +199,7 @@ export function installContentCacheInvalidatorOnce(): void {
 export function inspectContentCacheStats() {
   return {
     cache: gitDiffContentCache.inspectStats(),
-    scheduler: gitDiffPrecomputeScheduler.inspectStats()
+    scheduler: gitDiffPrecomputeScheduler.inspectStats(),
+    listCache: getGitDiffRequestCacheStats()
   }
 }

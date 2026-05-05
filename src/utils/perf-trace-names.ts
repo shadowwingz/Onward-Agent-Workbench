@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { CLICK_PHASE_EVENT_NAMES } from './click-phase-event-names'
+
 /**
  * Single source of truth for perf-trace event names.
  *
@@ -291,7 +293,25 @@ export const PERF_TRACE_EVENT = {
   RENDERER_GIT_DIFF_FILE_LIST_MODE_CHANGE: 'renderer:git-diff.file-list-mode-change',
   RENDERER_GIT_DIFF_JUMP_TO_EDITOR: 'renderer:git-diff.jump-to-editor',
   RENDERER_GIT_DIFF_SPLIT_MODE_TOGGLE: 'renderer:git-diff.split-mode-toggle',
-  RENDERER_PROJECT_EDITOR_JUMP_TO_DIFF: 'renderer:project-editor.jump-to-diff'
+  RENDERER_PROJECT_EDITOR_JUMP_TO_DIFF: 'renderer:project-editor.jump-to-diff',
+
+  // ───────── Renderer — Git Diff click → paint phase chain ─────────
+  // Six spans (ph='X') emitted once a click measurement seals. They
+  // reproduce the JadeTree phase decomposition the in-app debug panel
+  // surfaces, so a Perfetto trace contains the same diagnostic chain
+  // without extracting it from `__onwardGitDiffDebug.getHistory()`.
+  // Payload always carries `durationMs` (auto-routed to ph='X' by
+  // perf-trace-logger::resolvePhase) plus `fileKey` / `filename` /
+  // `cacheState` / `totalMs` for joinability. The literal strings live
+  // in `./click-phase-event-names.ts` (a leaf module imported by the
+  // emitter and the registry alike) so renaming an event only happens
+  // in one place.
+  RENDERER_GIT_DIFF_CLICK_PHASE_IPC: CLICK_PHASE_EVENT_NAMES.IPC,
+  RENDERER_GIT_DIFF_CLICK_PHASE_STATE_SET: CLICK_PHASE_EVENT_NAMES.STATE_SET,
+  RENDERER_GIT_DIFF_CLICK_PHASE_MOUNT: CLICK_PHASE_EVENT_NAMES.MOUNT,
+  RENDERER_GIT_DIFF_CLICK_PHASE_DIFF_COMPUTE: CLICK_PHASE_EVENT_NAMES.DIFF_COMPUTE,
+  RENDERER_GIT_DIFF_CLICK_PHASE_PAINT: CLICK_PHASE_EVENT_NAMES.PAINT,
+  RENDERER_GIT_DIFF_CLICK_TOTAL: CLICK_PHASE_EVENT_NAMES.TOTAL
 } as const
 
 export type PerfTraceEventName = typeof PERF_TRACE_EVENT[keyof typeof PERF_TRACE_EVENT]

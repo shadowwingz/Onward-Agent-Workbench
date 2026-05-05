@@ -65,4 +65,51 @@ if grep -q "\[AutoTest\] FAIL" "$LOG_FILE"; then
   exit 1
 fi
 
+# Phase-chain trace assertion. The in-app debug panel surfaces a
+# JadeTree-style breakdown that's also emitted as 6 perf-trace spans
+# every time a click measurement seals (see clickLatencyTraceEmitter.ts
+# and src/utils/click-phase-event-names.ts). After clicking through the
+# whole working set, every one of those event names should appear at
+# least once in the perf trace log — otherwise the chain regressed
+# silently and the panel's stats / Perfetto SQL queries would lie.
+TRACE_DIR="$REPO_ROOT/traces/perf"
+LATEST_POINTER="$TRACE_DIR/latest.txt"
+if [[ -f "$LATEST_POINTER" ]]; then
+  LATEST_TRACE_PATH="$(cat "$LATEST_POINTER")"
+else
+  # Fallback: pick the newest *.json under traces/perf if the pointer
+  # file is missing (older runs / partially flushed startup sequences).
+  LATEST_TRACE_PATH="$(ls -t "$TRACE_DIR"/*.json 2>/dev/null | head -n 1 || true)"
+fi
+
+if [[ -z "$LATEST_TRACE_PATH" || ! -f "$LATEST_TRACE_PATH" ]]; then
+  echo "ERROR: cannot locate perf trace file under $TRACE_DIR" >&2
+  exit 1
+fi
+
+PHASE_EVENTS=(
+  'renderer:git-diff.click-phase.ipc'
+  'renderer:git-diff.click-phase.state-set'
+  'renderer:git-diff.click-phase.mount'
+  'renderer:git-diff.click-phase.diff-compute'
+  'renderer:git-diff.click-phase.paint'
+  'renderer:git-diff.click-phase.total'
+)
+MISSING_EVENTS=()
+for evt in "${PHASE_EVENTS[@]}"; do
+  if ! grep -q "$evt" "$LATEST_TRACE_PATH"; then
+    MISSING_EVENTS+=("$evt")
+  fi
+done
+
+if [[ "${#MISSING_EVENTS[@]}" -gt 0 ]]; then
+  echo "ERROR: phase chain regression — these events never reached the trace file:" >&2
+  for evt in "${MISSING_EVENTS[@]}"; do
+    echo "  - $evt" >&2
+  done
+  echo "  trace file: $LATEST_TRACE_PATH" >&2
+  exit 1
+fi
+
+echo "Phase chain assertion PASS — all 6 RENDERER_GIT_DIFF_CLICK_PHASE_* events present"
 echo "Click→render latency autotest PASS"

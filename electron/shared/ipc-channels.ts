@@ -67,6 +67,7 @@ export const IPC = {
   DEBUG_GET_GIT_RUNTIME_METRICS: 'debug:get-git-runtime-metrics',
   DEBUG_GET_MAIN_WORK_METRICS: 'debug:get-main-work-metrics',
   DEBUG_GET_PERF_TRACE_INFO: 'debug:get-perf-trace-info',
+  DEBUG_GIT_DIFF_GET_DEBUG_STATS: 'debug:git-diff.get-debug-stats',
   DEBUG_LOG: 'debug:log',
   DEBUG_PERF_TRACE: 'debug:perf-trace',
   DEBUG_QUIT: 'debug:quit',

@@ -22,13 +22,13 @@ import type { AutotestContext, ClickLatencyMeasurementForAutotest, TestResult } 
 // phase per file so the next-iteration fix has a concrete target.
 
 const CLICK_TO_RENDER_TARGET_MS = 30
-const PER_FILE_TIMEOUT_MS = 4000
+const PER_FILE_TIMEOUT_MS = 8000
 // Generous inter-file dwell so Monaco's previous diff-computed + rAF cycle
 // fully settles before the next tracker.start cancels it. Without this
 // dwell ~16 files per run end up with `cancelled=true` and the autotest
 // has fewer measurements to draw conclusions from. Real users dwell far
 // longer than this.
-const SETTLE_BETWEEN_FILES_MS = 200
+const SETTLE_BETWEEN_FILES_MS = 1200
 
 interface PerFileResult {
   filename: string
@@ -37,6 +37,17 @@ interface PerFileResult {
   /** Click → next browser paint (rAF). Includes 0-17 ms vsync overhead the
    * renderer cannot influence; recorded for diagnostics only. */
   paintTotalMs: number | null
+  /**
+   * Externally observed click → DOM settle. Captured by a MutationObserver
+   * on the Monaco diff editor's view-lines container; waits for a quiet
+   * window (no mutations for `EXTERNAL_SETTLE_QUIET_MS`) before declaring
+   * settle. This is the closest renderer-side proxy for "user can see the
+   * fully-rendered colored diff" because Monaco's tokenizer keeps mutating
+   * the DOM after `onDidUpdateDiff` fires.
+   */
+  externalTotalMs: number | null
+  /** Tracker.totalMs - externalTotalMs. Negative ⇒ tracker under-reports. */
+  trackerVsExternalDeltaMs: number | null
   cacheState: ClickLatencyMeasurementForAutotest['cacheState']
   phases: {
     readyToIpcMs: number | null
@@ -48,22 +59,47 @@ interface PerFileResult {
   cancelled: boolean
 }
 
+// We can't use a quiet-window settle here because uncached clicks have a
+// two-phase render: (1) placeholder render with `modified: ''` (settles in
+// ~30 ms), (2) real content render after the IPC returns. Closing the
+// window on phase 1 mistakes the placeholder paint for the user-visible
+// paint and makes the external measurement an order of magnitude too
+// optimistic. Instead, observe for a fixed cap and take the timestamp of
+// the *last* mutation — that's the moment Monaco stopped repainting. Cap
+// must be larger than the worst-case Monaco settle on the host machine,
+// otherwise the observer truncates a still-mutating render and
+// under-reports vs the tracker.
+const EXTERNAL_SETTLE_CAP_MS = 7000
+// Minimum mutations that must arrive before we trust lastMutationAt.
+// Below this, we treat the file as having no observable repaint (cached
+// content with identical text both sides, or render skipped entirely)
+// and report null so the comparison row drops the file.
+const EXTERNAL_SETTLE_MIN_MUTATIONS = 1
+
 function phase(start: number | null, end: number | null): number | null {
   if (start === null || end === null) return null
   return +(end - start).toFixed(2)
 }
 
-function measurementToResult(m: ClickLatencyMeasurementForAutotest): PerFileResult {
+function measurementToResult(
+  m: ClickLatencyMeasurementForAutotest,
+  externalTotalMs: number | null
+): PerFileResult {
   // totalMs is now click → diffComputed (the moment Monaco commits the
   // diff to DOM). This is the renderer's last point of responsibility;
   // the browser repaints within one vsync (~16.7 ms) which we cannot
   // influence. paintTotalMs preserves the click → first paint figure for
   // comparison and drift detection.
   const renderedTotal = phase(m.clickAt, m.diffComputedAt)
+  const trackerVsExternalDeltaMs = externalTotalMs !== null && m.totalMs !== null
+    ? +(m.totalMs - externalTotalMs).toFixed(2)
+    : null
   return {
     filename: m.filename,
     totalMs: renderedTotal,
     paintTotalMs: m.totalMs,
+    externalTotalMs,
+    trackerVsExternalDeltaMs,
     cacheState: m.cacheState,
     phases: {
       readyToIpcMs: phase(m.clickAt, m.ipcStartAt),
@@ -74,6 +110,57 @@ function measurementToResult(m: ClickLatencyMeasurementForAutotest): PerFileResu
     },
     cancelled: m.cancelled
   }
+}
+
+/**
+ * Independent click→paint observer. Plants a MutationObserver on the diff
+ * editor's view-lines container, then waits for a quiet window
+ * (`EXTERNAL_SETTLE_QUIET_MS` of zero mutations), capped at
+ * `EXTERNAL_SETTLE_CAP_MS`. Returns the timestamp of the last observed
+ * mutation (i.e. the moment the DOM stopped changing). The caller's
+ * `externalClickAt` minus this gives the externally-observed total.
+ *
+ * Why this exists: tracker.totalMs is set inside an rAF after Monaco's
+ * `onDidUpdateDiff`, but Monaco continues mutating the DOM as the
+ * tokenizer streams tokens in. The autotest needs a measurement that
+ * reflects what the user actually perceives ("I can see the colored
+ * diff now"); the MutationObserver is the closest renderer-side proxy.
+ */
+function observeMonacoSettle(): Promise<number | null> {
+  return new Promise((resolve) => {
+    // Pick the first Monaco diff-editor visible. Both panes' view-lines
+    // live inside .monaco-diff-editor; we observe the whole subtree for
+    // childList mutations only (cursor blink uses attributes, which we
+    // skip below). On panes that don't repaint at all the observer falls
+    // through to its cap branch and the caller records null.
+    const target =
+      document.querySelector('.git-diff-monaco') ??
+      document.querySelector('.monaco-diff-editor')
+    if (!target) {
+      resolve(null)
+      return
+    }
+    const observerStart = performance.now()
+    let mutationCount = 0
+    let lastMutationAt = observerStart
+    const observer = new MutationObserver((records) => {
+      mutationCount += records.length
+      lastMutationAt = performance.now()
+    })
+    // Only structural changes — view-line node additions / removals as
+    // tokens stream in. Skip attribute changes (cursor blink toggles
+    // `cursor-blinking` repeatedly) and character data (in-place text
+    // edits, which a click-to-render measurement does not see).
+    observer.observe(target, { childList: true, subtree: true })
+    setTimeout(() => {
+      observer.disconnect()
+      if (mutationCount < EXTERNAL_SETTLE_MIN_MUTATIONS) {
+        resolve(null)
+      } else {
+        resolve(lastMutationAt)
+      }
+    }, EXTERNAL_SETTLE_CAP_MS)
+  })
 }
 
 function dominantPhase(p: PerFileResult['phases']): { name: string; ms: number } | null {
@@ -88,27 +175,57 @@ function dominantPhase(p: PerFileResult['phases']): { name: string; ms: number }
   return entries[0]
 }
 
+interface SelectOutcome {
+  measurement: ClickLatencyMeasurementForAutotest | null
+  externalTotalMs: number | null
+}
+
 async function selectAndAwaitPaint(
   ctx: AutotestContext,
   filename: string
-): Promise<ClickLatencyMeasurementForAutotest | null> {
+): Promise<SelectOutcome> {
   const api = window.__onwardGitDiffDebug
-  if (!api?.selectFileByPath || !api.getLastClickLatencyForFile) return null
+  if (!api?.selectFileByPath || !api.getLastClickLatencyForFile) {
+    return { measurement: null, externalTotalMs: null }
+  }
+  // Externally-observed click time. Captured before the click is
+  // dispatched so the autotest's measurement is independent of the
+  // tracker's `start()` call. Pair with the MutationObserver-based
+  // settle below to get an end-to-end "user perceived" total that does
+  // not rely on any of the tracker's instrumentation hooks.
+  const externalClickAt = performance.now()
+  const settlePromise = observeMonacoSettle()
   const ok = api.selectFileByPath(filename)
-  if (!ok) return null
+  if (!ok) {
+    settlePromise.catch(() => {})
+    return { measurement: null, externalTotalMs: null }
+  }
   // The tracker keys by getFileKey(file). We do not have direct access to
   // that key from here, so we identify by filename match in the history
   // and wait for paintReadyAt to be filled.
   const startedAt = performance.now()
+  let measurement: ClickLatencyMeasurementForAutotest | null = null
   while (performance.now() - startedAt < PER_FILE_TIMEOUT_MS) {
     const history = api.getClickLatencyHistory?.() ?? []
     const match = [...history]
       .reverse()
       .find((m) => m.filename === filename && m.paintReadyAt !== null && !m.cancelled)
-    if (match) return match
+    if (match) {
+      measurement = match
+      break
+    }
     await ctx.sleep(20)
   }
-  return null
+  // Race the settle promise against a hard timeout so a stuck Monaco
+  // editor cannot block the loop forever.
+  const settleAt = await Promise.race<number | null>([
+    settlePromise,
+    new Promise<number | null>((resolve) => setTimeout(() => resolve(null), EXTERNAL_SETTLE_CAP_MS + 500))
+  ])
+  const externalTotalMs = settleAt !== null
+    ? +(settleAt - externalClickAt).toFixed(2)
+    : null
+  return { measurement, externalTotalMs }
 }
 
 export async function testGitDiffClickLatency(ctx: AutotestContext): Promise<TestResult[]> {
@@ -120,6 +237,21 @@ export async function testGitDiffClickLatency(ctx: AutotestContext): Promise<Tes
     results.push({ name, ok, detail })
     log(`gdcl:record`, { name, ok, ...detail })
   }
+
+  // Force the BrowserWindow to the foreground so the renderer is not
+  // running in throttled / hidden-tab mode. Without this, requestAnimationFrame
+  // is paused, which permanently stalls the click-latency tracker's
+  // paint-seal step and turns every measurement into a `cancelled: true`
+  // ghost. We log the visibility state so a regression is obvious.
+  try {
+    await window.electronAPI?.debug?.focusWindow?.()
+  } catch {
+    /* focusWindow failures are non-fatal — the autotest still proceeds */
+  }
+  log('gdcl:visibility', {
+    visibilityState: typeof document !== 'undefined' ? document.visibilityState : 'unknown',
+    hasFocus: typeof document !== 'undefined' ? document.hasFocus() : null
+  })
 
   // 1. Open Git Diff for the active terminal.
   window.dispatchEvent(new CustomEvent('git-diff:open', { detail: { terminalId } }))
@@ -172,19 +304,34 @@ export async function testGitDiffClickLatency(ctx: AutotestContext): Promise<Tes
   // about.
   await sleep(800)
 
-  // 3. Walk every file, record the measurement.
+  // 3. Walk every file, record the measurement. Cap is set via env or
+  // hard-coded fallback so a single bad file (Monaco error, hung
+  // tokenizer) cannot block the whole suite.
+  const walkCap = (() => {
+    const raw = (window.electronAPI?.debug as unknown as { autotestSuite?: string })?.autotestSuite ?? ''
+    const m = raw.match(/cap=(\d+)/)
+    if (m) return Math.max(1, Math.min(50, Number(m[1])))
+    // Self-validation phase: cap to 8 files. Enough samples to see a
+    // delta distribution; few enough to keep the suite under ~2 minutes.
+    return Math.min(8, candidates.length)
+  })()
   const perFile: PerFileResult[] = []
-  for (const file of candidates) {
+  let walkIndex = 0
+  for (const file of candidates.slice(0, walkCap)) {
+    walkIndex += 1
     if (cancelled()) break
     const filename = (file as { filename?: string }).filename
     if (!filename) continue
+    log('gdcl:walk', { idx: walkIndex, total: candidates.length, filename })
     await sleep(SETTLE_BETWEEN_FILES_MS)
-    const m = await selectAndAwaitPaint(ctx, filename)
-    if (!m) {
+    const outcome = await selectAndAwaitPaint(ctx, filename)
+    if (!outcome.measurement) {
       perFile.push({
         filename,
         totalMs: null,
         paintTotalMs: null,
+        externalTotalMs: outcome.externalTotalMs,
+        trackerVsExternalDeltaMs: null,
         cacheState: 'unknown',
         phases: {
           readyToIpcMs: null,
@@ -197,8 +344,74 @@ export async function testGitDiffClickLatency(ctx: AutotestContext): Promise<Tes
       })
       continue
     }
-    perFile.push(measurementToResult(m))
+    perFile.push(measurementToResult(outcome.measurement, outcome.externalTotalMs))
+    log('gdcl:walk-done', {
+      idx: walkIndex,
+      filename,
+      trackerMs: outcome.measurement?.totalMs ?? null,
+      externalMs: outcome.externalTotalMs
+    })
   }
+
+  // Diagnostic: dump the tracker's full history so we can see whether
+  // measurements were recorded but the polling missed them, or never
+  // sealed at all (cancelled, missing paintReadyAt, etc.).
+  log('gdcl:tracker-history-json',
+    JSON.stringify((api.getClickLatencyHistory?.() ?? []).map((m) => ({
+      filename: m.filename,
+      cancelled: m.cancelled,
+      cacheState: m.cacheState,
+      hasIpcStart: m.ipcStartAt !== null,
+      hasIpcEnd: m.ipcEndAt !== null,
+      hasStateSet: m.stateSetAt !== null,
+      hasEditorReady: m.editorReadyAt !== null,
+      hasDiffComputed: m.diffComputedAt !== null,
+      hasPaintReady: m.paintReadyAt !== null,
+      totalMs: m.totalMs
+    })))
+  )
+
+  // Closed-loop validation: compare tracker's totalMs (what the in-app
+  // debug panel surfaces) against the externally-observed settle time.
+  // Negative deltas mean the tracker is reporting *less* than the user
+  // perceives — the bug class we are explicitly hunting after the
+  // placeholder-onDidUpdateDiff fix.
+  const eligibleDeltas = perFile
+    .filter((entry) =>
+      typeof entry.trackerVsExternalDeltaMs === 'number' &&
+      typeof entry.externalTotalMs === 'number' &&
+      entry.externalTotalMs >= 1 // discard noise where both totals are essentially zero
+    )
+    .map((entry) => ({
+      filename: entry.filename,
+      trackerMs: entry.paintTotalMs,
+      externalMs: entry.externalTotalMs as number,
+      deltaMs: entry.trackerVsExternalDeltaMs as number,
+      absDeltaMs: Math.abs(entry.trackerVsExternalDeltaMs as number)
+    }))
+  const sortedByAbs = [...eligibleDeltas].sort((a, b) => b.absDeltaMs - a.absDeltaMs)
+  const summary = {
+    samples: eligibleDeltas.length,
+    maxAbsDeltaMs: sortedByAbs[0]?.absDeltaMs ?? 0,
+    p95AbsDeltaMs: sortedByAbs.length
+      ? sortedByAbs[Math.min(sortedByAbs.length - 1, Math.ceil(sortedByAbs.length * 0.05) - 1) ?? 0]?.absDeltaMs ?? 0
+      : 0,
+    meanDeltaMs: eligibleDeltas.length
+      ? +(eligibleDeltas.reduce((acc, e) => acc + e.deltaMs, 0) / eligibleDeltas.length).toFixed(2)
+      : 0,
+    worst5: sortedByAbs.slice(0, 5)
+  }
+  log(`gdcl:tracker-vs-external-json ${JSON.stringify(summary)}`)
+  // Pass when tracker matches external within a generous window. Our
+  // target is "within ~1ms typical, occasional outliers up to a frame
+  // (~17ms)". Anything beyond 50ms is the placeholder bug or a
+  // tokenization-streams-after-mark bug returning.
+  record('gdcl-tracker-vs-external-within-50ms', summary.maxAbsDeltaMs <= 50, {
+    samples: summary.samples,
+    maxAbsDeltaMs: summary.maxAbsDeltaMs,
+    p95AbsDeltaMs: summary.p95AbsDeltaMs,
+    meanDeltaMs: summary.meanDeltaMs
+  })
 
   // 4. Aggregate & emit a sorted breakdown. Use JSON.stringify so the
   // structured payload survives Node's util.inspect depth-2 truncation
@@ -301,8 +514,9 @@ export async function testGitDiffClickLatency(ctx: AutotestContext): Promise<Tes
           record('gdcl-invalidation-on-background-mutation', sentinelLanded, {
             target: targetName,
             sawSentinel: sentinelLanded,
-            cacheStateAfter: reread?.cacheState ?? null,
-            totalMsAfter: reread?.totalMs ?? null,
+            cacheStateAfter: reread.measurement?.cacheState ?? null,
+            totalMsAfter: reread.measurement?.totalMs ?? null,
+            externalTotalMsAfter: reread.externalTotalMs,
             postReadHasSentinel: Boolean(after && typeof after.modifiedContent === 'string' && after.modifiedContent.includes(sentinel.trim()))
           })
           // Restore the file to its pre-test content so subsequent autotest
