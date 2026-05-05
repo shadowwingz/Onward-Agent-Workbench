@@ -13,7 +13,7 @@ import { resolve, relative, sep, isAbsolute, dirname, delimiter, basename, join 
 import { fileURLToPath } from 'url'
 import { gitRuntimeManager, type GitTaskKind, type GitTaskPriority } from './git-runtime-manager'
 import { MAX_IMAGE_FILE_SIZE, bufferToImageDataUrl, isSupportedImageFile } from './image-utils'
-import { perfTraceLogger } from './perf-trace-logger'
+import { performanceTrace } from './performance-trace'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 import { gitDiffCacheInvalidator } from './git-diff-cache-invalidator'
 // Static circular import is intentional and safe: every consumer below
@@ -138,7 +138,7 @@ export async function execFileAsync(
       const eventName = isGit ? PERF_TRACE_EVENT.MAIN_GIT_EXEC : PERF_TRACE_EVENT.MAIN_PROC_EXEC
       try {
         const result = await rawExecFileAsync(file, args, options)
-        perfTraceLogger.record(eventName, {
+        performanceTrace.record(eventName, {
           ...basePayload,
           durationMs: Date.now() - startMs,
           ok: true
@@ -146,7 +146,7 @@ export async function execFileAsync(
         return result
       } catch (error) {
         const err = error as NodeJS.ErrnoException & { code?: string | number }
-        perfTraceLogger.record(eventName, {
+        performanceTrace.record(eventName, {
           ...basePayload,
           durationMs: Date.now() - startMs,
           ok: false,
@@ -401,7 +401,7 @@ export function invalidateGitDiffCache(cwd: string, reason: string): number {
   // at least the request/file caches have already been cleared and the
   // user gets a fresh git invocation on the next call.
   gitRepositorySnapshotService.invalidate(normalized)
-  perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_GIT_DIFF_CACHE_INVALIDATE, {
+  performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_DIFF_CACHE_INVALIDATE, {
     cwd: normalized,
     reason,
     entriesCleared: cleared
@@ -1645,7 +1645,7 @@ function filterMeaninglessSubmoduleEntries(
     const flagsLabel = flags
       ? `${flags.commitChanged ? 'C' : '.'}${flags.workTreeModified ? 'M' : '.'}${flags.untrackedContent ? 'U' : '.'}`
       : '???'
-    perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_GIT_DIFF_SUBMODULE_FILTER, {
+    performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_DIFF_SUBMODULE_FILTER, {
       repoRoot,
       repoLabel,
       path: file.filename,
@@ -1819,7 +1819,7 @@ export async function getGitDiff(cwd: string, options?: GitDiffLoadOptions): Pro
   const now = Date.now()
   const cached = gitDiffRequestCache.get(cacheKey)
   if (!force && cached && now - cached.at < GIT_DIFF_REQUEST_CACHE_TTL) {
-    perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_GIT_DIFF_CACHE_HIT, {
+    performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_DIFF_CACHE_HIT, {
       cwd: resolve(cwd),
       scope,
       ageMs: now - cached.at
@@ -1838,7 +1838,7 @@ export async function getGitDiff(cwd: string, options?: GitDiffLoadOptions): Pro
 
   if (force && cached) {
     gitDiffRequestCache.delete(cacheKey)
-    perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_GIT_DIFF_CACHE_INVALIDATE, {
+    performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_DIFF_CACHE_INVALIDATE, {
       cwd: resolve(cwd),
       reason: 'force',
       entriesCleared: 1

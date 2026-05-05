@@ -9,7 +9,7 @@ import { readdir, stat } from 'fs/promises'
 import type { BrowserWindow } from 'electron'
 import { join, normalize } from 'path'
 import { IPC } from '../shared/ipc-channels'
-import { perfTraceLogger } from './perf-trace-logger'
+import { performanceTrace } from './performance-trace'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 
 interface TreeEntry {
@@ -229,7 +229,7 @@ export class ProjectTreeWatchManager {
     // FSEvent. Raw events are often 10-100x noisier than the debounced
     // batch; this sampling keeps the trace readable while still letting
     // SQL bucket by time.
-    perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_PROJECT_TREE_WATCH_EVENT, {
+    performanceTrace.record(PERF_TRACE_EVENT.MAIN_PROJECT_TREE_WATCH_EVENT, {
       cwd: entry.cwdForRenderer,
       pendingAdded: entry.pendingAdded.size,
       pendingRemoved: entry.pendingRemoved.size,
@@ -263,7 +263,7 @@ export class ProjectTreeWatchManager {
     entry.pendingRemoved.clear()
     entry.pendingResync = false
 
-    perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_PROJECT_TREE_WATCH_BATCH, {
+    performanceTrace.record(PERF_TRACE_EVENT.MAIN_PROJECT_TREE_WATCH_BATCH, {
       cwd: entry.cwdForRenderer,
       added: added.length,
       removed: removed.length,

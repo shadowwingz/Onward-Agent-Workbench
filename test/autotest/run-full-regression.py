@@ -113,6 +113,7 @@ SCRIPTS: List[str] = [
     "test/autotest/run-task-layout-autotest.sh",
     "test/autotest/run-terminal-title-rename-autotest.sh",
     "test/autotest/run-trace-infra-self-check-autotest.sh",
+    "test/autotest/run-perf-trace-rotation-autotest.sh",
     "test/autotest/run-working-directory-copy-autotest.sh",
 ]
 

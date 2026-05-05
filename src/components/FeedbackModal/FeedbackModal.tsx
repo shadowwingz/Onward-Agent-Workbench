@@ -88,6 +88,17 @@ export function FeedbackModal({ isOpen, onClose }: FeedbackModalProps) {
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [isLoadingHistory, setIsLoadingHistory] = useState(false)
   const [isSyncingHistory, setIsSyncingHistory] = useState(false)
+  // Diagnostic bundle export — independent flow from form submit. Status
+  // drives an inline message under the button so the user sees the
+  // outcome without a separate toast surface.
+  //
+  // `verifyFailed` is distinct from `error`: the ZIP IS on disk (path
+  // is set) but the closed-loop self-verification flagged it as
+  // suspect. We keep the file (the user can still inspect it) and
+  // surface the failing checks so they know not to share it.
+  type BundleStatus = 'idle' | 'generating' | 'success' | 'verifyFailed' | 'error' | 'canceled'
+  const [bundleStatus, setBundleStatus] = useState<BundleStatus>('idle')
+  const [bundleMessage, setBundleMessage] = useState<string | null>(null)
 
   useSubpageEscape({ isOpen, onEscape: onClose })
 
@@ -196,6 +207,46 @@ export function FeedbackModal({ isOpen, onClose }: FeedbackModalProps) {
       setHistoryError(String(error))
     }
   }, [])
+
+  const handleGenerateDiagnosticBundle = useCallback(async () => {
+    setBundleStatus('generating')
+    setBundleMessage(null)
+    try {
+      const result = await window.electronAPI.feedback.exportDiagnosticBundle()
+      if (result.canceled) {
+        setBundleStatus('canceled')
+        setBundleMessage(t('feedback.diagnosticBundle.canceled'))
+        return
+      }
+      if (result.success && result.path) {
+        setBundleStatus('success')
+        setBundleMessage(t('feedback.diagnosticBundle.success', { path: result.path }))
+        return
+      }
+      // ZIP wrote but self-verification rejected it: keep the file on
+      // disk, but surface the failing checks loudly so the user does
+      // not unknowingly share a suspect bundle.
+      if (!result.success && result.path && result.verification && !result.verification.ok) {
+        const failedChecks = result.verification.checks
+          .filter((c) => !c.passed)
+          .map((c) => c.name)
+          .join(', ')
+        setBundleStatus('verifyFailed')
+        setBundleMessage(
+          t('feedback.diagnosticBundle.verifyFailed', {
+            path: result.path,
+            checks: failedChecks
+          })
+        )
+        return
+      }
+      setBundleStatus('error')
+      setBundleMessage(t('feedback.diagnosticBundle.error', { error: result.error ?? 'unknown' }))
+    } catch (error) {
+      setBundleStatus('error')
+      setBundleMessage(t('feedback.diagnosticBundle.error', { error: String(error) }))
+    }
+  }, [t])
 
   const handleSubmit = useCallback(async () => {
     setFormError(null)
@@ -323,25 +374,64 @@ export function FeedbackModal({ isOpen, onClose }: FeedbackModalProps) {
         </div>
 
         <div className="feedback-modal-tabs" role="tablist" aria-label={t('feedback.tabsLabel')}>
-          <button
-            className={`feedback-modal-tab ${activeTab === 'submit' ? 'active' : ''}`}
-            onClick={() => setActiveTab('submit')}
-            role="tab"
-            aria-selected={activeTab === 'submit'}
-            data-testid="feedback-tab-submit"
-          >
-            {t('feedback.tab.submit')}
-          </button>
-          <button
-            className={`feedback-modal-tab ${activeTab === 'history' ? 'active' : ''}`}
-            onClick={() => setActiveTab('history')}
-            role="tab"
-            aria-selected={activeTab === 'history'}
-            data-testid="feedback-tab-history"
-          >
-            {t('feedback.tab.history')}
-          </button>
+          <div className="feedback-modal-tabs-left">
+            <button
+              className={`feedback-modal-tab ${activeTab === 'submit' ? 'active' : ''}`}
+              onClick={() => setActiveTab('submit')}
+              role="tab"
+              aria-selected={activeTab === 'submit'}
+              data-testid="feedback-tab-submit"
+            >
+              {t('feedback.tab.submit')}
+            </button>
+            <button
+              className={`feedback-modal-tab ${activeTab === 'history' ? 'active' : ''}`}
+              onClick={() => setActiveTab('history')}
+              role="tab"
+              aria-selected={activeTab === 'history'}
+              data-testid="feedback-tab-history"
+            >
+              {t('feedback.tab.history')}
+            </button>
+          </div>
+          {/*
+            Diagnostic-bundle action — purposely placed in the tab bar
+            so it never sits inside the GitHub submit form. The button
+            is an "advanced" action: trace + state file packager that
+            stays local. The notice strip below makes the privacy
+            posture explicit.
+          */}
+          <div className="feedback-modal-tabs-right">
+            <button
+              type="button"
+              className="feedback-secondary-button feedback-diagnostic-bundle-button"
+              onClick={() => void handleGenerateDiagnosticBundle()}
+              disabled={bundleStatus === 'generating'}
+              data-testid="feedback-diagnostic-bundle-button"
+            >
+              {bundleStatus === 'generating'
+                ? t('feedback.diagnosticBundle.generating')
+                : t('feedback.diagnosticBundle.button')}
+            </button>
+          </div>
         </div>
+
+        <div
+          className="feedback-diagnostic-bundle-notice"
+          data-testid="feedback-diagnostic-bundle-notice"
+          role="note"
+        >
+          {t('feedback.diagnosticBundle.notice')}
+        </div>
+
+        {bundleMessage ? (
+          <div
+            className={`feedback-diagnostic-bundle-status feedback-diagnostic-bundle-status--${bundleStatus}`}
+            data-testid="feedback-diagnostic-bundle-status"
+          >
+            {bundleMessage}
+          </div>
+        ) : null}
 
         <div className="feedback-modal-body">
           {activeTab === 'submit' ? (

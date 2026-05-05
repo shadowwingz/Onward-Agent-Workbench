@@ -75,7 +75,7 @@ import { access, constants } from 'fs/promises'
 import { resolve } from 'path'
 import { isMainThread } from 'worker_threads'
 
-import { perfTraceLogger } from './perf-trace-logger'
+import { performanceTrace } from './performance-trace'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 
 import {
@@ -185,7 +185,7 @@ class GitRepositorySnapshotServiceImpl {
     if (!force) {
       const cached = this.cache.get(key)
       if (cached && (Date.now() - cached.snapshot.capturedAt) < SNAPSHOT_CACHE_TTL_MS) {
-        perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_GIT_SNAPSHOT_CACHE_HIT, {
+        performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_SNAPSHOT_CACHE_HIT, {
           cwd: key,
           fingerprint: cached.snapshot.fingerprint,
           ageMs: Date.now() - cached.snapshot.capturedAt,
@@ -216,7 +216,7 @@ class GitRepositorySnapshotServiceImpl {
     const key = resolve(cwd)
     const had = this.cache.delete(key)
     if (had) {
-      perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_GIT_SNAPSHOT_INVALIDATE, {
+      performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_SNAPSHOT_INVALIDATE, {
         cwd: key
       })
       return 1
@@ -237,7 +237,7 @@ class GitRepositorySnapshotServiceImpl {
     const snapshot = await captureGitRepositorySnapshot(cwd)
     this.cache.set(key, { snapshot, key })
     this.evictLRU()
-    perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_GIT_SNAPSHOT_CAPTURE, {
+    performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_SNAPSHOT_CAPTURE, {
       cwd: key,
       isRepo: snapshot.isRepo,
       submoduleCount: snapshot.submodules.length,

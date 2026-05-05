@@ -31,9 +31,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Start with a clean perf directory so we can pick the newest file
-# without ambiguity.
-rm -f "$TRACE_DIR"/*.json "$TRACE_DIR"/latest.txt
+# Start with a clean perf directory so we can pick the newest chunks
+# without ambiguity. The new always-on trace store writes NDJSON
+# chunks (perf-NNNN-*.jsonl); the legacy single-file .json layout is
+# also cleaned for backward-compatibility on older builds.
+rm -f "$TRACE_DIR"/*.jsonl "$TRACE_DIR"/*.json "$TRACE_DIR"/latest.txt
 
 if [[ ! -x "$APP_BIN" ]]; then
   echo "ERROR: app binary not found or not executable: $APP_BIN" >&2
@@ -64,63 +66,115 @@ wait "$APP_PID" 2>/dev/null || true
 pkill -x "$APP_NAME" 2>/dev/null || true
 
 FAILED=0
-newest="$(ls -t "$TRACE_DIR"/*.json 2>/dev/null | head -1 || true)"
+# The always-on trace store writes NDJSON chunks. We collect every
+# `perf-*.jsonl` in TRACE_DIR; if none exist, fall back to the legacy
+# single-`.json` layout produced by older builds so this self-check can
+# bisect a regression that changed the format unexpectedly.
+shopt -s nullglob
+chunks=("$TRACE_DIR"/perf-*.jsonl)
+shopt -u nullglob
 
-if [[ -z "$newest" || ! -s "$newest" ]]; then
-  echo "FAIL: no Chrome trace JSON produced in $TRACE_DIR" >&2
-  echo "      last 40 lines of app output:" >&2
-  tail -n 40 "$LOG_FILE" >&2 || true
-  exit 1
-fi
-
-# Parse-validate. The main process may not have had a chance to write
-# the closing `]}` (we sent SIGTERM); Perfetto UI is lenient about
-# this, so we also re-close in memory before JSON.parse.
-node -e '
-  const fs = require("fs");
-  let text = fs.readFileSync(process.argv[1], "utf8").trim();
-  if (!text.endsWith("]}")) {
-    text = text.replace(/,\s*$/, "") + "]}";
-  }
-  const obj = JSON.parse(text);
-  if (!Array.isArray(obj.traceEvents)) throw new Error("no traceEvents array");
-  if (obj.traceEvents.length === 0) throw new Error("traceEvents array is empty");
-  const hasMain = obj.traceEvents.some(e => typeof e.name === "string" && e.name.startsWith("main:"));
-  if (!hasMain) throw new Error("no main:* event recorded (main:trace-start canary missing)");
-  console.log("OK:", obj.traceEvents.length, "events, first main event found");
-' "$newest" || {
-  echo "FAIL: trace validation failed for $newest" >&2
-  FAILED=1
-}
-
-# Authoritative parse check via the Perfetto parser itself, but only if
-# trace_processor_shell is already installed locally (avoids pulling
-# 20 MB from the network inside a regression run).
-#
-# Caveat: tp_shell is strict about a closing `]}`. If Electron's
-# graceful shutdown handler didn't fire (signals racing electron-builder's
-# packaged launcher in CI), our file ends on a trailing comma. Stage a
-# re-closed copy for tp_shell instead of rejecting a structurally OK
-# trace.
-TP="$HOME/.local/share/perfetto/prebuilts/trace_processor_shell"
-if [[ -x "$TP" && -n "$newest" ]]; then
-  sealed="${newest%.json}.sealed.json"
+if [[ ${#chunks[@]} -eq 0 ]]; then
+  legacy="$(ls -t "$TRACE_DIR"/*.json 2>/dev/null | head -1 || true)"
+  if [[ -z "$legacy" || ! -s "$legacy" ]]; then
+    echo "FAIL: no NDJSON chunks (perf-*.jsonl) and no legacy *.json in $TRACE_DIR" >&2
+    echo "      last 40 lines of app output:" >&2
+    tail -n 40 "$LOG_FILE" >&2 || true
+    exit 1
+  fi
+  # Legacy validation path — kept so this self-check remains useful when
+  # bisecting against pre-NDJSON commits.
   node -e '
     const fs = require("fs");
     let text = fs.readFileSync(process.argv[1], "utf8").trim();
-    if (!text.endsWith("]}")) {
-      text = text.replace(/,\s*$/, "") + "\n]}";
+    if (!text.endsWith("]}")) text = text.replace(/,\s*$/, "") + "]}";
+    const obj = JSON.parse(text);
+    if (!Array.isArray(obj.traceEvents)) throw new Error("no traceEvents array");
+    if (obj.traceEvents.length === 0) throw new Error("traceEvents array is empty");
+    const hasMain = obj.traceEvents.some(e => typeof e.name === "string" && e.name.startsWith("main:"));
+    if (!hasMain) throw new Error("no main:* event recorded (main:trace-start canary missing)");
+    console.log("OK (legacy):", obj.traceEvents.length, "events, first main event found");
+  ' "$legacy" || {
+    echo "FAIL: legacy trace validation failed for $legacy" >&2
+    exit 1
+  }
+  echo "T02 trace infrastructure self-check: PASS (legacy file=$legacy)"
+  exit 0
+fi
+
+# NDJSON validation: parse every line of every chunk; drop a partial
+# last-line (signal-induced truncation) silently — that resilience is
+# the whole reason we picked NDJSON. Then assert at least one main:*
+# event landed across the chunks.
+node -e '
+  const fs = require("fs");
+  const chunks = process.argv.slice(1);
+  let total = 0;
+  let mainSeen = false;
+  let invalidLines = 0;
+  for (const chunk of chunks) {
+    const text = fs.readFileSync(chunk, "utf8");
+    const lines = text.split("\n");
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      let event;
+      try { event = JSON.parse(trimmed); } catch { invalidLines += 1; continue; }
+      total += 1;
+      if (typeof event.name === "string" && event.name.startsWith("main:")) {
+        mainSeen = true;
+      }
     }
-    fs.writeFileSync(process.argv[2], text);
-  ' "$newest" "$sealed"
+  }
+  if (total === 0) throw new Error(`no events parsed across ${chunks.length} chunk(s)`);
+  if (!mainSeen) throw new Error("no main:* event recorded (main:trace-start canary missing)");
+  // One trailing partial line is acceptable (SIGKILL during a write).
+  // More than that suggests a structural format bug.
+  if (invalidLines > 1) throw new Error(`${invalidLines} unparseable lines — expected ≤1 from signal-truncated tail`);
+  console.log("OK:", total, "events,", chunks.length, "chunk(s), main event found, invalid=" + invalidLines);
+' "${chunks[@]}" || {
+  echo "FAIL: NDJSON trace validation failed" >&2
+  echo "      chunks scanned: ${chunks[*]}" >&2
+  FAILED=1
+}
+
+# Authoritative parse check via the Perfetto parser, but only if
+# trace_processor_shell is already installed locally (avoids pulling
+# 20 MB from the network inside a regression run). For NDJSON we wrap
+# the chunks into a Chrome Trace Event Format envelope first, since
+# tp_shell wants the array form.
+TP="$HOME/.local/share/perfetto/prebuilts/trace_processor_shell"
+if [[ "$FAILED" == "0" && -x "$TP" && ${#chunks[@]} -gt 0 ]]; then
+  sealed="$(mktemp -t onward-trace-merged.XXXXXX.json)"
+  node -e '
+    const fs = require("fs");
+    const chunks = process.argv.slice(1, -1);
+    const out = process.argv[process.argv.length - 1];
+    const ws = fs.createWriteStream(out);
+    ws.write("{\"traceEvents\":[\n");
+    let first = true;
+    for (const chunk of chunks) {
+      const text = fs.readFileSync(chunk, "utf8");
+      for (const line of text.split("\n")) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try { JSON.parse(trimmed); } catch { continue; }
+        if (!first) ws.write(",\n");
+        ws.write("  " + trimmed);
+        first = false;
+      }
+    }
+    ws.write("\n]}\n");
+    ws.end();
+  ' "${chunks[@]}" "$sealed"
   if ! "$TP" --run-metrics trace_stats --metrics-output=binary "$sealed" > /dev/null 2>&1; then
-    echo "FAIL: trace_processor_shell rejected $sealed" >&2
+    echo "FAIL: trace_processor_shell rejected merged trace ($sealed)" >&2
     FAILED=1
   fi
   rm -f "$sealed"
 fi
 
 if [[ "$FAILED" == "0" ]]; then
-  echo "T02 trace infrastructure self-check: PASS (file=$newest)"
+  echo "T02 trace infrastructure self-check: PASS (chunks=${#chunks[@]})"
 fi
 exit $FAILED

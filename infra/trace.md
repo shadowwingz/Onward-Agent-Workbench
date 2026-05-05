@@ -28,44 +28,75 @@ Document layout:
 
 ```
 ┌────────────── Electron main (pid=1, tid=1) ─────────────────┐
-│  electron/main/perf-trace-logger.ts                          │
+│  electron/main/performance-trace.ts                          │
+│    · canonical singleton `performanceTrace`                  │
+│    · record(name, data, source?)   — generic emitter         │
+│      (resolvePhase auto-routes ph='X' / 'i'; per-Task tid;   │
+│       worker→main forwarding via parentPort.postMessage)     │
+│    · recordInstant / recordCounter / recordComplete /        │
+│      recordFlowStart/Step/End / markTask* / timeAsync /      │
+│      summarizeText (PII-redacted lineage)                    │
 │    · startEventLoopMonitor()   — 250 ms sample; drift ≥ 100  │
 │      ms → main:event-loop-stall                              │
 │    · startGitRuntimeMonitor()  — 1 s tick → main:git-runtime-│
 │      summary + main:gitwatch-summary                         │
-│    · record(name, data, source?) — generic emitter           │
 │        ↓                                                     │
-│    <repoRoot>/traces/perf/perf-trace-<ISO>-<pid>.json        │
-│    (Chrome Trace Event Format — loaded natively by Perfetto  │
-│     UI and trace_processor_shell; SQL on the same `slice`,   │
-│     `thread`, `process` tables as .pftrace)                  │
+│  electron/main/trace-store.ts                                │
+│    · append-only NDJSON chunks (one Chrome Trace Event       │
+│      object per line)                                        │
+│    · 8 MB / chunk → rotate; 64 MB total cap (8 chunks);      │
+│      enforceBudget evicts oldest with 8 MB headroom          │
+│    · sync writeSync(fd, line) — kernel buffer survives       │
+│      SIGKILL; statSync sees real-time chunk size for         │
+│      eviction accounting                                     │
+│    · per-emitter-name 100 events/sec rate limit; dropped     │
+│      summaries flushed every 5 s as                          │
+│      `trace-store:dropped-summary`                           │
+│        ↓                                                     │
+│    <repoRoot>/traces/perf/perf-NNNN-<ISO>-<pid>.jsonl  (dev) │
+│    <userData>/traces/perf-NNNN-<ISO>-<pid>.jsonl       (prod)│
+│    + latest.txt   (points at the dir containing the chunks)  │
 │                                                              │
 │  Workers (Node Worker threads):                              │
 │    · app-state / git-ipc / git-status / project-fs / sqlite  │
 │      / ripgrep                                               │
+│    · `performanceTrace.record(...)` inside a worker auto-    │
+│      detects `!isMainThread` and forwards a                  │
+│      `PerfTraceWorkerEvent` envelope via                     │
+│      `parentPort.postMessage(...)`                           │
 │    · Each worker-client in electron/main/*-worker-client.ts  │
-│      emits a ph='X' latency slice per request on the main    │
-│      thread (track pid=1, tid=1) — the worker itself is a    │
-│      synchronous message pump so the request is its own span │
+│      replays the envelope through `replayPerfTraceWorker-    │
+│      Event(msg, { tid: WORKER_TID.X, threadName: 'X' })` so  │
+│      the worker shows up as its own thread row in Perfetto   │
 │                                                              │
 ┌────────────── Electron renderer (pid=2, tid=<wc.id>) ────────┐
 │  src/utils/perf-trace.ts                                     │
+│    · perfTrace(name, data) — hot-path, one-shot              │
+│    · perfTraceTask(name, data, terminalId) — Task-scoped tid │
 │    · installPromptInputTrace() — input → rAF → rAF → paint,  │
 │      emits renderer:prompt-input-paint                       │
 │    · installRendererStallTrace() — 250 ms + per-frame rAF    │
 │    · PerformanceObserver('longtask') → renderer:longtask     │
+│  src/utils/performance-trace.ts                              │
+│    · richer renderer-side helper for flow correlation        │
+│      (recordFlowStart/Step/End, timeAsync, summarizeText —   │
+│       PII-safe length / line-count / salted hash)            │
 │  src/utils/perf-monitor.ts                                   │
 │    · 1 s aggregation → renderer:perf-snapshot                │
 │        ↓ IPC DEBUG_PERF_TRACE (sender.id → tid)              │
-│    main-side perfTraceLogger.record(event, data, {           │
+│    main-side performanceTrace.record(event, data, {          │
 │      process: 'renderer', tid })                             │
 │                                                              │
 └──────────────┬───────────────────────────────────────────────┘
                │
                ▼
 ┌─ infra/scripts/open_trace.sh ────────────────────────────────┐
+│  · Auto-detects input form: chunk dir / single .jsonl /      │
+│    legacy .json. NDJSON inputs are wrapped on demand into    │
+│    `{"traceEvents":[…]}` so trace_processor_shell loads      │
+│    them unchanged.                                           │
 │  · Bootstrap + start trace_processor_shell --httpd :9001,    │
-│    load newest traces/perf/*.json                            │
+│    load newest chunks from traces/perf/                      │
 │  · Pin UI URL to tp_shell build:                             │
 │    https://ui.perfetto.dev/v<ver>-<sha>/#!/?rpc_port=9001    │
 │  · Open browser automatically — trace never leaves localhost │
@@ -73,19 +104,25 @@ Document layout:
                │
                ├─► Perfetto UI (slice / instant / counter tracks)
                └─► SQL queries (Python `perfetto.trace_processor`
-                   against the same file, no conversion)
+                   against the wrapped envelope, no schema diff)
 ```
 
 Key design decisions:
 
 | Decision | Choice | Rationale |
 |---|---|---|
-| Wire format | Chrome Trace Event Format (`{"traceEvents":[…]}`) | Perfetto UI and `trace_processor_shell` consume it natively; zero extra dependency; Node's built-in `JSON.stringify` is enough |
-| Output path | `<repoRoot>/traces/perf/` (dev + autotest), `userData/debug/` (packaged production) | Dev-time traces are diff-friendly and CI-collectable; end users without a checkout still get local diagnostics |
-| Event-name registry | `src/utils/perf-trace-names.ts` single const enum | Perfetto SQL queries key on event names — a centralised registry makes renames visible and prevents drift |
-| Phase mapping | `resolvePhase()` routes by name: stall / longtask / input-paint default to `X` with auto-derived `dur` | Callers pass `(name, data)` without worrying about Chrome trace protocol details |
-| File closure | Terminal `{}` element + `]}` on graceful quit; `SIGTERM` / `SIGINT` / `will-quit` / `before-quit` all flush | Perfetto UI tolerates truncated arrays on crash; tp_shell is strict, so we also close in the T02 self-check before handing tp_shell the file |
-| UI build pinning | Grep `tp_shell --version` → `ui.perfetto.dev/v<ver>-<sha>/` path | Avoids the "different build" warning banner that fires when the cloud UI leads or lags tp_shell |
+| Wire format (per record) | Chrome Trace Event Format object | Perfetto UI and `trace_processor_shell` consume it natively; zero extra dependency; Node's built-in `JSON.stringify` is enough |
+| On-disk format | **NDJSON** (one event per line, no surrounding `{traceEvents:[…]}` array) | A SIGKILL / OOM / power-loss leaves at most ONE half-written tail line; everything before is intact and parseable. The legacy array form lost the entire file when the closing `]}` was never written. NDJSON is also append-friendly across rotations and process restarts. `open_trace.sh` wraps the chunks back into the `{traceEvents:[…]}` envelope on demand for tp_shell. |
+| Chunked rotation | 8 MB per chunk (`CHUNK_BYTE_LIMIT`); 64 MB total dir cap (`TOTAL_BYTE_LIMIT`); eviction with 8 MB headroom so closed-bytes ≤ 56 MB and (closed + active) ≤ 64 MB at any moment | Keeps user-reportable diagnostic state bounded (~2-4 hours of typical usage) while preserving append-only semantics. |
+| Sync `fs.writeSync(fd, line)` (no Node WriteStream) | Each event hits the kernel buffer immediately | Two reasons: (a) `WriteStream` queues writes inside the process and only drains when the event loop runs — in a tight stress loop the queue grows unbounded and `statSync` returns lagged sizes that defeat eviction accounting; (b) bytes already in the kernel buffer survive process death, so SIGKILL no longer loses recent events. |
+| Output path | `<repoRoot>/traces/perf/` (dev + autotest), `<userData>/traces/` (packaged production) | Dev-time chunks are diff-friendly and CI-collectable; end users without a checkout still get local diagnostics under one fixed path that user-reporting tools can ZIP. |
+| Default-on capture | Trace store enabled unless `ONWARD_PERF_TRACE=0` | Always-on diagnostic capture. The 64 MB total cap is finite, so an idle store is cheap; the value of having yesterday's trace when a user reports today's bug is high. |
+| Single-instance lock | `app.requestSingleInstanceLock()` keys on resolved userData; second-instance event focuses the existing main window | Two Onward processes against the same `<userData>/traces/` would race on chunk rotation seqs and on `latest.txt`. The lock guarantees one writer per userData. Different builds (dev vs autotest vs production) keep their own userData and their own lock — no cross-build contention. |
+| Event-name registry | `src/utils/perf-trace-names.ts` single const enum | Perfetto SQL queries key on event names — a centralised registry makes renames visible and prevents drift. |
+| Phase mapping | `resolvePhase()` routes by name: stall / longtask / input-paint default to `X` with auto-derived `dur` from `driftMs` / `durationMs` / `eventToPaintMs` / `elapsedMs` / `workerDurationMs` | Callers pass `(name, data)` without worrying about Chrome Trace Event Format phases. |
+| Per-name rate limit | 100 events/sec/name; bursts are dropped and summarised every 5 s as `trace-store:dropped-summary` | Protects disk and Perfetto's parser from a runaway emitter. The autotest stress harness can opt-out via `bypassRateLimit: true` to drive 64 MB of synthetic events through one name in seconds. |
+| PII redaction | Two lineages — `record()` length-truncates only; `recordRendererEvent / markTask* / recordFlow* / summarizeText` apply a `SENSITIVE_KEY_RE` blacklist + `ALLOWED_STRING_KEYS` allowlist; raw content captured only when `ONWARD_PERF_TRACE_CAPTURE_CONTENT=1` | Perf events keep all metadata; user-content paths default to length / line-count / salted hash, with optional bounded preview. |
+| UI build pinning | Grep `tp_shell --version` → `ui.perfetto.dev/v<ver>-<sha>/` path | Avoids the "different build" warning banner that fires when the cloud UI leads or lags tp_shell. |
 | Per-Task tid lanes | `assignTaskTid(terminalId, side)` — main tids start at 10000, renderer at 20000; thread_name = `task-<shortId>` (main) / `task-<shortId>-rnd` (renderer); auto-emitted on first event | Lets every hop in the PTY data-flow pipeline (onData → buffer → IPC send → renderer recv → scheduler enqueue → scheduler flush → xterm.write) line up on one Perfetto row per Task, on both processes. Real `tid=1` / `tid=WebContents.id` rows retained unchanged for everything not task-scoped. |
 
 ### PTY data flow — end-to-end, per Task row
@@ -152,8 +189,8 @@ append new names, never rename existing ones.
 
 | Constant | Name | Phase | Emitted at |
 |---|---|---|---|
-| `MAIN_TRACE_START` | `main:trace-start` | `i` (g) | `perf-trace-logger.ts` first start() |
-| `MAIN_TRACE_STOP` | `main:trace-stop` | `i` (t) | `perf-trace-logger.ts::stop()` |
+| `MAIN_TRACE_START` | `main:trace-start` | `i` (g) | `performance-trace.ts::initialize()` first call |
+| `MAIN_TRACE_STOP` | `main:trace-stop` | `i` (t) | `performance-trace.ts::stop()` |
 | `MAIN_APP_BEFORE_QUIT` | `main:app.before-quit` | `i` | `electron/main/index.ts` `app.on('before-quit')` |
 | `MAIN_APP_WILL_QUIT` | `main:app.will-quit` | `i` | `electron/main/index.ts` `app.on('will-quit')` |
 
@@ -255,12 +292,14 @@ Routed onto per-Task virtual tid (`task-<shortId>` on main, `-rnd` suffix on ren
 
 ### 2.2 Worker threads (pid=1, dedicated tid lane per worker)
 
-Each Node Worker thread now writes through the **same** main-side
-`perfTraceLogger` instance via a `parentPort.postMessage` envelope —
-there is exactly **one** trace JSON per process, and each worker shows
-up as its own `thread_name` track in Perfetto UI. The previous
+Each Node Worker thread writes through the **same** main-side
+`performanceTrace` singleton via a `parentPort.postMessage` envelope —
+there is exactly **one** trace stream per process, and each worker
+shows up as its own `thread_name` track in Perfetto UI. The previous
 "per-worker tmpdir trace file + race for `latest.txt`" design was
-removed in 2026-04-25.
+removed in 2026-04-25; the unified `electron/main/trace-store.ts`
+backend (NDJSON chunks under one shared dir) replaced the legacy
+JSON-array writer in 2026-05-05.
 
 Wire format (worker → main):
 
@@ -270,9 +309,9 @@ Wire format (worker → main):
 
 The shape mirrors the long-standing ripgrep precedent
 (`ripgrep-search-worker-entry.ts::postTrace`), generalised so every
-worker now uses it transparently — `perfTraceLogger.record(...)` inside
-a worker context auto-detects `!isMainThread` and forwards via
-`parentPort.postMessage(...)` instead of opening its own write stream.
+worker uses it transparently — `performanceTrace.record(...)` inside a
+worker context auto-detects `!isMainThread` and forwards via
+`parentPort.postMessage(...)` instead of touching disk.
 
 Receivers in each `*-worker-client.ts`:
 
@@ -289,7 +328,7 @@ this.worker.on('message', (message) => {
 })
 ```
 
-Worker tid lanes (defined in `electron/main/perf-trace-logger.ts`,
+Worker tid lanes (defined in `electron/main/performance-trace.ts`,
 exported as `WORKER_TID.*`). Main tid stays at `1`; per-task tids start
 at `MAIN_TASK_TID_BASE = 10000`; renderer per-task at `20000`. Worker
 tids occupy the gap 5000-5999 so all three coexist without overlap.
@@ -322,12 +361,13 @@ All worker-client events are emitted in `electron/main/*-worker-client.ts`.
 Exact file:line stays in the git log rather than pasted here (faster
 to trust `git grep PERF_TRACE_EVENT.WORKER_` than a stale markdown table).
 
-Important: do NOT static-import `electron` from `perf-trace-logger.ts`
-or any of its transitive importers (`git-utils.ts`, `git-runtime-
-manager.ts`, etc.). Worker threads inside Electron cannot resolve
-`require('electron')`, and a top-of-file import crashes the worker
-before any uncaughtException handler can register. Lazy-load via
-`require('electron')` gated on `worker_threads.isMainThread`.
+Important: do NOT static-import `electron` from `performance-trace.ts`
+/ `trace-store.ts` or any of their transitive importers
+(`git-utils.ts`, `git-runtime-manager.ts`, etc.). Worker threads inside
+Electron cannot resolve `require('electron')`, and a top-of-file
+import crashes the worker before any uncaughtException handler can
+register. Lazy-load via `require('electron')` gated on
+`worker_threads.isMainThread`.
 
 ### 2.3 Renderer (pid=2, tid=<WebContents.id>)
 
@@ -446,19 +486,22 @@ so the authoritative source stays unambiguous.
 
 ---
 
-## 4. On-disk format — Chrome Trace Event Format
+## 4. On-disk format — NDJSON of Chrome Trace Event Format records
 
-Each record is a standard Chrome Trace Event Format entry inside the
-`traceEvents` array:
+Each chunk file (`perf-NNNN-<ISO>-<pid>.jsonl`) is **NDJSON**: one line
+per event, no surrounding `{traceEvents:[…]}` array, no trailing
+commas. Each line is a standard Chrome Trace Event Format object:
 
 ```ts
 {
-  ph: 'X' | 'i' | 'M'          // slice / instant / metadata
+  ph: 'X' | 'i' | 'C' | 'M' | 's' | 't' | 'f'   // slice / instant / counter / metadata / flow
   name: string                  // from PERF_TRACE_EVENT
   ts: number                    // microseconds since epoch
-  pid: 1 | 2                    // 1 = main, 2 = any renderer
-  tid: number                   // main: 1; renderer: WebContents.id
+  pid: 1 | 2 | 3                // 1 = main, 2 = renderer, 3 = virtual Tasks process (markTask*)
+  tid: number                   // main: 1 (or worker 5001+); renderer: WebContents.id; per-Task: 10000+ (main) / 20000+ (renderer)
   dur?: number                  // ph='X' only, microseconds
+  cat?: string                  // category (used by recordX / markTask* / recordFlow* paths)
+  id?: string                   // ph='s'/'t'/'f' flow id
   s?: 'g' | 'p' | 't'           // ph='i' scope
   args?: Record<string, unknown>
 }
@@ -468,24 +511,65 @@ Upstream Chrome Trace Event Format spec:
 https://docs.google.com/document/d/1CvAClvFfyA5R-PhYUmn5OOQtYMH4h6I0nSsKchNAySU/preview
 
 Perfetto's ingestion into SQL tables is documented at
-https://perfetto.dev/docs/analysis/trace-processor — the mapping is:
+https://perfetto.dev/docs/analysis/trace-processor — the per-line
+shape is identical to the inline-array form, so the SQL mapping does
+not change:
 - `ph='X'` → `slice` table (queryable by `name`, `ts`, `dur`,
   `track_id`)
 - `ph='i'` → `slice` with `dur=0` (still in the same table)
+- `ph='C'` → `counter` table
+- `ph='s' / 't' / 'f'` → flow events on `slice`
 - `ph='M'` (process_name / thread_name / process_sort_index) →
   metadata for `process` / `thread` tables
 
-### Tolerance of unclosed files
+### Why NDJSON instead of the legacy `{traceEvents:[…]}` array
 
-`electron/main/perf-trace-logger.ts` opens the file with
-`{"traceEvents":[\n`, writes each event as a trailing-comma object,
-and closes with `\n  {}\n]}` on any of `app.on('will-quit')` /
-`app.on('before-quit')` / `SIGTERM` / `SIGINT`. If all four miss
-(sudden crash), Perfetto UI still loads the truncated array; reading
-the file in Node requires `text.replace(/,\s*$/,"")+"]}"` before
-`JSON.parse`. The T02 self-check runner
-(`test/autotest/run-trace-infra-self-check-autotest.sh`) performs both
-validations.
+A SIGKILL / OOM / power loss / hard reboot leaves at most one
+half-written tail line in the active chunk; everything before is
+intact and parseable. The legacy array form lost the entire file when
+the closing `]}` was never written, defeating the whole point of
+always-on capture.
+
+The downside — Perfetto UI and `trace_processor_shell` want the array
+form — is paid only when a human opens the trace, not when the
+process dies. `infra/scripts/open_trace.sh` and the T02 / T03
+autotests both wrap the chunks back into `{"traceEvents":[…]}` on
+demand using `node -e` (see § 5.3).
+
+### Reading NDJSON in Node
+
+```js
+const fs = require('fs')
+const lines = fs.readFileSync(chunkPath, 'utf8').split('\n')
+for (const line of lines) {
+  const trimmed = line.trim()
+  if (!trimmed) continue
+  let event
+  try { event = JSON.parse(trimmed) } catch { continue /* tail-partial */ }
+  // event is a Chrome Trace Event Format object
+}
+```
+
+Skip any line that fails to parse — the design accepts at most ONE
+unparseable line per chunk, and only at the tail (the in-flight write
+at the moment of SIGKILL). The T03 rotation autotest enforces this
+budget. Multiple invalid lines, or an invalid line in the middle of
+a chunk, indicate corruption and should fail loudly.
+
+### Storage layout
+
+```
+<dir>/                            ← <repoRoot>/traces/perf/ (dev) or <userData>/traces/ (prod)
+├── latest.txt                    ← contains absolute path of <dir>; user tooling reads ALL chunks
+├── perf-0000-…-<pid>.jsonl       ← oldest chunk; deleted first when total > 64 MB
+├── perf-0001-…-<pid>.jsonl
+├── …
+└── perf-NNNN-…-<pid>.jsonl       ← active chunk currently being written
+```
+
+Chunk seq numbers are monotonic across the lifetime of the dir
+(scanned on `initialize()` so a session resumes counting forward
+across process restarts).
 
 ---
 
@@ -501,43 +585,68 @@ pip install perfetto                     # Only if you want SQL in Python.
 
 ### 5.2 Capture a trace
 
+The trace store is **always-on** by default — every dev run, every
+autotest, every packaged production launch writes chunks under its
+trace directory automatically. To explicitly disable for a baseline
+benchmark: `ONWARD_PERF_TRACE=0`.
+
 **Dev mode** (most common):
 
 ```bash
-ONWARD_PERF_TRACE=1 pnpm dev
+pnpm dev
 # reproduce the operation you want to observe, then Cmd+Q
+# chunks land in <repoRoot>/traces/perf/perf-NNNN-<ISO>-<pid>.jsonl
 ```
 
-**From an autotest** — set `ONWARD_PERF_TRACE=1` alongside
-`ONWARD_AUTOTEST=1` on the runner. Example template:
-`test/autotest/run-trace-infra-self-check-autotest.sh`.
+**Packaged dev build**:
 
-Artefact: `<repoRoot>/traces/perf/perf-trace-<ISO>-<pid>.json`.
-`latest.txt` in the same directory points at the last session.
+```bash
+rm -rf out release && pnpm dist:dev
+# the auto-launched app starts capturing; chunks at the same dev path
+```
+
+**Production**: chunks land at `<userData>/traces/`. End users need
+only ZIP that directory when reporting a problem.
+
+**From an autotest**: nothing extra to set — `ONWARD_AUTOTEST=1`
+inherits the default-on capture. The legacy `ONWARD_PERF_TRACE=1`
+setting still works (anything other than `=0` enables). Example
+template: `test/autotest/run-trace-infra-self-check-autotest.sh`.
+
+Artefact: `<dir>/perf-NNNN-<ISO>-<pid>.jsonl` (multiple chunks per
+session); `<dir>/latest.txt` contains the absolute path of `<dir>`
+itself so user-reporting tools can find every chunk in one read.
 
 ### 5.3 Open in Perfetto UI
 
 ```bash
-bash infra/scripts/open_trace.sh                      # newest .json
-bash infra/scripts/open_trace.sh <file.json>          # pick a specific one
+bash infra/scripts/open_trace.sh                      # newest chunk under traces/perf/
+bash infra/scripts/open_trace.sh <chunk.jsonl>        # specific NDJSON chunk
+bash infra/scripts/open_trace.sh <traces/perf/>       # entire chunk dir, merged
+bash infra/scripts/open_trace.sh <legacy.json>        # legacy single-file Chrome trace
 ```
 
-The script starts `trace_processor_shell --httpd --http-port=9001`
-locally and opens the browser to a pinned
+The script auto-detects the input form. For NDJSON inputs it wraps the
+chunks into a Chrome Trace Event Format envelope on the fly (a
+temporary `.json` that tp_shell loads), then starts
+`trace_processor_shell --httpd --http-port=9001` locally and opens the
+browser to a pinned
 `https://ui.perfetto.dev/v<tp_ver>-<sha>/#!/?rpc_port=9001` — the
 trace never leaves localhost. To stop the HTTPD, `kill <pid>` using
 the PID printed at the end of the script.
 
 ### 5.4 SQL queries
 
-Trace processor normalises both `.json` and `.pftrace` into the same
-SQL schema. The queries below are verified against a live
-`traces/perf/*.json` produced by `ONWARD_PERF_TRACE=1`.
+Trace processor normalises Chrome trace JSON, `.pftrace`, and the
+NDJSON chunks (after `open_trace.sh` wraps them) into the same SQL
+schema. The Python queries below take the wrapped envelope; pass it
+the path printed by `open_trace.sh` (the temporary `.json` that
+tp_shell already loaded).
 
 Python:
 ```python
 from perfetto.trace_processor import TraceProcessor
-tp = TraceProcessor(trace='traces/perf/<newest>.json')
+tp = TraceProcessor(trace='/tmp/onward-trace-merged.XXXX.json')  # printed by open_trace.sh
 
 # Every event-loop stall, worst-first.
 for row in tp.query("""
@@ -573,21 +682,56 @@ for row in tp.query("""
     print(row)
 ```
 
-`trace_processor_shell -q <file.sql> <trace.json>` — CSV output, good
-for CI. Example one-liner:
+`trace_processor_shell -q <file.sql> <wrapped.json>` — CSV output,
+good for CI. Wrap the NDJSON chunks first; the script
+`open_trace.sh` shows the inline wrapper logic. Example one-liner
+(replace the wrap step with `bash infra/scripts/open_trace.sh` if
+you also want the UI):
 ```bash
+node -e '
+  const fs = require("fs"), path = require("path");
+  const dir = process.argv[1];
+  const chunks = fs.readdirSync(dir).filter(f=>f.endsWith(".jsonl")).sort();
+  const out = fs.createWriteStream(process.argv[2]);
+  out.write("{\"traceEvents\":[\n");
+  let first = true;
+  for (const c of chunks) for (const line of fs.readFileSync(path.join(dir,c),"utf8").split("\n")) {
+    const t = line.trim(); if (!t) continue;
+    try { JSON.parse(t); } catch { continue; }
+    if (!first) out.write(",\n"); out.write("  " + t); first = false;
+  }
+  out.write("\n]}\n"); out.end();
+' traces/perf/ /tmp/wrapped.json
 printf 'SELECT name, COUNT(*) FROM slice GROUP BY name;\n' > /tmp/q.sql
-~/.local/share/perfetto/prebuilts/trace_processor_shell -q /tmp/q.sql \
-  traces/perf/<newest>.json
+~/.local/share/perfetto/prebuilts/trace_processor_shell -q /tmp/q.sql /tmp/wrapped.json
 ```
 
 ### 5.5 T02 self-check (regression)
 
-`test/autotest/run-trace-infra-self-check-autotest.sh` runs as part of the
-v0.3 full regression. It launches Onward with `ONWARD_PERF_TRACE=1`
-for ~6 s, asserts the file exists and parses, asserts at least one
-`main:*` slice, and (when `trace_processor_shell` is locally
-installed) parse-verifies via tp_shell.
+`test/autotest/run-trace-infra-self-check-autotest.sh` runs as part of
+the full regression (`SCRIPTS` in
+`test/autotest/run-full-regression.py`). It launches Onward for ~6 s,
+collects every `perf-*.jsonl` chunk in `traces/perf/`, parses each
+line, asserts at most one tail-partial line per chunk, asserts at
+least one `main:*` slice across all chunks, and (when
+`trace_processor_shell` is locally installed) wraps the chunks into a
+Chrome Trace Event Format envelope and parse-verifies via tp_shell.
+
+### 5.6 T03 rotation + SIGKILL self-check (regression)
+
+`test/autotest/run-perf-trace-rotation-autotest.sh` exercises the
+chunked-NDJSON store directly:
+
+- **Phase A** sets `ONWARD_TRACE_ROTATION_STRESS_MB=80` and asserts
+  the dev app rotates chunks at the 8 MB cap, evicts oldest at the
+  64 MB total cap, and lands ≤ 64 MB on disk after stress completes.
+- **Phase B** sets `ONWARD_TRACE_ROTATION_STRESS_MB=400` (so the
+  stress harness runs for ~1.5 s on a typical dev box), polls until at
+  least one chunk lands, then SIGKILLs the app. Asserts every flushed
+  line in every chunk parses as JSON, with at most ONE trailing
+  partial line per chunk (the in-flight write at the moment of
+  SIGKILL — kernel `writeSync` discipline guarantees no more is
+  possible).
 
 ---
 
@@ -599,13 +743,26 @@ Adding a new trace event — five steps, no step skipped:
    `PERF_TRACE_EVENT.FOO_BAR` constant. No string literals in
    business code (enforced by grep in code review).
 2. Instrument at the call site:
-   - main-side: `perfTraceLogger.record(PERF_TRACE_EVENT.FOO_BAR,
+   - main-side: `performanceTrace.record(PERF_TRACE_EVENT.FOO_BAR,
      { …args })`
-   - renderer-side: `perfTrace(PERF_TRACE_EVENT.FOO_BAR, { …args })`
+     (or `performanceTrace.recordInstant / recordCounter /
+     recordComplete / recordFlowStart/Step/End` for the PII-redacted
+     lineage; `markTaskInput / markTaskRunning / markTaskOutput /
+     markTaskExited / markTaskIdle` for terminal lifecycle on pid=3)
+   - renderer-side hot path: `perfTrace(PERF_TRACE_EVENT.FOO_BAR,
+     { …args })` from `src/utils/perf-trace.ts`
+   - renderer-side flow correlation: `performanceTrace.recordFlow* /
+     timeAsync / summarizeText` from `src/utils/performance-trace.ts`
+   - worker thread: `performanceTrace.record(...)` works transparently
+     — it auto-detects `!isMainThread` and forwards a
+     `PerfTraceWorkerEvent` envelope through `parentPort.postMessage`.
+     The worker-client must dispatch via
+     `replayPerfTraceWorkerEvent` (see § 2.2).
 3. If the event carries a duration, put it in the payload as
-   `driftMs` / `durationMs` / `eventToPaintMs`. `resolvePhase()` in
-   `perf-trace-logger.ts` will convert to `ph='X', dur=<µs>`
-   automatically. Otherwise it stays a `ph='i'` instant.
+   `driftMs` / `durationMs` / `eventToPaintMs` / `elapsedMs` /
+   `workerDurationMs`. `resolvePhase()` in `performance-trace.ts`
+   converts to `ph='X', dur=<µs>` automatically. Otherwise it stays a
+   `ph='i'` instant.
 4. Update § 2 of this file — move rows from § 3 "Planned" to the
    appropriate § 2 subsection, or append a new row if it's brand new.
 5. If the event represents a user-visible performance signal, add a
@@ -618,19 +775,23 @@ Forbidden:
 
 - Renaming an existing event — breaks historical SQL / UI queries.
   Add a new name instead.
-- `perfTraceLogger.record("foo", …)` with a literal string in code —
+- `performanceTrace.record("foo", …)` with a literal string in code —
   bypasses the registry and breaks `CLAUDE.md` Hard rule § 3.
-- Writing traces outside `<repoRoot>/traces/` on dev / autotest
-  builds (`CLAUDE.md` Hard rule § 1).
+- Writing traces outside `<repoRoot>/traces/` on dev / autotest builds
+  or outside `<userData>/traces/` on production builds (`CLAUDE.md`
+  Hard rule § 1).
 - Reporting perf results without an `open_trace.sh` follow-up
   command (`CLAUDE.md` Hard rule § 2).
+- `traceStore.writeEvent({…}, { bypassRateLimit: true })` from any
+  production code path. The bypass exists exclusively for the T03
+  rotation autotest's stress harness.
 
 ---
 
 ## Design research (per skill §5.0 Rule A)
 
 Subagent research of https://perfetto.dev/docs/ conducted 2026-04-24
-before this revision. Summary and citations:
+before the original revision. Summary and citations:
 
 - **Format choice for Node / Electron — Chrome Trace Event Format is
   the official recommended path.** Perfetto's Track Event SDK is
@@ -639,7 +800,7 @@ before this revision. Summary and citations:
   https://perfetto.dev/docs/getting-started/other-formats which
   explicitly covers Chrome trace JSON ingestion. No first-party
   JavaScript SDK exists. Onward therefore **stays on Chrome Trace
-  JSON**, zero deps, no migration to protobufjs.
+  Event Format records**, zero deps, no migration to protobufjs.
 - **SQL table mapping** — confirmed that `ph='X'` events populate
   `slice.name` / `slice.ts` / `slice.dur`, `ph='C'` populates
   `counter`, `ph='M'` populates `process` / `thread`. Queries such as
@@ -656,10 +817,40 @@ before this revision. Summary and citations:
   (https://perfetto.dev/docs/analysis/sql-tables). §5.4 above adapts
   it for Onward's worker-latency family.
 
-Decision: Onward v0.3 continues to emit Chrome Trace Event Format.
-Re-open this section and re-run the research when Perfetto publishes
-a JavaScript SDK or a protobuf alternative that is declared
-"recommended" for non-C++ hosts.
+### 2026-05-05 revision: NDJSON on disk
+
+The original 2026-04-24 design wrote `{"traceEvents":[…]}` arrays
+directly to disk. The 2026-05-05 revision replaced that with **NDJSON
+chunks** (each line is still a Chrome Trace Event Format record;
+chunks land under one shared dir; `open_trace.sh` and the autotests
+wrap chunks back into the array form on demand).
+
+Three motivations:
+
+1. **Always-on capture.** Production needs a fixed user-data path
+   that's bounded in size and survives ungraceful termination so
+   end-user bug reports include yesterday's trace. The legacy
+   array form lost the entire file when the closing `]}` was never
+   written; NDJSON loses at most one tail line.
+2. **Chunk rotation accuracy.** A `WriteStream` queues writes in the
+   process and only drains on event-loop ticks; in a tight emit loop
+   the queue grows unbounded, `statSync` returns lagged sizes, and
+   chunk-size-based eviction stops working. Switching to synchronous
+   `fs.writeSync(fd, line)` makes the kernel's view authoritative —
+   eviction accounting works under stress, and bytes already in the
+   kernel buffer survive process death.
+3. **Single-file user-report bundle.** ZIP `<userData>/traces/` and
+   you have everything: every chunk, their timestamps, and
+   `latest.txt`. No need to merge per-process or per-worker files.
+
+The Chrome Trace Event Format record format is unchanged; only the
+container changed. Perfetto's SQL ingestion is unaffected once the
+chunks are wrapped (see § 5.3 / § 5.4).
+
+Decision: Onward continues to emit Chrome Trace Event Format records,
+now stored as NDJSON chunks. Re-open this section and re-run the
+research when Perfetto publishes a JavaScript SDK or a protobuf
+alternative that is declared "recommended" for non-C++ hosts.
 
 ---
 
@@ -668,12 +859,16 @@ a JavaScript SDK or a protobuf alternative that is declared
 | Path | Purpose |
 |---|---|
 | `src/utils/perf-trace-names.ts` | Event-name registry (single source of truth) |
-| `electron/main/perf-trace-logger.ts` | Main-side emitter + Chrome trace JSON writer |
-| `src/utils/perf-trace.ts` | Renderer emitter (IPC to main) |
+| `electron/main/performance-trace.ts` | Main-side canonical singleton — `record()`, recordX, recordFlow*, markTask*, worker forwarding (`WORKER_TID`, `isPerfTraceWorkerEvent`, `replayPerfTraceWorkerEvent`), event-loop / git-runtime monitors, PII-redaction |
+| `electron/main/trace-store.ts` | NDJSON chunked store — append-only, 8 MB / 64 MB caps, sync `writeSync` for SIGKILL durability, per-name rate limit, autotest stress harness (`runRotationStressForAutotest`) |
+| `src/utils/perf-trace.ts` | Renderer hot-path helper — `perfTrace()`, `perfTraceTask()` (IPC to main) |
+| `src/utils/performance-trace.ts` | Renderer flow / time / summarize helper (PII-safe path) |
 | `src/utils/perf-monitor.ts` | Renderer 1 s snapshot aggregator |
-| `infra/scripts/open_trace.sh` | One-liner trace opener (local tp_shell + pinned UI) |
-| `test/autotest/run-trace-infra-self-check-autotest.sh` | Trace baseline self-check |
+| `infra/scripts/open_trace.sh` | One-liner trace opener; auto-wraps NDJSON chunks for tp_shell |
+| `test/autotest/run-trace-infra-self-check-autotest.sh` | T02 — trace baseline self-check (NDJSON validation) |
+| `test/autotest/run-perf-trace-rotation-autotest.sh` | T03 — chunk rotation + 64 MB budget + SIGKILL resilience |
+| `electron/main/diagnostic-bundle.ts` | ZIP packager for the FeedbackModal "Generate diagnostic bundle" button. The IPC handler calls `traceStore.rotate()` first to seal the active chunk, then bundles via yazl `addBuffer` (race-free against the live trace store). Closes the loop with a yauzl-based self-verification that confirms every entry parses + at least one `main:*` event was captured. Unit tests in `test/unittest/diagnostic-bundle.test.mts` (DB-01..07) |
 | `test/autotest/run-full-regression.py` | Regression orchestrator + canonical runner list |
-| `docs/debug-env-variables.md` | `ONWARD_PERF_TRACE`, `ONWARD_REPO_ROOT` flags |
+| `docs/debug-env-variables.md` | `ONWARD_PERF_TRACE`, `ONWARD_REPO_ROOT`, `ONWARD_PERF_TRACE_CAPTURE_CONTENT`, `ONWARD_TRACE_ROTATION_STRESS_MB` flags |
 | `docs/Off-Renderer Threaded Design - Electron Refactor.md` | Architectural constraint for any perf change |
 | `scripts/migrate-perf-trace-literals.mjs` | One-shot helper promoting literals to registry constants (kept for audit) |

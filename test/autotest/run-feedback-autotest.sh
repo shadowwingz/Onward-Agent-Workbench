@@ -63,7 +63,7 @@ if grep -q "\[AutoTest\] FAIL" "$LOG_FILE"; then
   exit 1
 fi
 
-if ! grep -q "FBU-11-remove-local-record" "$LOG_FILE"; then
+if ! grep -q "FB-DB-03-semantic-loop-marker" "$LOG_FILE"; then
   echo "Feedback autotest did not complete. Log: $LOG_FILE" >&2
   tail -n 160 "$LOG_FILE" >&2
   exit 1

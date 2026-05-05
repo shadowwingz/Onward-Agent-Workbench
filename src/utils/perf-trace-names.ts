@@ -305,7 +305,19 @@ export const PERF_TRACE_EVENT = {
   RENDERER_CUSTOM_LAYOUT_APPLY: 'renderer:custom-layout.apply',
   RENDERER_CUSTOM_LAYOUT_EDITOR_OPEN: 'renderer:custom-layout.editor-open',
   RENDERER_DOWNSIZE_DIALOG_OPEN: 'renderer:downsize-dialog.open',
-  RENDERER_TERMINAL_DESTROY_BY_DOWNSIZE: 'renderer:terminal.destroy-by-downsize'
+  RENDERER_TERMINAL_DESTROY_BY_DOWNSIZE: 'renderer:terminal.destroy-by-downsize',
+
+  // ───────── Autotest bundle-marker (V10 closed-loop check) ─────────
+  // Emitted ONLY by the `debug:emit-bundle-marker` IPC, which is
+  // gated on ONWARD_AUTOTEST=1. The diagnostic-bundle verifier's V10
+  // check searches for an event with this exact name + matching args
+  // in the bundled chunks, proving the operation→write→bundle→verify
+  // closed loop is intact end-to-end. Production code paths must not
+  // emit this name. The string is duplicated as a literal in
+  // `electron/main/diagnostic-bundle.ts::AUTOTEST_BUNDLE_MARKER_NAME`
+  // so the bundler stays decoupled from the registry; if you rename
+  // here, also update there (and forever after — registry contract).
+  AUTOTEST_BUNDLE_MARKER: 'autotest:bundle-marker'
 } as const
 
 export type PerfTraceEventName = typeof PERF_TRACE_EVENT[keyof typeof PERF_TRACE_EVENT]

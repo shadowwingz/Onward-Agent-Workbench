@@ -59,6 +59,7 @@ export const IPC = {
   COMMAND_PRESET_SAVE: 'command-preset:save',
 
   // debug / dialog
+  DEBUG_EMIT_BUNDLE_MARKER: 'debug:emit-bundle-marker',
   DEBUG_FEEDBACK_GET_LAST_OPENED_URL: 'debug:feedback-get-last-opened-url',
   DEBUG_FEEDBACK_RESET: 'debug:feedback-reset',
   DEBUG_FEEDBACK_SET_MOCK_ISSUES: 'debug:feedback-set-mock-issues',
@@ -78,6 +79,7 @@ export const IPC = {
 
   // feedback
   FEEDBACK_CREATE_SUBMISSION: 'feedback:create-submission',
+  FEEDBACK_EXPORT_DIAGNOSTIC_BUNDLE: 'feedback:export-diagnostic-bundle',
   FEEDBACK_LOAD: 'feedback:load',
   FEEDBACK_REMOVE_RECORD: 'feedback:remove-record',
   FEEDBACK_REOPEN_IN_BROWSER: 'feedback:reopen-in-browser',

@@ -371,6 +371,183 @@ export async function testFeedbackUi(ctx: AutotestContext): Promise<TestResult[]
       countAfterRemove: queryElements('[data-testid="feedback-history-item"]').length,
       storedCountAfterRemove: stateAfterRemove.records.length
     })
+
+    // FB-DB-01 — Diagnostic bundle export. The button now lives in the
+    // tab bar (right-aligned), so it is reachable from any tab; we
+    // don't need to switch tabs first. We verify the button is
+    // rendered with the right testid, then drive the IPC directly
+    // with `forceOutputPath` so the showSaveDialog path is bypassed.
+    // The IPC handler enforces this override only when
+    // `ONWARD_AUTOTEST=1`, which the runner sets.
+    const bundleButton = queryElement<HTMLButtonElement>(
+      '[data-testid="feedback-diagnostic-bundle-button"]'
+    )
+    const noticeNode = queryElement<HTMLElement>(
+      '[data-testid="feedback-diagnostic-bundle-notice"]'
+    )
+
+    type BundleIpcResult = {
+      success?: boolean
+      canceled?: boolean
+      path?: string
+      bytes?: number
+      error?: string
+      manifest?: { chunkCount: number; chunkBytes: number; stateFiles: string[]; missingFiles: string[] }
+      verification?: { ok: boolean; checks: Array<{ name: string; passed: boolean; detail?: string }> }
+    }
+
+    let bundleIpcResult: BundleIpcResult | null = null
+    if (bundleButton) {
+      const cwdHint = window.electronAPI.debug.autotestCwd ?? '/tmp'
+      const forcedPath = `${cwdHint}/__autotest_feedback_diagnostic_${Date.now()}.zip`
+      try {
+        bundleIpcResult = await window.electronAPI.feedback.exportDiagnosticBundle(forcedPath) as BundleIpcResult
+      } catch (error) {
+        bundleIpcResult = { success: false, error: String(error) }
+      }
+    }
+
+    // Pass condition for FB-DB-01:
+    //   - button + privacy notice both rendered (the new tab-bar layout)
+    //   - IPC reported success
+    //   - produced a non-empty file (bytes > 0)
+    //   - **closed-loop verification.ok === true** — every V* check
+    //     passed: V1 zip-opens, V2 entries-present (incl. AGENT-GUIDE.md),
+    //     V4 ndjson-parse, V7 chunk-bytes-equal, V8 state-files-bytes-equal,
+    //     V9 generated-content-bytes-equal (README + system-info +
+    //     AGENT-GUIDE byte-equal), V10 autotest-marker (skipped here —
+    //     FB-DB-03 covers it). Hard-rule byte-equivalence; no `>0`
+    //     tolerance allowed.
+    //   - V9 explicitly passed — protects against a future regression
+    //     that renames / drops V9 without dropping the AGENT-GUIDE
+    //     coverage too. Unit test DB-08 already locks in the byte-flip
+    //     case; this gate ensures the live packaged binary still wires
+    //     V9 into the verification list.
+    const v9Check = bundleIpcResult?.verification?.checks.find((c) => c.name === 'V9-generated-content-bytes-equal')
+    record(
+      'FB-DB-01-bundle-export',
+      Boolean(bundleButton)
+        && Boolean(noticeNode)
+        && bundleIpcResult?.success === true
+        && (bundleIpcResult?.bytes ?? 0) > 0
+        && bundleIpcResult?.verification?.ok === true
+        && v9Check?.passed === true,
+      {
+        buttonRendered: Boolean(bundleButton),
+        noticeRendered: Boolean(noticeNode),
+        ipcSuccess: bundleIpcResult?.success ?? null,
+        canceled: bundleIpcResult?.canceled ?? null,
+        path: bundleIpcResult?.path ?? null,
+        bytes: bundleIpcResult?.bytes ?? null,
+        chunkCount: bundleIpcResult?.manifest?.chunkCount ?? null,
+        stateFileCount: bundleIpcResult?.manifest?.stateFiles?.length ?? null,
+        verificationOk: bundleIpcResult?.verification?.ok ?? null,
+        v9Passed: v9Check?.passed ?? null,
+        v9Detail: v9Check?.detail ?? null,
+        verificationFailedChecks: (bundleIpcResult?.verification?.checks ?? [])
+          .filter((c) => !c.passed)
+          .map((c) => `${c.name}: ${c.detail ?? ''}`),
+        error: bundleIpcResult?.error ?? null
+      }
+    )
+
+    // FB-DB-02 — repeated bundle. Click the button a SECOND time with
+    // a different output path. The IPC handler calls
+    // `traceStore.rotate()` before each bundle, so the chunks captured
+    // between FB-DB-01 and FB-DB-02 are an independent set. Both
+    // bundles must succeed; both must verify ok. Catches yazl race
+    // regressions that only show up under repeated calls + catches
+    // store-state corruption from the rotate.
+    let bundleIpcResult2: BundleIpcResult | null = null
+    if (bundleButton) {
+      const cwdHint2 = window.electronAPI.debug.autotestCwd ?? '/tmp'
+      const forcedPath2 = `${cwdHint2}/__autotest_feedback_diagnostic_${Date.now()}_2.zip`
+      try {
+        bundleIpcResult2 = await window.electronAPI.feedback.exportDiagnosticBundle(forcedPath2) as BundleIpcResult
+      } catch (error) {
+        bundleIpcResult2 = { success: false, error: String(error) }
+      }
+    }
+    record(
+      'FB-DB-02-bundle-export-repeat',
+      bundleIpcResult2?.success === true
+        && (bundleIpcResult2?.bytes ?? 0) > 0
+        && bundleIpcResult2?.verification?.ok === true
+        && bundleIpcResult?.path !== bundleIpcResult2?.path,
+      {
+        firstPath: bundleIpcResult?.path ?? null,
+        secondPath: bundleIpcResult2?.path ?? null,
+        secondBytes: bundleIpcResult2?.bytes ?? null,
+        secondVerificationOk: bundleIpcResult2?.verification?.ok ?? null,
+        secondVerificationFailedChecks: (bundleIpcResult2?.verification?.checks ?? [])
+          .filter((c) => !c.passed)
+          .map((c) => `${c.name}: ${c.detail ?? ''}`),
+        secondError: bundleIpcResult2?.error ?? null
+      }
+    )
+
+    // FB-DB-03 — semantic closed-loop with V10 marker. The user's hard-
+    // rule contract: "perform an operation, see it land in the local
+    // trace, then bundle, then verify the same event is in the bundle
+    // — args byte-equal."
+    //   1. Generate a unique uuid + label.
+    //   2. await debug.emitBundleMarker(uuid, label) — IPC returns once
+    //      `traceStore.writeSync` has flushed the line into the kernel
+    //      buffer of the active chunk fd. So we know the marker is
+    //      already on disk before the next IPC call runs.
+    //   3. await exportDiagnosticBundle(forcedPath, expectedMarker)
+    //      where the IPC handler internally calls `traceStore.rotate()`
+    //      (sealing the chunk that holds our marker) → reads it →
+    //      writes the ZIP → opens the ZIP via yauzl → searches for
+    //      `name === 'autotest:bundle-marker'` with matching uuid+label
+    //      → V10 passes iff that exact event round-tripped.
+    //   4. The whole rotate→write→ZIP→yauzl→parse pipeline is a hard
+    //      rule: any layer dropping/corrupting the marker → V10 fail.
+    const markerUuid = `db03-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+    const markerLabel = 'FB-DB-03-semantic-loop'
+    let markerEmitResult: { success: boolean; chunkPath?: string | null; error?: string } | null = null
+    try {
+      markerEmitResult = await window.electronAPI.debug.emitBundleMarker(markerUuid, markerLabel)
+    } catch (error) {
+      markerEmitResult = { success: false, error: String(error) }
+    }
+    let bundleIpcResult3: BundleIpcResult | null = null
+    if (markerEmitResult?.success && bundleButton) {
+      const cwdHint3 = window.electronAPI.debug.autotestCwd ?? '/tmp'
+      const forcedPath3 = `${cwdHint3}/__autotest_feedback_diagnostic_${Date.now()}_marker.zip`
+      try {
+        bundleIpcResult3 = await window.electronAPI.feedback.exportDiagnosticBundle(
+          forcedPath3,
+          { uuid: markerUuid, label: markerLabel }
+        ) as BundleIpcResult
+      } catch (error) {
+        bundleIpcResult3 = { success: false, error: String(error) }
+      }
+    }
+    const v10Check = bundleIpcResult3?.verification?.checks.find((c) => c.name === 'V10-autotest-marker')
+    record(
+      'FB-DB-03-semantic-loop-marker',
+      markerEmitResult?.success === true
+        && bundleIpcResult3?.success === true
+        && bundleIpcResult3?.verification?.ok === true
+        && v10Check?.passed === true,
+      {
+        markerUuid,
+        markerLabel,
+        markerEmitOk: markerEmitResult?.success ?? null,
+        markerEmitError: markerEmitResult?.error ?? null,
+        markerChunkPath: markerEmitResult?.chunkPath ?? null,
+        bundlePath: bundleIpcResult3?.path ?? null,
+        bundleSuccess: bundleIpcResult3?.success ?? null,
+        verificationOk: bundleIpcResult3?.verification?.ok ?? null,
+        v10Passed: v10Check?.passed ?? null,
+        v10Detail: v10Check?.detail ?? null,
+        verificationFailedChecks: (bundleIpcResult3?.verification?.checks ?? [])
+          .filter((c) => !c.passed)
+          .map((c) => `${c.name}: ${c.detail ?? ''}`),
+        bundleError: bundleIpcResult3?.error ?? null
+      }
+    )
   } finally {
     const sidebarButton = queryElement<HTMLButtonElement>(sidebarButtonSelector)
     if (sidebarButton && queryElement<HTMLElement>(modalSelector)?.dataset.feedbackOpen === 'true') {

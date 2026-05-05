@@ -7,7 +7,7 @@ import { watch, type FSWatcher } from 'fs'
 import { existsSync } from 'fs'
 import { resolve } from 'path'
 import { isMainThread } from 'worker_threads'
-import { perfTraceLogger } from './perf-trace-logger'
+import { performanceTrace } from './performance-trace'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 
 // Bug 2 — file-watcher driven Git Diff cache invalidator.
@@ -169,7 +169,7 @@ class GitDiffCacheInvalidator {
       entry.debounceTimer = null
       entry.pendingSince = null
       if (entry.disposed) return
-      perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_GIT_DIFF_FS_WATCH_EVENT, {
+      performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_DIFF_FS_WATCH_EVENT, {
         cwd: entry.cwd,
         pendingMs
       })

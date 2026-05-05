@@ -9,7 +9,6 @@ import { join, delimiter, basename } from 'path'
 import { execFileSync } from 'child_process'
 import { app } from 'electron'
 import { getApiPort } from './api-server'
-import { perfTraceLogger } from './perf-trace-logger'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 import { performanceTrace } from './performance-trace'
 
@@ -149,7 +148,7 @@ export class PtyManager {
           ...bridgeEnv
         } as { [key: string]: string }
       })
-      perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_PTY_SPAWN, {
+      performanceTrace.record(PERF_TRACE_EVENT.MAIN_PTY_SPAWN, {
         terminalId: id,
         shellKind,
         shellBasename: basename(execCommand),
@@ -206,7 +205,7 @@ export class PtyManager {
 
     record.exitDisposable = ptyProcess.onExit((event) => {
       record.exited = true
-      perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_PTY_EXIT, {
+      performanceTrace.record(PERF_TRACE_EVENT.MAIN_PTY_EXIT, {
         terminalId: id,
         shellKind,
         exitCode: event.exitCode,
@@ -236,7 +235,7 @@ export class PtyManager {
       try {
         // Short input (keystrokes, short commands): pass through directly
         record.pty.write(data)
-        perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_PTY_WRITE, {
+        performanceTrace.record(PERF_TRACE_EVENT.MAIN_PTY_WRITE, {
           path: 'small',
           bytes: data.length,
           durationMs: Date.now() - startMs,
@@ -245,7 +244,7 @@ export class PtyManager {
         performanceTrace.recordComplete('pty.write', startUs, { ...traceArgs, result: 'success' }, 'pty')
         return true
       } catch (error) {
-        perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_PTY_WRITE, {
+        performanceTrace.record(PERF_TRACE_EVENT.MAIN_PTY_WRITE, {
           path: 'small',
           bytes: data.length,
           durationMs: Date.now() - startMs,
@@ -270,7 +269,7 @@ export class PtyManager {
     const startUs = performanceTrace.nowUs()
     record.writeQueue = record.writeQueue.then(async () => {
       await this.writeLargeData(record, data)
-      perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_PTY_WRITE, {
+      performanceTrace.record(PERF_TRACE_EVENT.MAIN_PTY_WRITE, {
         path: 'large',
         bytes: data.length,
         durationMs: Date.now() - largeStartMs,
@@ -581,13 +580,13 @@ export class PtyManager {
     const terminalId = this.findIdForRecord(record)
     try {
       record.pty.kill()
-      perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_PTY_KILL, {
+      performanceTrace.record(PERF_TRACE_EVENT.MAIN_PTY_KILL, {
         terminalId,
         shellKind: record.shellKind,
         alreadyExited: record.exited
       })
     } catch (error) {
-      perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_PTY_KILL, {
+      performanceTrace.record(PERF_TRACE_EVENT.MAIN_PTY_KILL, {
         terminalId,
         shellKind: record.shellKind,
         alreadyExited: record.exited,

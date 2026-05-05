@@ -10,7 +10,7 @@ import {
   type TerminalGitInfo
 } from './git-utils'
 import { gitRuntimeManager } from './git-runtime-manager'
-import { perfTraceLogger } from './perf-trace-logger'
+import { performanceTrace } from './performance-trace'
 import { gitStatusWorkerClient } from './git-status-worker-client'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 
@@ -83,13 +83,13 @@ export class GitWatchManager {
   private diagTimer: ReturnType<typeof setInterval> | null = null
 
   constructor(private emit: TerminalInfoEmitter) {
-    if (GIT_WATCH_DEBUG || perfTraceLogger.isEnabled()) {
+    if (GIT_WATCH_DEBUG || performanceTrace.isEnabled()) {
       this.diagTimer = setInterval(() => {
         if (this.diagActivityCalls > 0 || this.diagPollRuns > 0) {
           if (GIT_WATCH_DEBUG) {
             console.log(`[PerfDiag] GitWatch activityCalls/s=${this.diagActivityCalls} pollRuns/s=${this.diagPollRuns}`)
           }
-          perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_GITWATCH_SUMMARY, {
+          performanceTrace.record(PERF_TRACE_EVENT.MAIN_GITWATCH_SUMMARY, {
             activityCallsPerSecond: this.diagActivityCalls,
             pollRunsPerSecond: this.diagPollRuns,
             watchedTerminals: this.entries.size
@@ -162,7 +162,7 @@ export class GitWatchManager {
     const entry = this.entries.get(terminalId)
     if (!entry) return
 
-    if (GIT_WATCH_DEBUG || perfTraceLogger.isEnabled()) this.diagActivityCalls += 1
+    if (GIT_WATCH_DEBUG || performanceTrace.isEnabled()) this.diagActivityCalls += 1
     const hasFocusedBoost = Boolean(entry.repoRoot && this.focusedTerminalId === terminalId && this.isRepoBoosted(entry.repoRoot))
     if (entry.inFlight) {
       if (hasFocusedBoost) {
@@ -259,7 +259,7 @@ export class GitWatchManager {
 
     entry.inFlight = true
     entry.lastPollAt = Date.now()
-    if (GIT_WATCH_DEBUG || perfTraceLogger.isEnabled()) this.diagPollRuns += 1
+    if (GIT_WATCH_DEBUG || performanceTrace.isEnabled()) this.diagPollRuns += 1
 
     try {
       await this.refreshInfo(entry, reason)

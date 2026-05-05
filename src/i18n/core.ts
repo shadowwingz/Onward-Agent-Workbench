@@ -286,6 +286,14 @@ const en = {
   'feedback.validation.description': 'Enter a description before continuing.',
   'feedback.validation.publicConsent': 'You must accept the public GitHub notice before continuing.',
 
+  'feedback.diagnosticBundle.button': 'Generate diagnostic bundle',
+  'feedback.diagnosticBundle.notice': 'This bundle is saved only on your machine and contains local file paths (e.g. /Users/<you>/...). Attach to a GitHub issue manually if you want to share.',
+  'feedback.diagnosticBundle.generating': 'Generating diagnostic bundle…',
+  'feedback.diagnosticBundle.success': 'Diagnostic bundle saved: {{path}}',
+  'feedback.diagnosticBundle.error': 'Failed to generate diagnostic bundle: {{error}}',
+  'feedback.diagnosticBundle.canceled': 'Save canceled.',
+  'feedback.diagnosticBundle.verifyFailed': 'Diagnostic bundle written to {{path}} but self-verification failed: {{checks}}. Re-run before sharing.',
+
   'sidebar.promptNotebook': 'Prompt notebook',
   'sidebar.layout.single': 'Single terminal',
   'sidebar.layout.double': 'Two terminals',
@@ -1433,6 +1441,14 @@ const zhCN: LocaleTranslations = {
   'feedback.validation.title': '继续之前请输入标题。',
   'feedback.validation.description': '继续之前请输入描述。',
   'feedback.validation.publicConsent': '继续之前必须确认公开 GitHub 提示。',
+
+  'feedback.diagnosticBundle.button': '生成诊断包',
+  'feedback.diagnosticBundle.notice': '诊断包仅保存在本地，且含本地文件路径（如 /Users/<你>/…）。如需反馈，请手动附加到 GitHub Issue。',
+  'feedback.diagnosticBundle.generating': '正在生成诊断包…',
+  'feedback.diagnosticBundle.success': '诊断包已保存：{{path}}',
+  'feedback.diagnosticBundle.error': '诊断包生成失败：{{error}}',
+  'feedback.diagnosticBundle.canceled': '已取消保存。',
+  'feedback.diagnosticBundle.verifyFailed': '诊断包已写入 {{path}}，但自检未通过：{{checks}}。请重新生成后再分享。',
 
   'sidebar.promptNotebook': 'Prompt 笔记本',
   'sidebar.layout.single': '单窗口',

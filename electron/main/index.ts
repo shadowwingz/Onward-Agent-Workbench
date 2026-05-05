@@ -29,10 +29,10 @@ import { getWindowStateStorage } from './window-state-storage'
 import { getTelemetryService } from './telemetry/telemetry-service'
 import { TELEMETRY_RESET_CONSENT } from './telemetry/telemetry-constants'
 import { startSessionHeartbeat, stopSessionHeartbeat, getSessionDurationMs } from './telemetry/telemetry-session-tracker'
-import { perfTraceLogger } from './perf-trace-logger'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 import { IPC } from '../shared/ipc-channels'
 import { performanceTrace } from './performance-trace'
+import { traceStore, runRotationStressForAutotest } from './trace-store'
 
 // ONWARD_SMOKE_LAUNCH=1 makes the main process self-quit once the main window
 // renderer finishes loading, after writing a ready marker to the path in
@@ -49,6 +49,28 @@ let isQuitting = false
 let installUpdateOnQuit = false
 let windowStateSaveTimer: ReturnType<typeof setTimeout> | null = null
 let lastNormalBounds: { x: number; y: number; width: number; height: number } | null = null
+
+// Single-instance lock keys on the resolved userData path; we MUST set
+// userData (via initializeAppIdentity) BEFORE requesting the lock so the
+// dev / prod / autotest profiles each get their own lock and don't block
+// each other. After this point, only ONE Onward process per (build, userData)
+// can run; the second-instance event focuses the existing main window.
+//
+// This also fixes the duplicate-writers race against userData/traces/ and
+// userData/app-state.json that surfaced when daily + Intel-mac-release
+// builds were left running side-by-side against the same userData.
+const earlyAppInfo = initializeAppIdentity()
+const gotTheSingleInstanceLock = app.requestSingleInstanceLock()
+if (!gotTheSingleInstanceLock) {
+  console.log('[SingleInstance] another Onward is already running; exiting.')
+  app.quit()
+}
+app.on('second-instance', () => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) mainWindow.restore()
+    mainWindow.focus()
+  }
+})
 
 // Ask the renderer to flush all pending debounced state saves (prompt height,
 // editor drafts, etc.) before the app quits. Without this, changes made within
@@ -427,7 +449,7 @@ function createWindow(displayName: string): void {
     }
     mainWindow.webContents.on('render-process-gone', (_event, details) => {
       log('[Window] render-process-gone', details)
-      perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_RENDERER_PROCESS_GONE, {
+      performanceTrace.record(PERF_TRACE_EVENT.MAIN_RENDERER_PROCESS_GONE, {
         reason: details.reason,
         exitCode: details.exitCode
       })
@@ -438,7 +460,7 @@ function createWindow(displayName: string): void {
     })
     mainWindow.webContents.on('unresponsive', () => {
       log('[Window] renderer unresponsive')
-      perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_RENDERER_UNRESPONSIVE)
+      performanceTrace.record(PERF_TRACE_EVENT.MAIN_RENDERER_UNRESPONSIVE)
     })
     mainWindow.webContents.on('console-message', (_event, level, message, line, sourceId) => {
       log('[Renderer]', { level, message, line, sourceId })
@@ -496,10 +518,30 @@ function createWindow(displayName: string): void {
 }
 
 app.whenReady().then(() => {
-  const appInfo = initializeAppIdentity()
-  perfTraceLogger.start()
-  perfTraceLogger.startEventLoopMonitor()
+  // Reuse the userData / displayName work we already did at top level so
+  // the single-instance lock and appInfo agree on identity. Module-scope
+  // call already invoked initializeAppIdentity(); no need to repeat.
+  const appInfo = earlyAppInfo
+  performanceTrace.start()
+  performanceTrace.startEventLoopMonitor()
   performanceTrace.initialize()
+
+  // Trace-rotation autotest hook: when ONWARD_TRACE_ROTATION_STRESS_MB is
+  // set, write that many MB of synthetic events through the store and quit
+  // cleanly. Used by run-perf-trace-rotation-autotest.sh; absent in
+  // production runs. Must happen AFTER the loggers initialize so the store
+  // has its directory + first chunk open. See trace-store.ts.
+  const stressMb = parseInt(process.env.ONWARD_TRACE_ROTATION_STRESS_MB || '', 10)
+  if (Number.isFinite(stressMb) && stressMb > 0) {
+    const written = runRotationStressForAutotest(stressMb)
+    console.log(`[TraceStore] autotest stress: ${written} events written for ${stressMb} MB target`)
+    // Force a final-chunk close so Perfetto-side validators see a clean
+    // file with no in-flight bytes; will-quit also calls traceStore.close()
+    // but we want the test to be deterministic regardless of platform
+    // shutdown ordering.
+    setTimeout(() => app.quit(), 50)
+    return
+  }
 
   // Windows: check for a pending update that wasn't applied during the
   // previous quit (e.g. the helper script was killed by Job Object cleanup).
@@ -610,7 +652,7 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', async (e) => {
-  perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_APP_BEFORE_QUIT, {
+  performanceTrace.record(PERF_TRACE_EVENT.MAIN_APP_BEFORE_QUIT, {
     isQuitting,
     installUpdateOnQuit
   })
@@ -625,7 +667,7 @@ app.on('before-quit', async (e) => {
 
 // Move the cleanup logic to will-quit (it will be triggered after confirming the exit)
 app.on('will-quit', () => {
-  perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_APP_WILL_QUIT, {
+  performanceTrace.record(PERF_TRACE_EVENT.MAIN_APP_WILL_QUIT, {
     installUpdateOnQuit
   })
   if (installUpdateOnQuit) {
@@ -634,6 +676,10 @@ app.on('will-quit', () => {
   getUpdateService().stop()
   stopApiServer()
   cleanupIpcHandlers()
-  perfTraceLogger.stop()
+  performanceTrace.stop()
+  // Close the shared trace store last so any final performanceTrace.stop()
+  // / cleanupIpcHandlers() events are written before we fsync + unlink the
+  // active chunk's stream.
+  traceStore.close()
   getTrayManager().destroy()
 })

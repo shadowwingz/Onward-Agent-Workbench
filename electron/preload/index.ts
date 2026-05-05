@@ -15,9 +15,10 @@ import type {
 } from '../../src/types/feedback'
 
 // Hoisted so traceIpc() below works from inside the early API objects.
-// The flag is read once at preload load; IPC spans are only emitted
-// when ONWARD_PERF_TRACE=1 matches the main-process logger's gate.
-const preloadPerfTraceEnabled = process.env.ONWARD_PERF_TRACE === '1'
+// The flag is read once at preload load. The trace store is now default-on
+// in the main process; renderer-side spans match that default unless
+// ONWARD_PERF_TRACE=0 explicitly disables the diagnostic capture.
+const preloadPerfTraceEnabled = process.env.ONWARD_PERF_TRACE !== '0'
 
 /**
  * Wrap an ipcRenderer.invoke() call with a renderer-side latency span.
@@ -991,6 +992,10 @@ export interface DebugAPI {
   feedbackSetMockIssues: (issues: FeedbackDebugRemoteIssue[]) => Promise<void>
   feedbackGetLastOpenedUrl: () => Promise<string | null>
   readTelemetryLog: () => Promise<string>
+  emitBundleMarker: (
+    uuid: string,
+    label?: string
+  ) => Promise<{ success: boolean; chunkPath?: string | null; error?: string }>
   quit: () => Promise<void>
 }
 
@@ -1086,6 +1091,43 @@ export interface BrowserAPI {
   onEscapePressed: (callback: (id: string) => void) => () => void
 }
 
+export interface FeedbackDiagnosticBundleVerificationCheck {
+  name: string
+  passed: boolean
+  detail?: string
+}
+
+export interface FeedbackDiagnosticBundleVerification {
+  ok: boolean
+  checks: FeedbackDiagnosticBundleVerificationCheck[]
+}
+
+export interface FeedbackDiagnosticBundleResult {
+  success: boolean
+  path?: string
+  bytes?: number
+  canceled?: boolean
+  error?: string
+  manifest?: {
+    chunkCount: number
+    chunkBytes: number
+    stateFiles: string[]
+    missingFiles: string[]
+  }
+  verification?: FeedbackDiagnosticBundleVerification
+}
+
+/**
+ * Optional autotest payload for the diagnostic-bundle IPC. The
+ * `expectedMarker` field drives the verifier's V10 closed-loop check
+ * but is only honoured by the main side when `ONWARD_AUTOTEST=1`.
+ * Production callers must pass nothing or just the path.
+ */
+export interface FeedbackDiagnosticBundleInvokeOptions {
+  forceOutputPath?: string
+  expectedMarker?: { uuid: string; label?: string }
+}
+
 export interface FeedbackAPI {
   load: () => Promise<FeedbackState>
   createSubmission: (payload: FeedbackSubmissionInput) => Promise<FeedbackCreateSubmissionResult>
@@ -1093,6 +1135,10 @@ export interface FeedbackAPI {
   reopenInBrowser: (recordId: string) => Promise<FeedbackActionResult>
   updatePreferences: (payload: Partial<FeedbackState['preferences']>) => Promise<FeedbackState>
   removeRecord: (recordId: string) => Promise<FeedbackState>
+  exportDiagnosticBundle: (
+    forceOutputPath?: string,
+    expectedMarker?: { uuid: string; label?: string }
+  ) => Promise<FeedbackDiagnosticBundleResult>
 }
 
 export interface ElectronAPI {
@@ -1686,7 +1732,8 @@ const updaterAPI: UpdaterAPI = {
 }
 
 const debugEnabled = process.env.ONWARD_DEBUG === '1' || process.env.ELECTRON_ENABLE_LOGGING === '1'
-const perfTraceEnabled = process.env.ONWARD_PERF_TRACE === '1'
+// Default-on diagnostic capture matches the main-process trace-store gate.
+const perfTraceEnabled = process.env.ONWARD_PERF_TRACE !== '0'
 const debugProfileEnabled = process.env.ONWARD_PROFILE === '1'
 const debugProfileCwd = process.env.ONWARD_PROFILE_CWD || null
 const debugAutotestEnabled = process.env.ONWARD_AUTOTEST === '1'
@@ -1762,6 +1809,13 @@ const debugAPI: DebugAPI = {
   },
   readTelemetryLog: () => {
     return ipcRenderer.invoke(IPC.DEBUG_READ_TELEMETRY_LOG) as Promise<string>
+  },
+  emitBundleMarker: (uuid: string, label?: string) => {
+    return ipcRenderer.invoke(IPC.DEBUG_EMIT_BUNDLE_MARKER, { uuid, label }) as Promise<{
+      success: boolean
+      chunkPath?: string | null
+      error?: string
+    }>
   },
   quit: () => {
     return ipcRenderer.invoke(IPC.DEBUG_QUIT)
@@ -1885,6 +1939,15 @@ const feedbackAPI: FeedbackAPI = {
   },
   removeRecord: (recordId: string) => {
     return ipcRenderer.invoke(IPC.FEEDBACK_REMOVE_RECORD, recordId)
+  },
+  exportDiagnosticBundle: (
+    forceOutputPath?: string,
+    expectedMarker?: { uuid: string; label?: string }
+  ) => {
+    return ipcRenderer.invoke(IPC.FEEDBACK_EXPORT_DIAGNOSTIC_BUNDLE, {
+      forceOutputPath,
+      expectedMarker
+    })
   }
 }
 

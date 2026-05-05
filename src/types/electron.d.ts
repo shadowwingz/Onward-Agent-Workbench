@@ -819,6 +819,18 @@ export interface DebugAPI {
   feedbackSetMockIssues: (issues: FeedbackDebugRemoteIssue[]) => Promise<void>
   feedbackGetLastOpenedUrl: () => Promise<string | null>
   readTelemetryLog: () => Promise<string>
+  /**
+   * Autotest-only: synchronously record an `autotest:bundle-marker`
+   * event with the given uuid + label so the diagnostic-bundle V10
+   * verifier can find it after the bundle IPC. Resolves once the
+   * underlying `traceStore.writeSync` has flushed the line into the
+   * kernel buffer of the active chunk fd. Returns `success:false` in
+   * production builds (the main side gates on ONWARD_AUTOTEST=1).
+   */
+  emitBundleMarker: (
+    uuid: string,
+    label?: string
+  ) => Promise<{ success: boolean; chunkPath?: string | null; error?: string }>
   quit: () => Promise<void>
 }
 
@@ -853,6 +865,32 @@ export interface BrowserAPI {
   onEscapePressed: (callback: (id: string) => void) => () => void
 }
 
+export interface FeedbackDiagnosticBundleVerificationCheck {
+  name: string
+  passed: boolean
+  detail?: string
+}
+
+export interface FeedbackDiagnosticBundleVerification {
+  ok: boolean
+  checks: FeedbackDiagnosticBundleVerificationCheck[]
+}
+
+export interface FeedbackDiagnosticBundleResult {
+  success: boolean
+  path?: string
+  bytes?: number
+  canceled?: boolean
+  error?: string
+  manifest?: {
+    chunkCount: number
+    chunkBytes: number
+    stateFiles: string[]
+    missingFiles: string[]
+  }
+  verification?: FeedbackDiagnosticBundleVerification
+}
+
 export interface FeedbackAPI {
   load: () => Promise<FeedbackState>
   createSubmission: (payload: FeedbackSubmissionInput) => Promise<FeedbackCreateSubmissionResult>
@@ -860,6 +898,10 @@ export interface FeedbackAPI {
   reopenInBrowser: (recordId: string) => Promise<FeedbackActionResult>
   updatePreferences: (payload: Partial<FeedbackState['preferences']>) => Promise<FeedbackState>
   removeRecord: (recordId: string) => Promise<FeedbackState>
+  exportDiagnosticBundle: (
+    forceOutputPath?: string,
+    expectedMarker?: { uuid: string; label?: string }
+  ) => Promise<FeedbackDiagnosticBundleResult>
 }
 
 // Coding Agent integration types

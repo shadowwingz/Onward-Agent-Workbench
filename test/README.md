@@ -185,9 +185,11 @@ point at files under `test/unittest/`.
 |---|---|
 | Trace JSON written and parseable on every dev launch | `run-trace-infra-self-check` (`first main event found`) |
 | Per-feature trace events emit and group by Task tid | `run-performance-trace` (PT-*) |
+| NDJSON chunked store: 8 MB rotate, 64 MB total cap, oldest evicted, SIGKILL-resilient | `run-perf-trace-rotation` (T03 phases A+B) |
 | Telemetry session start, properties, heartbeat | `run-telemetry` (TEL-01..10) |
 | Feedback flow basic submit + browser draft | `run-feedback` (FB-*) |
 | Feedback UI history list and resolve states | `run-feedback-persistence` (FBU-01..11), `run-feedback` |
+| Diagnostic bundle export from FeedbackModal (ZIP of traces + state files; rotate-before-bundle; closed-loop verify) | `run-feedback` (FB-DB-01 + FB-DB-02 repeated bundle); unit `test/unittest/diagnostic-bundle.test.mts` (DB-01..04 happy path / streaming, DB-05 yazl race regression, DB-06/07 verifier negatives) |
 | Change Log modal (sidebar entry, prefetch, EN fallback under zh-CN) | `run-change-log` (CL-01..11) |
 | Coding agent env vars and storage | `test/unittest/coding-agent-env-vars.test.mjs`, `coding-agent-storage.test.mjs` |
 | General regression baseline | (`shouldRun('regression')`, no shell runner; RG-*) |

@@ -7,11 +7,11 @@ import { join, resolve } from 'path'
 import { Worker } from 'worker_threads'
 import { mainWorkScheduler, type MainWorkLane } from './main-work-scheduler'
 import {
-  perfTraceLogger,
+  performanceTrace,
   isPerfTraceWorkerEvent,
   replayPerfTraceWorkerEvent,
   WORKER_TID
-} from './perf-trace-logger'
+} from './performance-trace'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 
 type ProjectFsWorkerMethod = 'listDirectory' | 'buildFileIndex' | 'searchFilenames' | 'invalidateFileIndex'
@@ -149,10 +149,10 @@ class ProjectFsWorkerClient {
       this.handleMessage(message as WorkerResponse)
     })
     this.worker.on('error', (error) => {
-      perfTraceLogger.record(PERF_TRACE_EVENT.WORKER_PROJECT_FS_ERROR, { error: String(error) })
+      performanceTrace.record(PERF_TRACE_EVENT.WORKER_PROJECT_FS_ERROR, { error: String(error) })
     })
     this.worker.on('exit', (code) => {
-      perfTraceLogger.record(PERF_TRACE_EVENT.WORKER_PROJECT_FS_EXIT, {
+      performanceTrace.record(PERF_TRACE_EVENT.WORKER_PROJECT_FS_EXIT, {
         code,
         pending: this.pending.size
       })
@@ -170,7 +170,7 @@ class ProjectFsWorkerClient {
     return new Promise<T>((resolveTask, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id)
-        perfTraceLogger.record(PERF_TRACE_EVENT.WORKER_PROJECT_FS_TIMEOUT, {
+        performanceTrace.record(PERF_TRACE_EVENT.WORKER_PROJECT_FS_TIMEOUT, {
           id,
           method,
           elapsedMs: Date.now() - startedAt
@@ -198,7 +198,7 @@ class ProjectFsWorkerClient {
 
     const elapsedMs = Date.now() - pending.startedAt
     if (elapsedMs > 250) {
-      perfTraceLogger.record(PERF_TRACE_EVENT.WORKER_PROJECT_FS_LATENCY, {
+      performanceTrace.record(PERF_TRACE_EVENT.WORKER_PROJECT_FS_LATENCY, {
         id: message.id,
         method: pending.method,
         elapsedMs

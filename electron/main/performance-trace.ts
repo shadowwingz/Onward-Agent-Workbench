@@ -10,18 +10,21 @@
 // hoisted to the top of the worker chunk crashes the worker with
 // "Cannot find module 'electron'" before any user-level uncaughtException
 // handler can register, killing every git operation on the daily build.
-// Master's `perf-trace-logger.ts` documents the same pitfall and uses a
-// guarded lazy-loader; we mirror that approach so this trace stack is
-// safe in worker contexts. `app-info` itself static-imports `electron`, so
-// we lazy-require it too — only `initialize()` (main-thread only) needs it.
+// We lazy-require both `electron` and `./app-info` (which itself static-
+// imports `electron`) so this trace stack is safe in worker contexts.
 import { randomBytes, createHash } from 'crypto'
-import { existsSync, mkdirSync, writeFileSync } from 'fs'
-import { join } from 'path'
 import { performance } from 'perf_hooks'
-import { isMainThread } from 'worker_threads'
+import { isMainThread, parentPort } from 'worker_threads'
+
+import { traceStore, TRACE_STORE_ENABLED, type TraceStoreEvent } from './trace-store'
+import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 
 type ElectronApp = {
+  isPackaged: boolean
+  getAppPath: () => string
   getPath: (name: string) => string
+  getVersion: () => string
+  once: (event: string, cb: () => void) => void
 }
 
 function loadElectronApp(): ElectronApp | null {
@@ -44,11 +47,14 @@ function loadAppInfo(): { version: string; buildChannel: string } | null {
   }
 }
 
+// ---------- Types ----------
+
 type TracePhase = 'X' | 'i' | 'C' | 'M' | 's' | 't' | 'f'
 type TraceScope = 'g' | 'p' | 't'
 type TraceArgValue = string | number | boolean | null | string[] | number[] | boolean[]
 type TraceArgs = Record<string, TraceArgValue | undefined>
 type TraceTaskState = 'idle' | 'input_pending' | 'running' | 'output_active' | 'exited'
+type TracePayload = Record<string, unknown> | undefined
 
 export interface RendererTraceEvent {
   name: string
@@ -66,17 +72,66 @@ export interface TraceContext {
   traceFlowId?: string
 }
 
-interface ChromeTraceEvent {
+/**
+ * Optional context supplied by IPC bridges forwarding events from
+ * renderer / worker processes. Main-side emitters can omit this: the
+ * default main-process track (pid=1, tid=1) is used when absent.
+ *
+ * Pass `terminalId` to route the event onto the per-Task virtual tid
+ * managed by `assignTaskTid()`. The side is inferred from `process`.
+ *
+ * Pass `threadName` together with a stable `tid` to label a worker
+ * thread lane in Perfetto UI.
+ */
+export interface RecordSource {
+  process?: 'main' | 'renderer'
+  tid?: number
+  terminalId?: string
+  threadName?: string
+}
+
+/**
+ * Worker → main trace forwarding envelope.
+ *
+ * When a worker thread calls `performanceTrace.record(name, data, source)`
+ * we `parentPort.postMessage` this envelope instead of writing on the
+ * worker side. The main-side worker-client dispatches `'event' === 'trace'`
+ * messages to `replayPerfTraceWorkerEvent`, which calls back into
+ * `performanceTrace.record()` so every worker's events land in the single
+ * main trace store with a consistent thread track.
+ *
+ * Shape mirrors `ripgrep-search-worker-entry.ts::postTrace` (the
+ * established precedent — see `infra/trace.md` § 2.1) so the same
+ * dispatcher pattern in worker-clients can be reused unchanged for any
+ * future worker.
+ */
+export interface PerfTraceWorkerEvent {
+  event: 'trace'
   name: string
-  ph: TracePhase
-  pid: number
-  tid: number
-  ts?: number
-  dur?: number
-  cat?: string
-  id?: string
-  s?: TraceScope
-  args?: Record<string, TraceArgValue>
+  data?: Record<string, unknown>
+  source?: RecordSource
+}
+
+export interface EventLoopStallMetrics {
+  resetAt: number
+  totalSamples: number
+  stallCount: number
+  maxDriftMs: number
+  over100Ms: number
+  over250Ms: number
+  over500Ms: number
+  over1000Ms: number
+  over3000Ms: number
+  over6000Ms: number
+  lastStallAt: number | null
+  recentStalls: Array<{ ts: number; driftMs: number }>
+}
+
+export interface PerfTraceInfo {
+  enabled: boolean
+  logPath: string | null
+  latestPointerPath: string | null
+  eventLoop: EventLoopStallMetrics
 }
 
 interface TaskActivity {
@@ -85,37 +140,49 @@ interface TaskActivity {
   idleTimer: ReturnType<typeof setTimeout> | null
 }
 
-const MAIN_THREAD_ID = 1
+// ---------- Constants ----------
+
+// Chrome Trace Event Format constants.
+//
+// `pid=1` = main process.  `pid=2` = any renderer; the renderer's
+// WebContents id is used as `tid` so each window / utility shows up as
+// its own thread track in the Perfetto / Chrome DevTools UI.
+//
+// Per-Task virtual tids: any event tagged with a `terminalId` lands on
+// its own row (`thread_name='task-<shortId>'`) under the relevant
+// process. Main-side task tids start at `MAIN_TASK_TID_BASE`, renderer
+// at `RENDERER_TASK_TID_BASE`. Real tids (1, WebContents.id) stay
+// untouched, so Perfetto still shows the canonical main/renderer rows
+// alongside the per-task lanes.
+//
+// `pid=3` = a virtual "Tasks" process that hosts the markTask* state
+// machine emitted by `markTaskInput / markTaskRunning / etc.`. Disjoint
+// from pid=1/2 so the per-task tid range can start at 1 without
+// colliding with main tid=1.
+const MAIN_PID = 1
+const RENDERER_PID = 2
+const TASK_PID = 3
+const MAIN_TID = 1
 const RENDERER_THREAD_ID = 1
+const MAIN_TASK_TID_BASE = 10000
+const RENDERER_TASK_TID_BASE = 20000
+
 const TASK_IDLE_DELAY_MS = 1000
-const MAX_TRACE_EVENTS = 200000
+
+// Bounds for `record()`'s payload normalization (perf-trace-logger lineage).
+const MAX_OBJECT_DEPTH = 5
+const MAX_ARRAY_ITEMS = 80
+const MAX_OBJECT_KEYS = 80
+const MAX_STRING_LENGTH = 4000
+const MAX_RECENT_EVENT_LOOP_STALLS = 40
+
+// Bounds for the strict-redaction path used by `recordRendererEvent` /
+// `markTask*` / `recordFlow*` (performance-trace lineage). Tighter than
+// the `record()` path because these explicitly opt into PII redaction.
 const MAX_CAPTURED_STRING_LENGTH = 240
 const MAX_CAPTURED_ARRAY_LENGTH = 50
 
-function parsePositiveInt(raw: string | undefined, fallback: number): number {
-  if (!raw) return fallback
-  const parsed = Number(raw)
-  if (!Number.isFinite(parsed) || parsed <= 0) return fallback
-  return Math.floor(parsed)
-}
-
-// Periodic flush interval: writes the in-memory event buffer to disk every
-// N seconds so a crash loses at most this much of the capture. Default 30s;
-// set ONWARD_PERF_TRACE_FLUSH_SEC=0 to disable (final flush on quit still runs).
-const PERIODIC_FLUSH_SEC = (() => {
-  const raw = process.env.ONWARD_PERF_TRACE_FLUSH_SEC
-  if (raw === '0') return 0
-  return parsePositiveInt(raw, 30)
-})()
-
-// Byte-bounded ring complement to MAX_TRACE_EVENTS. Under sustained PTY
-// flood with content capture, individual events can be ~hundreds of bytes
-// each — 200 000 events × 500 B is ~100 MB; a malicious or accidental
-// large content burst could push past that. The byte cap caps memory
-// regardless of count.
-const MAX_TRACE_BYTES = parsePositiveInt(process.env.ONWARD_PERF_TRACE_MAX_MB, 256) * 1024 * 1024
-
-const SENSITIVE_KEY_RE = /(content|text|input|output|prompt|path|cwd|url|env|error|file|value|preview|raw)/i
+const SENSITIVE_KEY_RE = /(content|text|input|output|prompt|path|cwd|url|env|error|file|value|preview|raw|token|password|secret|apikey|authorization|email)/i
 const ALLOWED_STRING_KEYS = new Set([
   'action',
   'bufferMode',
@@ -136,78 +203,297 @@ const ALLOWED_STRING_KEYS = new Set([
   'terminalId'
 ])
 
+/**
+ * Stable worker tids used by worker-client dispatchers. Each worker gets
+ * its own thread track in the main trace so Perfetto SQL can group
+ * events by worker without name parsing. Reserved range: 5000-5999
+ * (well above the default main tid=1 and below MAIN_TASK_TID_BASE=10000).
+ */
+export const WORKER_TID = {
+  GIT_IPC: 5001,
+  GIT_STATUS: 5002,
+  PROJECT_FS: 5003,
+  SQLITE: 5004,
+  APP_STATE: 5005,
+  RIPGREP_SEARCH: 5006
+} as const
+
+// ---------- Pure helpers ----------
+
+function createEventLoopStallMetrics(resetAt = Date.now()): EventLoopStallMetrics {
+  return {
+    resetAt,
+    totalSamples: 0,
+    stallCount: 0,
+    maxDriftMs: 0,
+    over100Ms: 0,
+    over250Ms: 0,
+    over500Ms: 0,
+    over1000Ms: 0,
+    over3000Ms: 0,
+    over6000Ms: 0,
+    lastStallAt: null,
+    recentStalls: []
+  }
+}
+
+function cloneEventLoopStallMetrics(metrics: EventLoopStallMetrics): EventLoopStallMetrics {
+  return {
+    ...metrics,
+    recentStalls: metrics.recentStalls.map((entry) => ({ ...entry }))
+  }
+}
+
+function normalizeTraceValue(value: unknown, depth = 0): unknown {
+  if (value === null || value === undefined) return value ?? null
+  if (typeof value === 'string') {
+    return value.length > MAX_STRING_LENGTH
+      ? `${value.slice(0, MAX_STRING_LENGTH)}...[truncated:${value.length}]`
+      : value
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') return value
+  if (typeof value === 'bigint') return value.toString()
+  if (typeof value === 'function' || typeof value === 'symbol') return String(value)
+  if (value instanceof Error) {
+    return {
+      name: value.name,
+      message: value.message,
+      stack: value.stack?.slice(0, MAX_STRING_LENGTH) ?? null
+    }
+  }
+  if (depth >= MAX_OBJECT_DEPTH) return '[MaxDepth]'
+  if (Array.isArray(value)) {
+    return value.slice(0, MAX_ARRAY_ITEMS).map((item) => normalizeTraceValue(item, depth + 1))
+  }
+  if (typeof value === 'object') {
+    const result: Record<string, unknown> = {}
+    for (const [key, nestedValue] of Object.entries(value as Record<string, unknown>).slice(0, MAX_OBJECT_KEYS)) {
+      result[key] = normalizeTraceValue(nestedValue, depth + 1)
+    }
+    return result
+  }
+  return String(value)
+}
+
+function safeNormalize(value: unknown): unknown {
+  try {
+    return normalizeTraceValue(value)
+  } catch (error) {
+    return { serializationError: String(error) }
+  }
+}
+
+/**
+ * Decide the Chrome trace "phase" (`ph`) for an event passed to
+ * `record(name, data, source?)` based on the event name and payload.
+ * Explicit rules first; anything unknown falls through to a safe
+ * `ph:'i'` instant event.
+ */
+function resolvePhase(event: string, data: TracePayload): { ph: 'X' | 'i' | 'M'; dur?: number; scope?: string } {
+  if (event === PERF_TRACE_EVENT.MAIN_TRACE_START) {
+    return { ph: 'i', scope: 'g' }
+  }
+  if (
+    event === PERF_TRACE_EVENT.MAIN_EVENT_LOOP_STALL ||
+    event === PERF_TRACE_EVENT.RENDERER_EVENT_LOOP_STALL ||
+    event === PERF_TRACE_EVENT.RENDERER_FRAME_STALL
+  ) {
+    const driftMs = Number((data as Record<string, unknown> | undefined)?.driftMs
+      ?? (data as Record<string, unknown> | undefined)?.frameDeltaMs)
+    if (Number.isFinite(driftMs) && driftMs > 0) {
+      return { ph: 'X', dur: Math.round(driftMs * 1000) }
+    }
+    return { ph: 'i', scope: 't' }
+  }
+  if (event === PERF_TRACE_EVENT.RENDERER_LONGTASK) {
+    const durationMs = Number((data as Record<string, unknown> | undefined)?.durationMs)
+    if (Number.isFinite(durationMs) && durationMs > 0) {
+      return { ph: 'X', dur: Math.round(durationMs * 1000) }
+    }
+    return { ph: 'i', scope: 't' }
+  }
+  if (event === PERF_TRACE_EVENT.RENDERER_PROMPT_INPUT_PAINT) {
+    const totalMs = Number((data as Record<string, unknown> | undefined)?.eventToPaintMs)
+    if (Number.isFinite(totalMs) && totalMs > 0) {
+      return { ph: 'X', dur: Math.round(totalMs * 1000) }
+    }
+    return { ph: 'i', scope: 't' }
+  }
+  // Convention: any event carrying `elapsedMs`, `durationMs`, or
+  // `workerDurationMs` in its payload is a completed span. We route
+  // them to `ph:'X'` so Perfetto SQL's `slice.dur` column is usable for
+  // percentile / aggregate queries (see infra/trace.md §5.4). This
+  // catches the `main:*-worker-latency` family, `main:app-state-save`,
+  // and any future slice-shaped events without requiring each emitter
+  // to think about Chrome Trace Event Format phases.
+  const d = data as Record<string, unknown> | undefined
+  const inferredMs = Number(d?.elapsedMs ?? d?.durationMs ?? d?.workerDurationMs)
+  if (Number.isFinite(inferredMs) && inferredMs > 0) {
+    return { ph: 'X', dur: Math.round(inferredMs * 1000) }
+  }
+  return { ph: 'i', scope: 't' }
+}
+
+/**
+ * Type guard for the worker→main trace forwarding envelope. Worker-
+ * client `worker.on('message')` handlers should call this first so the
+ * bridge is uniform across all workers (matches
+ * `electron/main/ripgrep-search.ts::handleWorkerEvent`).
+ */
+export function isPerfTraceWorkerEvent(message: unknown): message is PerfTraceWorkerEvent {
+  return typeof message === 'object'
+    && message !== null
+    && (message as { event?: unknown }).event === 'trace'
+    && typeof (message as { name?: unknown }).name === 'string'
+}
+
+/**
+ * Replay a worker's forwarded trace event on the main-side
+ * `performanceTrace`. `defaultSource` lets each worker-client tag with
+ * its own stable tid + threadName so the per-worker thread track in
+ * Perfetto stays coherent even when the worker itself didn't set
+ * `source`.
+ */
+export function replayPerfTraceWorkerEvent(
+  envelope: PerfTraceWorkerEvent,
+  defaultSource?: RecordSource
+): void {
+  const merged: RecordSource | undefined = envelope.source
+    ? { ...defaultSource, ...envelope.source }
+    : defaultSource
+  performanceTrace.record(envelope.name, envelope.data as TracePayload, merged)
+}
+
+// ---------- Class ----------
+
 class PerformanceTrace {
-  readonly enabled = process.env.ONWARD_PERF_TRACE === '1'
+  // Default-on: trace store always captures unless ONWARD_PERF_TRACE=0.
+  readonly enabled = TRACE_STORE_ENABLED && isMainThread
+  // Sensitive-content capture stays opt-in. When disabled, free-text
+  // payloads still get summarized (length, line count, salted hash) so
+  // operators can correlate magnitudes without seeing the bytes.
   readonly captureContent = this.enabled && process.env.ONWARD_PERF_TRACE_CAPTURE_CONTENT === '1'
 
   private initialized = false
-  private filePath: string | null = null
-  private events: ChromeTraceEvent[] = []
+  // Counter of accepted events. Replaces the legacy in-memory ring's
+  // `events.length`; surfaced via `getStatus()` so PT-08 / external
+  // diagnostics keep working after the move to NDJSON chunks.
+  private acceptedEvents = 0
   private droppedEvents = 0
-  private currentBytes = 0
   private flowCounter = 0
   private taskThreadCounter = 0
   private readonly salt = randomBytes(16).toString('hex')
-  private readonly mainPid = process.pid
-  private readonly rendererPid = process.pid + 100000
-  private readonly taskPid = process.pid + 200000
+
+  // Per-Task tid assignment for record(). Key = `${side}:${terminalId}`
+  // so main / renderer lanes have independent auto-incrementing ranges.
+  private taskTids = new Map<string, number>()
+  private nextMainTaskTid = MAIN_TASK_TID_BASE
+  private nextRendererTaskTid = RENDERER_TASK_TID_BASE
+  private rendererThreadNamesEmitted = new Set<number>()
+  private namedNonRendererTids = new Set<string>()
+
+  // markTask* state machine on pid=3.
   private taskThreadIds = new Map<string, number>()
   private taskActivities = new Map<string, TaskActivity>()
-  private periodicFlushTimer: ReturnType<typeof setInterval> | null = null
 
+  // Event-loop / git-runtime monitors.
+  private eventLoopTimer: ReturnType<typeof setInterval> | null = null
+  private gitRuntimeTimer: ReturnType<typeof setInterval> | null = null
+  private eventLoopMetrics: EventLoopStallMetrics = createEventLoopStallMetrics()
+
+  isEnabled(): boolean {
+    return this.enabled
+  }
+
+  /**
+   * Initialize the trace pipeline. Idempotent. `start()` is an alias
+   * for compatibility with the legacy `performanceTrace.start()` API.
+   */
   initialize(): void {
     if (!this.enabled || this.initialized) return
     this.initialized = true
 
-    const electronApp = loadElectronApp()
-    if (!electronApp) {
-      // initialize() should never run off the main thread; defensive guard so a
-      // future caller from a worker can't NPE on app.getPath().
-      this.initialized = false
-      return
-    }
-    const dir = join(electronApp.getPath('userData'), 'performance-traces')
-    if (!existsSync(dir)) {
-      mkdirSync(dir, { recursive: true })
-    }
+    // The shared trace-store is also idempotent; both this module and
+    // any other entry point can call initialize().
+    traceStore.initialize()
 
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-')
-    this.filePath = join(dir, `onward-perf-trace-${timestamp}-${process.pid}.json`)
-    console.log(`[PerfTrace] Active (ONWARD_PERF_TRACE=1): ${this.filePath}`)
     if (this.captureContent) {
       console.log('[PerfTrace] Sensitive content capture active (ONWARD_PERF_TRACE_CAPTURE_CONTENT=1)')
     }
 
-    this.recordMetadata(this.mainPid, MAIN_THREAD_ID, 'process_name', 'Onward Main')
-    this.recordMetadata(this.mainPid, MAIN_THREAD_ID, 'thread_name', 'main')
-    this.recordMetadata(this.rendererPid, RENDERER_THREAD_ID, 'process_name', 'Onward Renderer')
-    this.recordMetadata(this.rendererPid, RENDERER_THREAD_ID, 'thread_name', 'renderer-main')
-    this.recordMetadata(this.taskPid, 0, 'process_name', 'Onward Tasks')
+    // Process / thread metadata for the canonical Perfetto rows.
+    this.recordMetadata(MAIN_PID, MAIN_TID, 'process_name', 'Onward main')
+    this.recordMetadata(MAIN_PID, MAIN_TID, 'process_sort_index', 1)
+    this.recordMetadata(MAIN_PID, MAIN_TID, 'thread_name', 'main')
+    this.recordMetadata(RENDERER_PID, 0, 'process_name', 'Onward renderer')
+    this.recordMetadata(RENDERER_PID, 0, 'process_sort_index', 2)
+    this.recordMetadata(TASK_PID, 0, 'process_name', 'Onward Tasks')
 
     const appInfo = loadAppInfo()
-    this.recordInstant('trace.session.start', {
-      schema: 'onward.perf_trace.v1',
+    const dir = traceStore.getDir()
+    const kind = traceStore.getRootKind()
+    console.log(`[PerfTrace] enabled format=ndjson-chunked dir=${dir} (${kind})`)
+
+    // Register signal handlers so SIGTERM / SIGINT (tests, CI, Ctrl-C)
+    // still flush the trace store. The class is a singleton so these
+    // handlers attach at most once; Electron `app.on('will-quit')`
+    // still covers graceful menu-quit paths.
+    const shutdown = () => {
+      try { this.stop() } catch { /* already closing */ }
+    }
+    process.once('SIGTERM', shutdown)
+    process.once('SIGINT', shutdown)
+    const electronApp = loadElectronApp()
+    if (electronApp) {
+      try { electronApp.once('will-quit', shutdown) } catch { /* lifecycle missing */ }
+      try { electronApp.once('before-quit', shutdown) } catch { /* lifecycle missing */ }
+    }
+
+    // Record the first real event after the metadata.
+    const appVersion = electronApp
+      ? (() => { try { return electronApp.getVersion() } catch { return 'unknown' } })()
+      : 'worker'
+    this.record(PERF_TRACE_EVENT.MAIN_TRACE_START, {
+      schema: 'onward.perf_trace.v2',
+      logDir: dir,
+      pid: process.pid,
       platform: process.platform,
-      appVersion: appInfo?.version ?? 'unknown',
+      appVersion,
       buildChannel: appInfo?.buildChannel ?? 'unknown',
       contentCaptured: this.captureContent,
-      flushIntervalSec: PERIODIC_FLUSH_SEC,
-      maxBufferMB: Math.floor(MAX_TRACE_BYTES / (1024 * 1024))
+      transport: 'trace-store-ndjson'
     })
+  }
 
-    // Schedule periodic flush so a crash loses at most PERIODIC_FLUSH_SEC of
-    // capture. Disabled when env var is 0; the final flush in requestQuit()
-    // is still authoritative and runs regardless.
-    if (PERIODIC_FLUSH_SEC > 0) {
-      this.periodicFlushTimer = setInterval(() => {
-        try { this.flush('periodic') } catch (error) {
-          console.warn('[PerfTrace] periodic flush failed:', String(error))
-        }
-      }, PERIODIC_FLUSH_SEC * 1000)
-      this.periodicFlushTimer.unref?.()
-      console.log(`[PerfTrace] Periodic flush every ${PERIODIC_FLUSH_SEC}s, max buffer ${Math.floor(MAX_TRACE_BYTES / (1024 * 1024))}MB`)
-    } else {
-      console.log(`[PerfTrace] Periodic flush disabled (ONWARD_PERF_TRACE_FLUSH_SEC=0); final flush on quit only`)
+  /** Alias for `initialize()` so legacy `performanceTrace.start()` callers compile. */
+  start(): void {
+    this.initialize()
+  }
+
+  /** Idempotent shutdown. Closes the trace-store via the will-quit hook in main/index.ts. */
+  stop(): void {
+    if (this.eventLoopTimer) {
+      clearInterval(this.eventLoopTimer)
+      this.eventLoopTimer = null
+    }
+    if (this.gitRuntimeTimer) {
+      clearInterval(this.gitRuntimeTimer)
+      this.gitRuntimeTimer = null
+    }
+    if (this.initialized && isMainThread) {
+      this.record(PERF_TRACE_EVENT.MAIN_TRACE_STOP)
+    }
+    this.initialized = false
+  }
+
+  getInfo(): PerfTraceInfo {
+    if (this.enabled) this.start()
+    const dir = traceStore.getDir()
+    return {
+      enabled: this.enabled,
+      logPath: traceStore.getCurrentChunkPath(),
+      latestPointerPath: dir ? `${dir}/latest.txt` : null,
+      eventLoop: this.getEventLoopMetrics()
     }
   }
 
@@ -216,11 +502,126 @@ class PerformanceTrace {
       enabled: this.enabled,
       captureContent: this.captureContent,
       initialized: this.initialized,
-      filePath: this.filePath,
-      eventCount: this.events.length,
+      filePath: traceStore.getCurrentChunkPath(),
+      eventCount: this.acceptedEvents,
       droppedEvents: this.droppedEvents
     }
   }
+
+  resetEventLoopMetrics(): EventLoopStallMetrics {
+    this.eventLoopMetrics = createEventLoopStallMetrics()
+    this.record(PERF_TRACE_EVENT.MAIN_EVENT_LOOP_METRICS_RESET, {
+      resetAt: this.eventLoopMetrics.resetAt
+    })
+    return this.getEventLoopMetrics()
+  }
+
+  getEventLoopMetrics(): EventLoopStallMetrics {
+    return cloneEventLoopStallMetrics(this.eventLoopMetrics)
+  }
+
+  // ---------- record() — generic emit, perf-trace-logger lineage ----------
+
+  /**
+   * Record a generic trace event. Routes through the shared `traceStore`
+   * after applying phase resolution (`ph='X'` slice vs `ph='i'` instant)
+   * and tid routing.
+   *
+   * Worker thread context: the call is forwarded via `parentPort.postMessage`
+   * as a `PerfTraceWorkerEvent` envelope; the main-side worker-client
+   * replays it through `replayPerfTraceWorkerEvent`. The worker itself
+   * never writes disk — every event lands in the single main store with
+   * a consistent thread track.
+   *
+   * `source` lets IPC bridges tag renderer- or worker-forwarded events
+   * so they appear on a dedicated thread row in Perfetto UI.
+   */
+  record(event: string, data?: TracePayload, source?: RecordSource): void {
+    if (!this.enabled && isMainThread) return
+    if (!isMainThread) {
+      // Worker context: forward via parentPort. main writes the actual
+      // trace event. See replayPerfTraceWorkerEvent + worker-client
+      // dispatcher in electron/main/*-worker-client.ts.
+      try {
+        const envelope: PerfTraceWorkerEvent = { event: 'trace', name: event }
+        if (data && typeof data === 'object') {
+          envelope.data = data as Record<string, unknown>
+        }
+        if (source) envelope.source = source
+        parentPort?.postMessage(envelope)
+      } catch {
+        // postMessage can throw when the worker is being torn down; safe to drop.
+      }
+      return
+    }
+    this.start()
+
+    const isRenderer = source?.process === 'renderer'
+    const pid = isRenderer ? RENDERER_PID : MAIN_PID
+    let tid: number
+    if (source?.terminalId) {
+      tid = this.assignTaskTid(source.terminalId, isRenderer ? 'renderer' : 'main')
+    } else if (isRenderer) {
+      tid = source?.tid ?? 0
+      if (tid > 0 && !this.rendererThreadNamesEmitted.has(tid)) {
+        this.rendererThreadNamesEmitted.add(tid)
+        this.writeStoreEvent({
+          ph: 'M', name: 'thread_name', pid, tid,
+          args: { name: `renderer#${tid}` }
+        })
+      }
+    } else {
+      // Main process — either the canonical tid=1 lane, or a worker's
+      // dedicated WORKER_TID lane (forwarded from a worker-client). For
+      // the worker case, emit a thread_name metadata packet on first
+      // sight so Perfetto UI labels the row instead of just an integer.
+      tid = source?.tid ?? MAIN_TID
+      if (source?.threadName && tid !== MAIN_TID) {
+        const key = `${pid}:${tid}`
+        if (!this.namedNonRendererTids.has(key)) {
+          this.namedNonRendererTids.add(key)
+          this.writeStoreEvent({
+            ph: 'M', name: 'thread_name', pid, tid,
+            args: { name: source.threadName }
+          })
+        }
+      }
+    }
+
+    const phase = resolvePhase(event, data)
+    const tsUs = Date.now() * 1000
+    const args = safeNormalize(data) as Record<string, unknown> | undefined
+    const entry: TraceStoreEvent = {
+      ph: phase.ph,
+      name: event,
+      ts: tsUs,
+      pid,
+      tid
+    }
+    if (phase.dur !== undefined) entry.dur = phase.dur
+    if (phase.scope) entry.s = phase.scope
+    if (args && Object.keys(args).length > 0) entry.args = args
+    this.writeStoreEvent(entry)
+  }
+
+  private assignTaskTid(terminalId: string, side: 'main' | 'renderer'): number {
+    const key = `${side}:${terminalId}`
+    const existing = this.taskTids.get(key)
+    if (existing !== undefined) return existing
+
+    const tid = side === 'main' ? this.nextMainTaskTid++ : this.nextRendererTaskTid++
+    this.taskTids.set(key, tid)
+
+    const pid = side === 'main' ? MAIN_PID : RENDERER_PID
+    const shortId = terminalId.length > 8 ? terminalId.slice(0, 8) : terminalId
+    this.writeStoreEvent({
+      ph: 'M', name: 'thread_name', pid, tid,
+      args: { name: `task-${shortId}${side === 'renderer' ? '-rnd' : ''}` }
+    })
+    return tid
+  }
+
+  // ---------- Performance-trace lineage helpers (PII-safe path) ----------
 
   nowUs(): number {
     return Math.round((performance.timeOrigin + performance.now()) * 1000)
@@ -231,6 +632,12 @@ class PerformanceTrace {
     return `${prefix}-${Date.now().toString(36)}-${this.flowCounter.toString(36)}`
   }
 
+  /**
+   * Summarize a free-text payload (PTY input, model output, file body)
+   * for safe inclusion in a trace event. Always emits length, line
+   * count, and a salted hash; only emits the actual bytes (truncated)
+   * when `captureContent` is enabled.
+   */
   summarizeText(prefix: string, value: string): TraceArgs {
     const normalizedPrefix = prefix || 'payload'
     const summary: TraceArgs = {
@@ -238,24 +645,22 @@ class PerformanceTrace {
       [`${normalizedPrefix}LineCount`]: value.length === 0 ? 0 : value.split(/\r\n|\r|\n/).length,
       [`${normalizedPrefix}Hash`]: this.hashText(value)
     }
-
     if (this.captureContent) {
       summary[`${normalizedPrefix}Preview`] = this.truncateString(value)
       summary.contentCaptured = true
     }
-
     return summary
   }
 
   recordRendererEvent(event: RendererTraceEvent): void {
     if (!this.enabled || !event || typeof event.name !== 'string') return
-    this.addEvent({
+    this.writeNamedEvent({
       name: event.name,
       cat: event.cat ?? 'renderer',
       ph: event.ph ?? 'i',
       ts: typeof event.ts === 'number' ? Math.round(event.ts) : this.nowUs(),
       dur: typeof event.dur === 'number' ? Math.max(0, Math.round(event.dur)) : undefined,
-      pid: this.rendererPid,
+      pid: RENDERER_PID,
       tid: typeof event.tid === 'number' ? event.tid : RENDERER_THREAD_ID,
       id: typeof event.id === 'string' ? event.id : undefined,
       s: event.scope,
@@ -265,26 +670,18 @@ class PerformanceTrace {
 
   recordInstant(name: string, args?: TraceArgs, cat = 'main'): void {
     if (!this.enabled) return
-    this.addEvent({
-      name,
-      cat,
-      ph: 'i',
-      ts: this.nowUs(),
-      pid: this.mainPid,
-      tid: MAIN_THREAD_ID,
+    this.writeNamedEvent({
+      name, cat, ph: 'i', ts: this.nowUs(),
+      pid: MAIN_PID, tid: MAIN_TID,
       args: this.sanitizeArgs(args)
     })
   }
 
   recordCounter(name: string, args?: TraceArgs, cat = 'counter'): void {
     if (!this.enabled) return
-    this.addEvent({
-      name,
-      cat,
-      ph: 'C',
-      ts: this.nowUs(),
-      pid: this.mainPid,
-      tid: MAIN_THREAD_ID,
+    this.writeNamedEvent({
+      name, cat, ph: 'C', ts: this.nowUs(),
+      pid: MAIN_PID, tid: MAIN_TID,
       args: this.sanitizeArgs(args)
     })
   }
@@ -292,14 +689,9 @@ class PerformanceTrace {
   recordComplete(name: string, startUs: number, args?: TraceArgs, cat = 'main'): void {
     if (!this.enabled) return
     const now = this.nowUs()
-    this.addEvent({
-      name,
-      cat,
-      ph: 'X',
-      ts: startUs,
-      dur: Math.max(0, now - startUs),
-      pid: this.mainPid,
-      tid: MAIN_THREAD_ID,
+    this.writeNamedEvent({
+      name, cat, ph: 'X', ts: startUs, dur: Math.max(0, now - startUs),
+      pid: MAIN_PID, tid: MAIN_TID,
       args: this.sanitizeArgs(args)
     })
   }
@@ -370,43 +762,104 @@ class PerformanceTrace {
     return this.taskActivities.get(terminalId)?.flowId ?? null
   }
 
+  /**
+   * Legacy flush API. The trace-store is append-only and writes to disk
+   * synchronously, so there is nothing to flush — kept as a no-op so any
+   * existing caller (`requestQuit`, IPC handlers, tests) keeps compiling.
+   */
   flush(reason = 'manual'): Record<string, string | number | boolean | null> {
-    if (!this.enabled || !this.filePath) {
-      return this.getStatus()
-    }
-
-    const startUs = this.nowUs()
-    this.recordComplete('trace.session.flush', startUs, {
-      reason,
-      eventCount: this.events.length,
-      droppedEvents: this.droppedEvents
-    }, 'trace')
-
-    const payload = {
-      traceEvents: this.events,
-      metadata: {
-        schema: 'onward.perf_trace.v1',
-        generatedAt: new Date().toISOString(),
-        droppedEvents: this.droppedEvents,
-        contentCaptured: this.captureContent
-      }
-    }
-
-    writeFileSync(this.filePath, JSON.stringify(payload), 'utf-8')
+    if (!this.enabled) return this.getStatus()
+    this.recordInstant('trace.session.flush', { reason }, 'trace')
     return this.getStatus()
+  }
+
+  // ---------- Event-loop / git-runtime monitors ----------
+
+  startEventLoopMonitor(): void {
+    if (!this.enabled || this.eventLoopTimer) return
+    this.start()
+    const intervalMs = 250
+    const stallThresholdMs = 100
+    let expectedAt = Date.now() + intervalMs
+
+    this.eventLoopTimer = setInterval(() => {
+      const now = Date.now()
+      const driftMs = now - expectedAt
+      expectedAt = now + intervalMs
+      this.eventLoopMetrics.totalSamples += 1
+      if (driftMs >= stallThresholdMs) {
+        this.recordEventLoopStall(now, driftMs)
+        this.record(PERF_TRACE_EVENT.MAIN_EVENT_LOOP_STALL, {
+          driftMs, intervalMs, stallThresholdMs
+        })
+      }
+    }, intervalMs)
+    this.eventLoopTimer.unref?.()
+  }
+
+  startGitRuntimeMonitor(getMetrics: () => unknown): void {
+    if (!this.enabled || this.gitRuntimeTimer) return
+    this.start()
+    this.gitRuntimeTimer = setInterval(() => {
+      try {
+        this.record(PERF_TRACE_EVENT.MAIN_GIT_RUNTIME_SUMMARY, getMetrics() as TracePayload)
+      } catch (error) {
+        this.record(PERF_TRACE_EVENT.MAIN_GIT_RUNTIME_SUMMARY_ERROR, { error: String(error) })
+      }
+    }, 1000)
+    this.gitRuntimeTimer.unref?.()
+  }
+
+  // ---------- Internal write paths ----------
+
+  /**
+   * Forward a Chrome-trace-format event into the shared store. Used by
+   * `record()` (the perf-trace-logger lineage path — already
+   * length-truncated via `safeNormalize`).
+   */
+  private writeStoreEvent(entry: TraceStoreEvent): void {
+    const accepted = traceStore.writeEvent(entry)
+    if (!accepted) this.droppedEvents += 1
+  }
+
+  /**
+   * Forward a higher-level event from the recordX / recordFlow / markTask
+   * lineage. Same store path; separate signature so the strict-redaction
+   * lineage stays type-safe (TraceArgValue) rather than the looser
+   * `unknown` of the perf-trace-logger lineage.
+   */
+  private writeNamedEvent(event: {
+    name: string
+    ph: TracePhase
+    pid: number
+    tid: number
+    ts?: number
+    dur?: number
+    cat?: string
+    id?: string
+    s?: TraceScope
+    args?: Record<string, TraceArgValue> | undefined
+  }): void {
+    if (!this.enabled) return
+    const storeEvent: TraceStoreEvent = {
+      ph: event.ph, name: event.name, pid: event.pid, tid: event.tid
+    }
+    if (event.ts !== undefined) storeEvent.ts = event.ts
+    if (event.dur !== undefined) storeEvent.dur = event.dur
+    if (event.cat) storeEvent.cat = event.cat
+    if (event.id) storeEvent.id = event.id
+    if (event.s) storeEvent.s = event.s
+    if (event.args) storeEvent.args = event.args as Record<string, unknown>
+    const accepted = traceStore.writeEvent(storeEvent)
+    if (accepted) this.acceptedEvents += 1
+    else this.droppedEvents += 1
   }
 
   private recordFlow(name: string, ph: 's' | 't' | 'f', flowId: string, args?: TraceArgs, cat = 'flow'): void {
     if (!this.enabled || !flowId) return
-    this.addEvent({
-      name,
-      cat,
-      ph,
-      ts: this.nowUs(),
-      pid: this.mainPid,
-      tid: MAIN_THREAD_ID,
-      id: flowId,
-      s: 'g',
+    this.writeNamedEvent({
+      name, cat, ph, ts: this.nowUs(),
+      pid: MAIN_PID, tid: MAIN_TID, id: flowId, s: 'g',
       args: this.sanitizeArgs(args)
     })
   }
@@ -418,20 +871,15 @@ class PerformanceTrace {
       clearTimeout(current.idleTimer)
       current.idleTimer = null
     }
-
     const nextFlowId = flowId ?? current?.flowId ?? null
     const threadId = this.getTaskThreadId(terminalId)
     this.taskActivities.set(terminalId, { state, flowId: nextFlowId, idleTimer: null })
-    this.addEvent({
+    this.writeNamedEvent({
       name: 'terminal.task.state',
-      cat: 'task',
-      ph: 'i',
-      ts: this.nowUs(),
-      pid: this.taskPid,
-      tid: threadId,
+      cat: 'task', ph: 'i', ts: this.nowUs(),
+      pid: TASK_PID, tid: threadId,
       args: this.sanitizeArgs({
-        terminalId,
-        state,
+        terminalId, state,
         flowId: nextFlowId ?? undefined,
         ...args
       })
@@ -449,51 +897,47 @@ class PerformanceTrace {
   private getTaskThreadId(terminalId: string): number {
     const existing = this.taskThreadIds.get(terminalId)
     if (existing !== undefined) return existing
-
     this.taskThreadCounter += 1
     const threadId = this.taskThreadCounter
     this.taskThreadIds.set(terminalId, threadId)
-    this.recordMetadata(this.taskPid, threadId, 'thread_name', `task:${terminalId}`)
+    this.recordMetadata(TASK_PID, threadId, 'thread_name', `task:${terminalId}`)
     return threadId
   }
 
-  private recordMetadata(pid: number, tid: number, name: string, value: string): void {
-    this.addEvent({
-      name,
-      ph: 'M',
-      pid,
-      tid,
-      args: { name: value }
+  private recordMetadata(pid: number, tid: number, name: string, value: string | number): void {
+    this.writeStoreEvent({
+      ph: 'M', name, pid, tid,
+      args: { [typeof value === 'number' ? 'sort_index' : 'name']: value }
     })
   }
 
-  private addEvent(event: ChromeTraceEvent): void {
-    if (!this.enabled) return
-    if (this.events.length >= MAX_TRACE_EVENTS) {
-      this.droppedEvents += 1
-      return
+  private recordEventLoopStall(ts: number, driftMs: number): void {
+    const metrics = this.eventLoopMetrics
+    metrics.stallCount += 1
+    metrics.maxDriftMs = Math.max(metrics.maxDriftMs, driftMs)
+    metrics.lastStallAt = ts
+    if (driftMs >= 100) metrics.over100Ms += 1
+    if (driftMs >= 250) metrics.over250Ms += 1
+    if (driftMs >= 500) metrics.over500Ms += 1
+    if (driftMs >= 1000) metrics.over1000Ms += 1
+    if (driftMs >= 3000) metrics.over3000Ms += 1
+    if (driftMs >= 6000) metrics.over6000Ms += 1
+    metrics.recentStalls.push({ ts, driftMs: Math.round(driftMs) })
+    if (metrics.recentStalls.length > MAX_RECENT_EVENT_LOOP_STALLS) {
+      metrics.recentStalls.splice(0, metrics.recentStalls.length - MAX_RECENT_EVENT_LOOP_STALLS)
     }
-    const eventBytes = estimateEventBytes(event)
-    if (this.currentBytes + eventBytes > MAX_TRACE_BYTES) {
-      this.droppedEvents += 1
-      return
-    }
-    this.events.push(event)
-    this.currentBytes += eventBytes
   }
+
+  // ---------- Sanitization (strict-redaction lineage) ----------
 
   private sanitizeArgs(args?: TraceArgs): Record<string, TraceArgValue> | undefined {
     if (!args) return undefined
     const result: Record<string, TraceArgValue> = {}
-
     for (const [key, rawValue] of Object.entries(args)) {
       if (rawValue === undefined) continue
       const sanitized = this.sanitizeValue(key, rawValue)
-      if (sanitized !== undefined) {
-        result[key] = sanitized
-      }
+      if (sanitized !== undefined) result[key] = sanitized
     }
-
     return Object.keys(result).length > 0 ? result : undefined
   }
 
@@ -501,12 +945,10 @@ class PerformanceTrace {
     if (value === null || typeof value === 'number' || typeof value === 'boolean') {
       return value
     }
-
     if (typeof value === 'string') {
       if (this.isSensitiveKey(key) && !this.captureContent) return undefined
       return this.truncateString(value)
     }
-
     if (Array.isArray(value)) {
       const values = value.slice(0, MAX_CAPTURED_ARRAY_LENGTH)
       if (values.every(item => typeof item === 'string')) {
@@ -516,7 +958,6 @@ class PerformanceTrace {
       if (values.every(item => typeof item === 'number')) return values as number[]
       if (values.every(item => typeof item === 'boolean')) return values as boolean[]
     }
-
     return undefined
   }
 
@@ -531,42 +972,13 @@ class PerformanceTrace {
   }
 
   private hashText(value: string): string {
-    return createHash('sha256')
-      .update(this.salt)
-      .update(value)
-      .digest('hex')
-      .slice(0, 16)
+    return createHash('sha256').update(this.salt).update(value).digest('hex').slice(0, 16)
   }
 
   private errorType(error: unknown): string {
     if (error instanceof Error) return error.name || 'Error'
     return typeof error
   }
-}
-
-/**
- * Estimate JSON-encoded byte size of a trace event without running
- * JSON.stringify on the hot path. Accurate enough for ring-buffer accounting;
- * over-estimates are safer than under-estimates.
- */
-function estimateEventBytes(event: ChromeTraceEvent): number {
-  let size = 64 + event.name.length
-  if (event.cat) size += event.cat.length
-  if (event.dur !== undefined) size += 12
-  if (event.ts !== undefined) size += 12
-  if (event.id) size += event.id.length + 4
-  if (event.s) size += 4
-  if (event.args) {
-    for (const [k, v] of Object.entries(event.args)) {
-      size += k.length + 4
-      if (typeof v === 'string') size += v.length + 2
-      else if (typeof v === 'number') size += 16
-      else if (typeof v === 'boolean') size += 5
-      else if (Array.isArray(v)) size += 16 + v.length * 8
-      else size += 16
-    }
-  }
-  return size
 }
 
 export const performanceTrace = new PerformanceTrace()

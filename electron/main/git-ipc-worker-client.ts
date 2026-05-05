@@ -21,11 +21,11 @@ import type {
   GitSubmoduleInfo
 } from './git-utils'
 import {
-  perfTraceLogger,
+  performanceTrace,
   isPerfTraceWorkerEvent,
   replayPerfTraceWorkerEvent,
   WORKER_TID
-} from './perf-trace-logger'
+} from './performance-trace'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 
 type GitIpcWorkerMethod =
@@ -305,10 +305,10 @@ class GitIpcWorkerClient {
       this.handleMessage(message as WorkerResponse)
     })
     this.worker.on('error', (error) => {
-      perfTraceLogger.record(PERF_TRACE_EVENT.WORKER_GIT_IPC_ERROR, { error: String(error) })
+      performanceTrace.record(PERF_TRACE_EVENT.WORKER_GIT_IPC_ERROR, { error: String(error) })
     })
     this.worker.on('exit', (code) => {
-      perfTraceLogger.record(PERF_TRACE_EVENT.WORKER_GIT_IPC_EXIT, {
+      performanceTrace.record(PERF_TRACE_EVENT.WORKER_GIT_IPC_EXIT, {
         code,
         pending: this.pending.size
       })
@@ -326,7 +326,7 @@ class GitIpcWorkerClient {
     return new Promise<T>((resolveTask, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id)
-        perfTraceLogger.record(PERF_TRACE_EVENT.WORKER_GIT_IPC_TIMEOUT, {
+        performanceTrace.record(PERF_TRACE_EVENT.WORKER_GIT_IPC_TIMEOUT, {
           id,
           method,
           elapsedMs: Date.now() - startedAt
@@ -355,7 +355,7 @@ class GitIpcWorkerClient {
 
     const elapsedMs = Date.now() - pending.startedAt
     if (elapsedMs > 500) {
-      perfTraceLogger.record(PERF_TRACE_EVENT.WORKER_GIT_IPC_LATENCY, {
+      performanceTrace.record(PERF_TRACE_EVENT.WORKER_GIT_IPC_LATENCY, {
         id: message.id,
         method: pending.method,
         elapsedMs

@@ -9,7 +9,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSyn
 import { tmpdir } from 'os'
 import { basename, dirname, isAbsolute, join } from 'path'
 import { spawn, execFileSync } from 'child_process'
-import { perfTraceLogger } from './perf-trace-logger'
+import { performanceTrace } from './performance-trace'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 import { getAppInfo, type ReleaseChannel, type ReleaseOs } from './app-info'
 import { compareVersions, parseVersion } from './update-version'
@@ -538,7 +538,7 @@ function launchWindowsUpdateScript(params: {
       stdio: 'ignore',
       timeout: 15000
     })
-    perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_UPDATER_SPAWN, {
+    performanceTrace.record(PERF_TRACE_EVENT.MAIN_UPDATER_SPAWN, {
       strategy: 'wmi',
       platform: 'win32',
       ok: true,
@@ -547,7 +547,7 @@ function launchWindowsUpdateScript(params: {
     appendToInstallLog(params.logPath, 'Node.js: WMI launch succeeded.')
     return true
   } catch (err) {
-    perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_UPDATER_SPAWN, {
+    performanceTrace.record(PERF_TRACE_EVENT.MAIN_UPDATER_SPAWN, {
       strategy: 'wmi',
       platform: 'win32',
       ok: false,
@@ -568,7 +568,7 @@ function launchWindowsUpdateScript(params: {
       stdio: 'ignore',
       timeout: 5000
     })
-    perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_UPDATER_SPAWN, {
+    performanceTrace.record(PERF_TRACE_EVENT.MAIN_UPDATER_SPAWN, {
       strategy: 'batch',
       platform: 'win32',
       ok: true,
@@ -577,7 +577,7 @@ function launchWindowsUpdateScript(params: {
     appendToInstallLog(params.logPath, 'Node.js: Batch launcher succeeded.')
     return true
   } catch (err) {
-    perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_UPDATER_SPAWN, {
+    performanceTrace.record(PERF_TRACE_EVENT.MAIN_UPDATER_SPAWN, {
       strategy: 'batch',
       platform: 'win32',
       ok: false,
@@ -593,7 +593,7 @@ function launchWindowsUpdateScript(params: {
       stdio: 'ignore',
       windowsHide: true
     })
-    perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_UPDATER_SPAWN, {
+    performanceTrace.record(PERF_TRACE_EVENT.MAIN_UPDATER_SPAWN, {
       strategy: 'detached-spawn',
       platform: 'win32',
       ok: true,
@@ -606,7 +606,7 @@ function launchWindowsUpdateScript(params: {
     appendToInstallLog(params.logPath, 'Node.js: Detached spawn succeeded (fire-and-forget).')
     return true
   } catch (err) {
-    perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_UPDATER_SPAWN, {
+    performanceTrace.record(PERF_TRACE_EVENT.MAIN_UPDATER_SPAWN, {
       strategy: 'detached-spawn',
       platform: 'win32',
       ok: false,
@@ -1539,7 +1539,7 @@ export class UpdateService {
       detached: true,
       stdio: 'ignore'
     })
-    perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_UPDATER_SPAWN, {
+    performanceTrace.record(PERF_TRACE_EVENT.MAIN_UPDATER_SPAWN, {
       strategy: 'macos-sh',
       platform: process.platform,
       pid: child.pid ?? null,

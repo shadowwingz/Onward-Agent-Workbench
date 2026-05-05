@@ -6,11 +6,11 @@
 import { join, resolve } from 'path'
 import { Worker } from 'worker_threads'
 import {
-  perfTraceLogger,
+  performanceTrace,
   isPerfTraceWorkerEvent,
   replayPerfTraceWorkerEvent,
   WORKER_TID
-} from './perf-trace-logger'
+} from './performance-trace'
 import { mainWorkScheduler } from './main-work-scheduler'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 
@@ -102,10 +102,10 @@ class SqliteWorkerClient {
       this.handleMessage(message as WorkerResponse)
     })
     this.worker.on('error', (error) => {
-      perfTraceLogger.record(PERF_TRACE_EVENT.WORKER_SQLITE_ERROR, { error: String(error) })
+      performanceTrace.record(PERF_TRACE_EVENT.WORKER_SQLITE_ERROR, { error: String(error) })
     })
     this.worker.on('exit', (code) => {
-      perfTraceLogger.record(PERF_TRACE_EVENT.WORKER_SQLITE_EXIT, {
+      performanceTrace.record(PERF_TRACE_EVENT.WORKER_SQLITE_EXIT, {
         code,
         pending: this.pending.size
       })
@@ -145,7 +145,7 @@ class SqliteWorkerClient {
     return new Promise((resolveTask, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id)
-        perfTraceLogger.record(PERF_TRACE_EVENT.WORKER_SQLITE_TIMEOUT, {
+        performanceTrace.record(PERF_TRACE_EVENT.WORKER_SQLITE_TIMEOUT, {
           id,
           method,
           dbPath: this.describeDbPath(payload),
@@ -175,7 +175,7 @@ class SqliteWorkerClient {
 
     const elapsedMs = Date.now() - pending.startedAt
     if (elapsedMs > 250) {
-      perfTraceLogger.record(PERF_TRACE_EVENT.WORKER_SQLITE_LATENCY, {
+      performanceTrace.record(PERF_TRACE_EVENT.WORKER_SQLITE_LATENCY, {
         id: message.id,
         method: pending.method,
         elapsedMs

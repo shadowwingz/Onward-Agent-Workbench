@@ -34,6 +34,7 @@ import { sqliteWorkerClient } from './sqlite-worker-client'
 import { getSettingsStorage, SettingsState, ShortcutConfig } from './settings-storage'
 import { getShortcutManager } from './shortcut-manager'
 import { getAppInfo } from './app-info'
+import { createDiagnosticBundle } from './diagnostic-bundle'
 import { getFeedbackStorage } from './feedback-storage'
 import { gitRuntimeManager } from './git-runtime-manager'
 import { mainWorkScheduler } from './main-work-scheduler'
@@ -45,10 +46,10 @@ import { ImageWatchManager } from './image-watch-manager'
 import { ProjectTreeWatchManager } from './project-tree-watch-manager'
 import { gitDiffCacheInvalidator } from './git-diff-cache-invalidator'
 import { getUpdateService } from './update-service'
-import { perfTraceLogger } from './perf-trace-logger'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 import { IPC } from '../shared/ipc-channels'
 import { performanceTrace, TraceContext } from './performance-trace'
+import { traceStore } from './trace-store'
 
 let gitWatchManager: GitWatchManager | null = null
 let ripgrepSearchManager: RipgrepSearchManager | null = null
@@ -429,18 +430,18 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     }
   }
 
-  perfTraceLogger.startGitRuntimeMonitor(() => gitRuntimeManager.getMetrics())
+  performanceTrace.startGitRuntimeMonitor(() => gitRuntimeManager.getMetrics())
 
   // --- Diagnostic counters (ONWARD_DEBUG=1 / ONWARD_PERF_TRACE=1) ---
   const ipcDataCounters = new Map<string, { messages: number; bytes: number }>()
-  if (shouldLog || perfTraceLogger.isEnabled()) {
+  if (shouldLog || performanceTrace.isEnabled()) {
     terminalIpcDiagTimer = setInterval(() => {
       for (const [tid, c] of ipcDataCounters) {
         if (c.messages > 0) {
           if (shouldLog) {
             console.log(`[PerfDiag] terminal:data tid=${tid} ipc/s=${c.messages} bytes/s=${c.bytes}`)
           }
-          perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_TERMINAL_DATA_IPC_SUMMARY, {
+          performanceTrace.record(PERF_TRACE_EVENT.MAIN_TERMINAL_DATA_IPC_SUMMARY, {
             terminalId: tid,
             messagesPerSecond: c.messages,
             bytesPerSecond: c.bytes
@@ -488,12 +489,48 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     // Perfetto row under the renderer process).
     const wc = rawEvent.sender
     const tid = wc?.id ?? 0
-    perfTraceLogger.record(payload.event, payload.data, {
+    performanceTrace.record(payload.event, payload.data, {
       process: 'renderer',
       tid,
       terminalId: payload.terminalId
     })
   })
+
+  // Autotest-only: synchronously emit the AUTOTEST_BUNDLE_MARKER event so
+  // the V10 closed-loop check can find it after the bundle IPC runs
+  // rotate + read + write. Production callers must never reach this —
+  // we gate the side-effect on `ONWARD_AUTOTEST=1` and the rendered
+  // payload's `feedback.diagnosticBundle.button` doesn't expose this
+  // path. Returns once `traceStore.writeSync` has flushed the event
+  // line into the kernel buffer of the active chunk fd, so the autotest
+  // can immediately call the bundle IPC and trust that the marker is
+  // already on disk.
+  ipcMain.handle(
+    IPC.DEBUG_EMIT_BUNDLE_MARKER,
+    async (_, payload: { uuid: string; label?: string }) => {
+      try {
+        if (process.env.ONWARD_AUTOTEST !== '1') {
+          return { success: false, error: 'debug:emit-bundle-marker requires ONWARD_AUTOTEST=1' }
+        }
+        if (!payload || typeof payload.uuid !== 'string' || payload.uuid.length === 0) {
+          return { success: false, error: 'invalid payload: uuid required' }
+        }
+        performanceTrace.record(PERF_TRACE_EVENT.AUTOTEST_BUNDLE_MARKER, {
+          uuid: payload.uuid,
+          label: payload.label
+        })
+        return {
+          success: true,
+          chunkPath: traceStore.getCurrentChunkPath(),
+          // Helpful for autotest debugging: the on-disk size right after
+          // the writeSync. The marker line is the last bytes appended.
+          chunkBytesAfterEmit: 0 // we don't expose internal counter; size is observable via fs.statSync if needed
+        }
+      } catch (error) {
+        return { success: false, error: String(error) }
+      }
+    }
+  )
 
   // Listen to buffer responses returned by the renderer process
   ipcMain.on(IPC.TERMINAL_BUFFER_RESPONSE, (_event, requestId: string, result: TerminalBufferResult) => {
@@ -572,10 +609,10 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     return mainWorkScheduler.getMetrics()
   })
   ipcMain.handle(IPC.DEBUG_GET_PERF_TRACE_INFO, () => {
-    return perfTraceLogger.getInfo()
+    return performanceTrace.getInfo()
   })
   ipcMain.handle(IPC.DEBUG_RESET_PERF_TRACE_METRICS, () => {
-    return perfTraceLogger.resetEventLoopMetrics()
+    return performanceTrace.resetEventLoopMetrics()
   })
   ipcMain.handle('debug:get-api-server-port', () => {
     return options.getApiPort?.() ?? 0
@@ -723,7 +760,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
       const dataBuffer = new TerminalDataBuffer(id, (tid, mergedData, meta) => {
         if (!mainWindow.isDestroyed()) {
           mainWindow.webContents.send(IPC.TERMINAL_DATA, tid, mergedData)
-          perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_TERMINAL_DATA_IPC_SEND, {
+          performanceTrace.record(PERF_TRACE_EVENT.MAIN_TERMINAL_DATA_IPC_SEND, {
             path: meta.path,
             bytes: mergedData.length,
             bufferAgeMs: meta.bufferAgeMs
@@ -1180,6 +1217,97 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     }
   })
 
+  // Diagnostic bundle export — packages userData state files + trace
+  // chunks into a ZIP. Pops the native Save As dialog so the user picks
+  // the destination. `forceOutputPath` lets the autotest harness drive
+  // the path deterministically (only honored when ONWARD_AUTOTEST=1, so
+  // production cannot accidentally bypass the dialog).
+  ipcMain.handle(
+    IPC.FEEDBACK_EXPORT_DIAGNOSTIC_BUNDLE,
+    async (_, payload?: { forceOutputPath?: string; expectedMarker?: { uuid: string; label?: string } }) => {
+      try {
+        const appInfo = getAppInfo()
+        const userDataDir = app.getPath('userData')
+        const now = new Date()
+        // Internal metadata (bundle manifest, AGENT-GUIDE) stays UTC ISO
+        // so cross-machine analysis is unambiguous. The filename uses
+        // LOCAL wall-clock time per user request — the user thinks in
+        // local time when they look at "what bundle did I just save".
+        const isoTs = now.toISOString()
+        const pad = (n: number) => n.toString().padStart(2, '0')
+        const localStamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}_${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`
+        const defaultName = `onward-diagnostic-${localStamp}.zip`
+
+        let outputPath: string
+        if (payload?.forceOutputPath && process.env.ONWARD_AUTOTEST === '1') {
+          outputPath = payload.forceOutputPath
+        } else {
+          const result = await dialog.showSaveDialog(mainWindow, {
+            title: 'Save diagnostic bundle',
+            defaultPath: defaultName,
+            filters: [{ name: 'ZIP', extensions: ['zip'] }]
+          })
+          if (result.canceled || !result.filePath) {
+            return { success: false, canceled: true }
+          }
+          outputPath = result.filePath
+        }
+
+        // Flush app-state so the bundled JSON reflects the latest debounced
+        // state (prompt height, editor drafts, terminal cwds). Telemetry
+        // is append-only NDJSON; tail-partial lines are safe in the bundle.
+        try {
+          await getAppStateStorage().flush()
+        } catch (error) {
+          console.warn('[DiagnosticBundle] app-state flush failed (continuing):', String(error))
+        }
+
+        // Seal the active trace chunk: closeSync the current fd so the
+        // existing chunks become static (safe to ZIP without racing
+        // writeSync), and open a fresh chunk for subsequent writes. The
+        // user-asked semantic — "stop the current capture, bundle what's
+        // there, do NOT delete chunks". `rotate()` fsync+closes, runs
+        // enforceBudget (the only deletion path, unchanged), then opens
+        // the next chunk. Repeated bundle clicks each cut a fresh chunk
+        // boundary; chunks captured between two clicks are independent.
+        try {
+          traceStore.rotate()
+        } catch (error) {
+          console.warn('[DiagnosticBundle] traceStore.rotate failed (continuing):', String(error))
+        }
+
+        // expectedMarker is honoured only in autotest mode — it drives the
+        // verifier's V10 closed-loop check (autotest emits a marker via
+        // debug:emit-bundle-marker, then expects it to round-trip into the
+        // ZIP). Production builds must never receive this field; the
+        // gate keeps the autotest plumbing fully out of the prod path.
+        const expectedMarker = process.env.ONWARD_AUTOTEST === '1'
+          ? payload?.expectedMarker
+          : undefined
+
+        const bundle = await createDiagnosticBundle({
+          userDataDir,
+          outputPath,
+          appInfo: {
+            version: appInfo.version,
+            buildChannel: appInfo.buildChannel,
+            branch: appInfo.branch,
+            tag: appInfo.tag,
+            productName: appInfo.productName,
+            electronVersion: process.versions.electron
+          },
+          timestamp: isoTs,
+          expectedMarker
+        })
+
+        return bundle
+      } catch (error) {
+        console.error('Failed to generate diagnostic bundle:', error)
+        return { success: false, error: String(error) }
+      }
+    }
+  )
+
   // Shell handlers
   ipcMain.handle(IPC.SHELL_OPEN_PATH, async (_, targetPath: string) => {
     try {
@@ -1594,7 +1722,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   ipcMain.handle(IPC.PROJECT_BUILD_FILE_INDEX, async (_, root: string) => {
     const startMs = Date.now()
     const result = await projectFsWorkerClient.buildFileIndex(root)
-    perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_FILE_INDEX_BUILD, {
+    performanceTrace.record(PERF_TRACE_EVENT.MAIN_FILE_INDEX_BUILD, {
       fileCount: Array.isArray(result) ? result.length : 0,
       durationMs: Date.now() - startMs
     })
@@ -1602,7 +1730,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   })
 
   ipcMain.handle(IPC.PROJECT_INVALIDATE_FILE_INDEX, async (_, root: string) => {
-    perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_FILE_INDEX_UPDATE, { reason: 'invalidate' })
+    performanceTrace.record(PERF_TRACE_EVENT.MAIN_FILE_INDEX_UPDATE, { reason: 'invalidate' })
     return await projectFsWorkerClient.invalidateFileIndex(root)
   })
 
@@ -1961,6 +2089,8 @@ export function cleanupIpcHandlers(): void {
   ipcMain.removeHandler(IPC.DIALOG_OPEN_DIRECTORY)
   ipcMain.removeHandler(IPC.DIALOG_OPEN_TEXT_FILE)
   ipcMain.removeHandler(IPC.DIALOG_SAVE_TEXT_FILE)
+  ipcMain.removeHandler(IPC.FEEDBACK_EXPORT_DIAGNOSTIC_BUNDLE)
+  ipcMain.removeHandler(IPC.DEBUG_EMIT_BUNDLE_MARKER)
   ipcMain.removeHandler(IPC.SHELL_OPEN_PATH)
   ipcMain.removeHandler(IPC.SHELL_OPEN_EXTERNAL)
   ipcMain.removeHandler(IPC.CLIPBOARD_WRITE_TEXT)

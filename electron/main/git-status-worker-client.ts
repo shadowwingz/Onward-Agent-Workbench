@@ -8,11 +8,11 @@ import { Worker } from 'worker_threads'
 import { gitRuntimeManager, type GitTaskPriority } from './git-runtime-manager'
 import type { GitBranchAndStatus, TerminalGitInfo } from './git-utils'
 import {
-  perfTraceLogger,
+  performanceTrace,
   isPerfTraceWorkerEvent,
   replayPerfTraceWorkerEvent,
   WORKER_TID
-} from './perf-trace-logger'
+} from './performance-trace'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 
 type GitRepoMeta = {
@@ -141,10 +141,10 @@ class GitStatusWorkerClient {
       this.handleMessage(message as WorkerResponse)
     })
     this.worker.on('error', (error) => {
-      perfTraceLogger.record(PERF_TRACE_EVENT.WORKER_GIT_STATUS_ERROR, { error: String(error) })
+      performanceTrace.record(PERF_TRACE_EVENT.WORKER_GIT_STATUS_ERROR, { error: String(error) })
     })
     this.worker.on('exit', (code) => {
-      perfTraceLogger.record(PERF_TRACE_EVENT.WORKER_GIT_STATUS_EXIT, {
+      performanceTrace.record(PERF_TRACE_EVENT.WORKER_GIT_STATUS_EXIT, {
         code,
         pending: this.pending.size
       })
@@ -162,7 +162,7 @@ class GitStatusWorkerClient {
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id)
-        perfTraceLogger.record(PERF_TRACE_EVENT.WORKER_GIT_STATUS_TIMEOUT, {
+        performanceTrace.record(PERF_TRACE_EVENT.WORKER_GIT_STATUS_TIMEOUT, {
           id,
           method,
           elapsedMs: Date.now() - startedAt
@@ -191,7 +191,7 @@ class GitStatusWorkerClient {
 
     const elapsedMs = Date.now() - pending.startedAt
     if (elapsedMs > 500) {
-      perfTraceLogger.record(PERF_TRACE_EVENT.WORKER_GIT_STATUS_LATENCY, {
+      performanceTrace.record(PERF_TRACE_EVENT.WORKER_GIT_STATUS_LATENCY, {
         id: message.id,
         method: pending.method,
         elapsedMs

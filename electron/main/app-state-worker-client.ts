@@ -7,11 +7,11 @@ import { join } from 'path'
 import { Worker } from 'worker_threads'
 import { mainWorkScheduler } from './main-work-scheduler'
 import {
-  perfTraceLogger,
+  performanceTrace,
   isPerfTraceWorkerEvent,
   replayPerfTraceWorkerEvent,
   WORKER_TID
-} from './perf-trace-logger'
+} from './performance-trace'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 
 type WorkerMethod = 'saveSnapshot'
@@ -86,10 +86,10 @@ class AppStateWorkerClient {
       this.handleMessage(message as WorkerResponse)
     })
     this.worker.on('error', (error) => {
-      perfTraceLogger.record(PERF_TRACE_EVENT.WORKER_APP_STATE_ERROR, { error: String(error) })
+      performanceTrace.record(PERF_TRACE_EVENT.WORKER_APP_STATE_ERROR, { error: String(error) })
     })
     this.worker.on('exit', (code) => {
-      perfTraceLogger.record(PERF_TRACE_EVENT.WORKER_APP_STATE_EXIT, {
+      performanceTrace.record(PERF_TRACE_EVENT.WORKER_APP_STATE_EXIT, {
         code,
         pending: this.pending.size
       })
@@ -107,7 +107,7 @@ class AppStateWorkerClient {
     return new Promise<T>((resolveTask, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id)
-        perfTraceLogger.record(PERF_TRACE_EVENT.WORKER_APP_STATE_TIMEOUT, {
+        performanceTrace.record(PERF_TRACE_EVENT.WORKER_APP_STATE_TIMEOUT, {
           id,
           method,
           elapsedMs: Date.now() - startedAt
@@ -134,7 +134,7 @@ class AppStateWorkerClient {
     this.pending.delete(message.id)
 
     const elapsedMs = Date.now() - pending.startedAt
-    perfTraceLogger.record(PERF_TRACE_EVENT.WORKER_APP_STATE_LATENCY, {
+    performanceTrace.record(PERF_TRACE_EVENT.WORKER_APP_STATE_LATENCY, {
       id: message.id,
       method: pending.method,
       elapsedMs

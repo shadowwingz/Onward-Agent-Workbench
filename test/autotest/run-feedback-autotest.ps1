@@ -61,7 +61,7 @@ try {
     exit 1
   }
 
-  if (-not (Select-String -Path $LogFile -Pattern "FBU-11-remove-local-record" -Quiet)) {
+  if (-not (Select-String -Path $LogFile -Pattern "FB-DB-03-semantic-loop-marker" -Quiet)) {
     Write-Error "Feedback autotest did not complete. Log: $LogFile"
     Get-Content $LogFile -Tail 160
     exit 1
