@@ -88,7 +88,7 @@ point at files under `test/unittest/`.
 | Off-renderer scheduling architecture invariants | `run-terminal-architecture-baseline` (TAB-00, TAB-01) |
 | Terminal layout / state restore across app restart | (`shouldRun('terminal-state-persistence')`, no shell runner) |
 | Per-Task font override (style settings) | (`shouldRun('per-agent-font')`, no shell runner) |
-| Renderer + main work scheduler unit tests | `test/unittest/main-work-scheduler-unit.mjs`, `renderer-work-scheduler-unit.mjs`, `terminal-output-scheduler-unit.mjs` |
+| Renderer + main work scheduler unit tests | `test/unittest/main-work-scheduler-unit.mjs`, `renderer-work-scheduler-unit.mjs`, `terminal-output-scheduler-unit.mjs` (all executed by `run-unittest-suite`) |
 | 8-grid (2x4) preset, Custom layout popover, downsize confirm dialog, focusTerminal 7/8 shortcuts | `run-task-layout` (TLM-00..05) + `test/unittest/task-layout-utils.test.mts` (TLM-U-01..41) |
 
 ### 2.2 Tab / Subpage navigation / Settings UI
@@ -138,8 +138,7 @@ point at files under `test/unittest/`.
 | Editor scope = active terminal (multi-terminal isolation) | `run-project-editor-multi-terminal-scope` (PEMS-*) |
 | SQLite viewer (open `.db`, table list, paging) | `run-project-editor-sqlite` (PSQL-*) |
 | File index cache + Quick Open behaviour | `run-file-index-cache-ui` (FIC-01..21) |
-| File-index unit (cache eviction, dirty key tracking) | `test/unittest/file-index-cache.test.mts` |
-| Project tree FS watcher (debounce, batch) | `test/unittest/project-tree-watch-manager.test.mts` |
+| File-index unit (cache eviction, dirty key tracking) | `test/unittest/file-index-cache.test.mts` (executed by `run-unittest-suite`) |
 | Editor auto-refresh on external file mutation | `run-file-watch` (FW-01..05) |
 | Global ripgrep search across project | `run-global-search` (GS-01..11) |
 | Working directory copy from terminal header | `run-working-directory-copy` (WDC-*) |
@@ -173,7 +172,7 @@ point at files under `test/unittest/`.
 | Prompt input long-tail under terminal pressure | `run-prompt-input-longtail` (PILT-01, PILT-02) |
 | Prompt list filter / color tag / task badge | `run-prompt-list` (PL-01..12) |
 | Prompt editor right-click context menu — undo / cut / copy / paste / clear-content / pinned-import / save-as-pinned / insert cwd / insert branch / insert task title / send-to-task; auto viewport flip + clamp. Also locks down the textarea's virtual-cursor behaviour: click-anywhere padding to (row, col), IME guard, paste at virtual position, undo of virtual padding, submit-time stripping of trailing whitespace / empty rows, real right-click ordering, modified-click no-op, caret/selection placement, repeated virtual clicks, scroll-offset row calculation, PromptSender send preview transform, and context-menu Send-to-Task transform; AND the per-Tab Canvas/Line input-mode dropdown in the title row (default Canvas, Line disables virtual click, Canvas restores it, Line still submits). | `run-prompt-editor-context-menu` (PECM-01..03, 05..09, 13..34) |
-| Send-transform pure function — strips per-line trailing whitespace and trailing empty rows so virtual-cursor placements with no input do not leak to the terminal. | `node --experimental-strip-types --test test/unittest/prompt-virtual-padding.test.mts` (PVP-U-01..08, 10..13). Out-of-band unit; not in `SCRIPTS`. |
+| Send-transform pure function — strips per-line trailing whitespace and trailing empty rows so virtual-cursor placements with no input do not leak to the terminal. | `test/unittest/prompt-virtual-padding.test.mts` (PVP-U-01..08, 10..13), executed by `run-unittest-suite`. |
 | Prompt sender grid layout, action buttons, send/execute | `run-prompt-sender` (PS-01..10) |
 | Bug fix: terminal grid uncapped, sender respects 50% cap | `run-prompt-sender` (PS-31, PS-32, PS-33) |
 | Prompt cleanup (auto / manual, color-aware retention) | (`shouldRun('prompt-cleanup')`, no shell runner; PC-*) |
@@ -184,12 +183,13 @@ point at files under `test/unittest/`.
 | Feature / Bug | Tests |
 |---|---|
 | Trace JSON written and parseable on every dev launch | `run-trace-infra-self-check` (`first main event found`) |
+| All `test/unittest/**` harnesses (pure-logic unit tests across every subsystem) | `run-unittest-suite` — driver `test/autotest/run-unittest-suite.mjs` discovers every `*.{mjs,mts}` and runs each in a fresh child process. Drop a new file under `test/unittest/` and it is picked up automatically — no `SCRIPTS` edit needed. Also reachable via `pnpm test:unit`. |
 | Per-feature trace events emit and group by Task tid | `run-performance-trace` (PT-*) |
 | Telemetry session start, properties, heartbeat | `run-telemetry` (TEL-01..10) |
 | Feedback flow basic submit + browser draft | `run-feedback` (FB-*) |
 | Feedback UI history list and resolve states | `run-feedback-persistence` (FBU-01..11), `run-feedback` |
 | Change Log modal (sidebar entry, prefetch, EN fallback under zh-CN) | `run-change-log` (CL-01..11) |
-| Coding agent env vars and storage | `test/unittest/coding-agent-env-vars.test.mjs`, `coding-agent-storage.test.mjs` |
+| Coding agent env vars and storage | `test/unittest/coding-agent-env-vars.test.mjs`, `coding-agent-storage.test.mjs` (executed by `run-unittest-suite`) |
 | General regression baseline | (`shouldRun('regression')`, no shell runner; RG-*) |
 | Generic stress harness | (`shouldRun('stress')`, no shell runner; ST-*) |
 

@@ -32,7 +32,7 @@ import {
   setFileIndexWatcherAdapter,
   subscribe,
   __getInternalStateForTest
-} from '../src/components/ProjectEditor/GlobalSearch/fileIndexCache.ts'
+} from '../../src/components/ProjectEditor/GlobalSearch/fileIndexCache.ts'
 
 type WalkerCall = { cwd: string; at: number }
 

@@ -31,7 +31,8 @@
     "dist:dev": "node scripts/dist-dev.js",
     "dist:release": "node scripts/dist-release.js",
     "generate-notices": "license-checker-rseidelsohn --production --plainVertical --out ThirdPartyNotices.txt && node scripts/normalize-notices.js",
-    "verify:seti-file-tree": "node test/autotest/seti-file-tree-icon-verify.mjs"
+    "verify:seti-file-tree": "node test/autotest/seti-file-tree-icon-verify.mjs",
+    "test:unit": "node test/autotest/run-unittest-suite.mjs"
   },
   "build": {
     "appId": "com.onward2.app",
