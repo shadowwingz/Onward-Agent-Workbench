@@ -371,6 +371,7 @@ so every call through `window.electronAPI.<domain>.<method>()` gets a
 | `RENDERER_MARKDOWN_RENDER` | `renderer:markdown.render` | `X` | `ProjectEditor.tsx::scheduleMarkdownApply` — end-to-end span from `postMessage` send to sanitized HTML commit |
 | `RENDERER_MARKDOWN_SANITIZE` | `renderer:markdown.dompurify-sanitize` | `X` | Same, DOMPurify call |
 | `RENDERER_MARKDOWN_MERMAID` | `renderer:markdown.mermaid-render` | `i`/`X` | `src/utils/mermaidRenderer.ts` |
+| `RENDERER_MARKDOWN_PREVIEW_REVEAL` | `renderer:markdown.preview-reveal` | `i` | `ProjectEditor.tsx::queuePreviewReveal::finalize` — duration of the preview-restore phase machine (from `queuePreviewReveal` entry to `phase:idle`). Payload: `cause` (`fast-path`/`safety-net`), `hadWork` (bool), `durationMs`. The user-perceived "loading dots" window when entering Markdown preview from cache. |
 | `WORKER_MARKDOWN_RENDER_COMPLETE` | `worker.markdown:render-complete` | `X` | Worker-measured duration reported to renderer via `worker.onmessage` — parse + katex + highlight |
 | `RENDERER_MONACO_VIEWSTATE_RESTORE` | `renderer:monaco.viewstate-restore` | `X` | `ProjectEditor.tsx::editor.restoreViewState` |
 | `RENDERER_XTERM_WEBGL_INIT` | `renderer:xterm.webgl-context-init` | `X` | `src/components/Terminal/Terminal.tsx` WebGL addon attach |

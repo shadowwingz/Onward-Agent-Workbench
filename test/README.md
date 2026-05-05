@@ -156,6 +156,7 @@ point at files under `test/unittest/`.
 | Outline target falls back between editor / preview when one is hidden | `run-project-editor-markdown-navigation` (PMN-27..33) |
 | Code-wrap preference (inline + block, persists across reopen) | `run-project-editor-markdown-navigation` (PMN-34..44) |
 | Markdown session restore (last file + section + mode) | `run-project-editor-markdown-session-restore` (PMSR-*) |
+| Markdown preview reveal latency (cache-hit fast path vs cache-miss safety net, 3 fixture sizes) | `run-markdown-preview-latency` (MPL-*) + unit `preview-restore-settle` (PRS-U-*) |
 | Markdown LaTeX (KaTeX) rendering in preview | `run-markdown-latex-preview` (MLP-*) |
 | Mermaid pan / zoom / fullscreen in preview | `run-mermaid-panzoom` (MPZ-01..02) |
 | Preview position restore across file switch (incl. Mermaid layout) | `run-preview-position-restore` (PPR-01..12) |

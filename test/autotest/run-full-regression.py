@@ -80,6 +80,7 @@ SCRIPTS: List[str] = [
     "test/autotest/run-global-search-autotest.sh",
     "test/autotest/run-image-diff-autotest.sh",
     "test/autotest/run-markdown-latex-preview-autotest.sh",
+    "test/autotest/run-markdown-preview-latency-autotest.sh",
     "test/autotest/run-mermaid-panzoom-autotest.sh",
     "test/autotest/run-pdf-epub-diff-autotest.sh",
     "test/autotest/run-pdf-epub-full-autotest.sh",

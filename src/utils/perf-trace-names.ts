@@ -222,6 +222,12 @@ export const PERF_TRACE_EVENT = {
   RENDERER_MARKDOWN_RENDER: 'renderer:markdown.render',
   RENDERER_MARKDOWN_SANITIZE: 'renderer:markdown.dompurify-sanitize',
   RENDERER_MARKDOWN_MERMAID: 'renderer:markdown.mermaid-render',
+  // Span: from queuePreviewReveal entry to phase:idle transition. Tracks
+  // the user-visible "loading dots" window that hides cached HTML during
+  // preview restore. Payload: cacheHit (bool), hadWork (bool — whether
+  // any markdown/worker/mermaid signal said work was still pending at
+  // settle decision time), durationMs.
+  RENDERER_MARKDOWN_PREVIEW_REVEAL: 'renderer:markdown.preview-reveal',
   RENDERER_MONACO_VIEWSTATE_RESTORE: 'renderer:monaco.viewstate-restore',
   RENDERER_XTERM_WEBGL_INIT: 'renderer:xterm.webgl-context-init',
 

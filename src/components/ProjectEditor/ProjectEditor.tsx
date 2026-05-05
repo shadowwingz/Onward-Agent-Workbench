@@ -16,6 +16,7 @@ import { useSubpageEscape } from '../../hooks/useSubpageEscape'
 import { useI18n } from '../../i18n/useI18n'
 import { perfTrace } from '../../utils/perf-trace'
 import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
+import { isPreviewWorkPending } from './utils/previewRestoreSettle'
 import { runAllTests } from '../../autotest/autotest-runner'
 import type { AutotestContext, CpuSummary, ProjectEditorDebugApi, TestResult } from '../../autotest/types'
 import 'katex/dist/katex.min.css'
@@ -556,6 +557,22 @@ function debugLog(...args: unknown[]) {
   }
 }
 
+// Investigative timing log, gated behind the same DEBUG flag used by
+// debugLog. ONWARD_DEBUG=1 (set by autotest runners) enables it; production
+// builds stay quiet. Encodes the payload in the message string so the
+// renderer-console-to-stdout bridge in dev/autotest preserves field values.
+let mdpTraceT0 = 0
+function mdpTrace(label: string, payload?: Record<string, unknown>): void {
+  if (!DEBUG_PROJECT_EDITOR) return
+  const now = performance.now()
+  const dt = mdpTraceT0 > 0 ? +(now - mdpTraceT0).toFixed(1) : 0
+  const data = { dt, ...(payload ?? {}) }
+  console.log(`[mdp-trace] ${label} ${JSON.stringify(data)}`)
+}
+function mdpTraceReset(): void {
+  mdpTraceT0 = performance.now()
+}
+
 function hasFileViewMemoryData(entry: FileViewMemory | null | undefined): entry is FileViewMemory {
   return Boolean(entry && Object.keys(entry).length > 0)
 }
@@ -1091,6 +1108,26 @@ export function ProjectEditor({
   ) => void>(() => {})
   const restorePreviewFromMemoryRef = useRef<() => boolean>(() => false)
   const syncEditorToPreviewScrollRef = useRef<() => boolean>(() => false)
+  const getMermaidPreviewStateRef = useRef<() => MermaidPreviewState>(() => ({
+    total: 0,
+    rendered: 0,
+    error: 0,
+    pending: 0,
+    inFlight: false
+  }))
+  // Most recent reveal-finalize span: cache for the autotest debug API so
+  // tests measure the actual phase-machine duration without polling jitter.
+  const lastPreviewRevealRef = useRef<{
+    durationMs: number
+    cause: 'fast-path' | 'safety-net'
+    hadWork: boolean
+    finalizedAt: number
+  } | null>(null)
+  // True between applyMarkdownSessionCacheHit start and the next reveal
+  // finalize. When set, queuePreviewReveal takes the fast path that skips
+  // the legacy 1300 ms safety timer; the cached HTML is already
+  // authoritative so there is nothing to wait for.
+  const cacheHitFreshRef = useRef(false)
   const editorPreviewSyncFrameRef = useRef<number | null>(null)
   const suppressPreviewSyncOnRestoreRef = useRef(false)
   const markdownSessionCacheRenderRef = useRef<{ key: string; filePath: string; content: string } | null>(null)
@@ -1298,22 +1335,71 @@ export function ProjectEditor({
     suppressPreviewSyncOnRestoreRef.current = true
     previewRestorePhaseRef.current = 'waiting-html'
     setPreviewRestorePhase('waiting-html')
+    mdpTrace('phase:waiting-html', { from: 'beginPreviewRestore' })
   }, [cancelPreviewRevealFrames, cancelPreviewSyncFrame])
 
   const queuePreviewReveal = useCallback(() => {
     cancelPreviewRevealFrames()
     cancelPreviewSyncFrame()
     suppressPreviewSyncOnRestoreRef.current = true
+    const revealStart = performance.now()
+    mdpTrace('reveal:queued', { settleMs: PREVIEW_RESTORE_REVEAL_SETTLE_MS })
+
+    const finalize = (cause: 'fast-path' | 'safety-net', hadWork: boolean) => {
+      if (previewRevealSettleFrameRef.current !== null) {
+        window.clearTimeout(previewRevealSettleFrameRef.current)
+        previewRevealSettleFrameRef.current = null
+      }
+      if (previewRestorePhaseRef.current === 'idle') return
+      suppressPreviewSyncOnRestoreRef.current = false
+      previewRestorePhaseRef.current = 'idle'
+      setPreviewRestorePhase('idle')
+      cacheHitFreshRef.current = false
+      const finalizedAt = performance.now()
+      const durationMs = +(finalizedAt - revealStart).toFixed(1)
+      lastPreviewRevealRef.current = { durationMs, cause, hadWork, finalizedAt }
+      perfTrace(PERF_TRACE_EVENT.RENDERER_MARKDOWN_PREVIEW_REVEAL, {
+        cause,
+        hadWork,
+        durationMs
+      })
+      mdpTrace('phase:idle', { from: `queuePreviewReveal:${cause}`, durationMs })
+    }
+
     const settleReveal = () => {
+      // Cache-hit fast path: when applyMarkdownSessionCacheHit just ran,
+      // the cached HTML already matches the file content and no worker /
+      // mermaid / sanitize work is queued. Skip the legacy 1300 ms safety
+      // timer in that case — it was sized for the worst-case worker
+      // debounce, not for cache hits.
+      const cacheHitFresh = cacheHitFreshRef.current
+      const mermaidState = getMermaidPreviewStateRef.current()
+      const workPending = isPreviewWorkPending({
+        markdownRenderPending: markdownRenderPendingRef.current,
+        workerInFlight: markdownWorkerInFlightRef.current,
+        workerQueued: markdownWorkerQueuedRef.current,
+        mermaidPending: mermaidState.pending,
+        mermaidInFlight: mermaidRenderInFlightRef.current
+      })
+      if (cacheHitFresh && !workPending) {
+        previewRevealSettleFrameRef.current = window.setTimeout(() => {
+          previewRevealSettleFrameRef.current = null
+          finalize('fast-path', false)
+        }, 0)
+        return
+      }
+      // Cache-miss / worker-in-flight: keep the legacy safety net.
+      // Removing it requires fixing the latent races in useOutlineSymbols
+      // (Monaco model swap) and the outline DOM restore — the 1300 ms
+      // timer was load-bearing for those, not for the reveal itself.
       previewRevealSettleFrameRef.current = window.setTimeout(() => {
         previewRevealSettleFrameRef.current = null
-        suppressPreviewSyncOnRestoreRef.current = false
-        previewRestorePhaseRef.current = 'idle'
-        setPreviewRestorePhase('idle')
+        finalize('safety-net', workPending)
       }, PREVIEW_RESTORE_REVEAL_SETTLE_MS)
     }
     previewRevealFrameRef.current = window.setTimeout(() => {
       previewRevealFrameRef.current = null
+      mdpTrace('reveal:innerCallback', { editorVisible: isMarkdownEditorVisibleRef.current })
       restorePreviewFromMemoryRef.current()
       const pendingCacheRestore = pendingMarkdownSessionCacheRestoreRef.current
       if (pendingCacheRestore?.filePath === activeFilePathRef.current) {
@@ -1478,6 +1564,12 @@ export function ProjectEditor({
 	        if (cacheRead) {
 	          markdownSessionLastRestoreRef.current = cacheRead.result
 	        }
+	        mdpTrace('cache:read[setOpen]', {
+	          mode: cacheRead?.result.mode ?? 'no-root',
+	          filePath: activePath,
+	          renderedHtmlLength: cacheRead?.result.renderedHtmlLength ?? 0,
+	          ts: +performance.now().toFixed(1)
+	        })
 	        if (cacheRead?.entry) {
 	          applyMarkdownSessionCacheHitRef.current(activePath, fileContentRef.current, cacheRead.entry)
 	        } else {
@@ -1595,6 +1687,10 @@ export function ProjectEditor({
       inFlight: mermaidRenderInFlightRef.current
     }
   }, [])
+
+  useEffect(() => {
+    getMermaidPreviewStateRef.current = getMermaidPreviewState
+  }, [getMermaidPreviewState])
 
   const scanPreviewNearestSlug = useCallback((): string | null => {
     const preview = previewRef.current
@@ -2101,6 +2197,13 @@ export function ProjectEditor({
     content: string,
     entry: MarkdownSessionCacheEntry
   ) => {
+    mdpTraceReset()
+    mdpTrace('cacheHit:start', {
+      filePath,
+      htmlLength: entry.renderedHtml.length,
+      imageCount: entry.imagePaths.length
+    })
+    cacheHitFreshRef.current = true
     if (markdownRenderTimerRef.current) {
       window.clearTimeout(markdownRenderTimerRef.current)
       markdownRenderTimerRef.current = null
@@ -2127,6 +2230,7 @@ export function ProjectEditor({
     markdownRenderedHtmlRef.current = entry.renderedHtml
     setMarkdownRenderedHtml(entry.renderedHtml)
     setMarkdownRenderPending(false)
+    mdpTrace('cacheHit:setHtml')
     const pKey = getFileScrollKey(lastEditorScopeRef.current, filePath)
     const currentFileMemory = fileMemoryRef.current.get(filePath)
     const currentPreviewMemory = pKey ? previewScrollMemoryRef.current.get(pKey) : undefined
@@ -2348,6 +2452,7 @@ export function ProjectEditor({
     updatePreviewActiveSlug(null)
     markdownApplyRequestIdRef.current += 1
     markdownPendingPayloadRef.current = null
+    cacheHitFreshRef.current = false
     setIsIndexing(false)
     editorScrollDisposableRef.current?.dispose()
     editorScrollDisposableRef.current = null
@@ -3735,6 +3840,12 @@ export function ProjectEditor({
       const cacheRead = readMarkdownSessionCache(root, path, result.content ?? '')
       markdownCacheEntry = cacheRead.entry
       markdownSessionLastRestoreRef.current = cacheRead.result
+      mdpTrace('cache:read[openFile]', {
+        mode: cacheRead.result.mode,
+        filePath: path,
+        renderedHtmlLength: cacheRead.result.renderedHtmlLength ?? 0,
+        ts: +performance.now().toFixed(1)
+      })
     } else {
       markdownSessionLastRestoreRef.current = {
         mode: 'disabled',
@@ -5108,9 +5219,11 @@ export function ProjectEditor({
       suppressPreviewSyncOnRestoreRef.current ||
       (phase !== 'idle' && phase !== 'revealing')
     if (isRestoreCycle) {
+      mdpTrace('layoutEffect:restoreCycle', { fromPhase: phase })
       if (previewRestorePhaseRef.current !== 'restoring-layout') {
         previewRestorePhaseRef.current = 'restoring-layout'
         setPreviewRestorePhase('restoring-layout')
+        mdpTrace('phase:restoring-layout', { from: 'layoutEffect' })
       }
       const restored = restorePreviewFromMemory()
       if (!restored) {
@@ -5124,6 +5237,14 @@ export function ProjectEditor({
         mermaidState.pending > 0 ||
         mermaidState.inFlight
       suppressPreviewSyncOnRestoreRef.current = hasMoreRenderWork
+      mdpTrace('layoutEffect:hasMoreWork', {
+        hasMoreRenderWork,
+        markdownRenderPending,
+        workerInFlight: markdownWorkerInFlightRef.current,
+        workerQueued: markdownWorkerQueuedRef.current,
+        mermaidPending: mermaidState.pending,
+        mermaidInFlight: mermaidState.inFlight
+      })
       if (!hasMoreRenderWork) {
         queuePreviewReveal()
       }
@@ -5161,6 +5282,11 @@ export function ProjectEditor({
     // carries `.mermaid-rendered` (so pending===0) but the runtime panzoom
     // instances were destroyed with the old DOM and need to be rebuilt.
     if (initialMermaidState.total === 0) return
+    mdpTrace('mermaid:start', {
+      total: initialMermaidState.total,
+      pending: initialMermaidState.pending,
+      inFlight: initialMermaidState.inFlight
+    })
     const signal = { cancelled: false }
     const token = mermaidRenderTokenRef.current + 1
     mermaidRenderTokenRef.current = token
@@ -5173,6 +5299,7 @@ export function ProjectEditor({
       if (token !== mermaidRenderTokenRef.current) return
       mermaidRenderInFlightRef.current = false
       if (signal.cancelled) return
+      mdpTrace('mermaid:complete', { wasRestoring })
 
       enhanceMermaidDiagrams(preview, signal, {
         zoomIn: t('mermaid.zoomIn'),
@@ -5318,48 +5445,76 @@ export function ProjectEditor({
     const signature = `${activeFilePath}:${Math.round(savedScrollTop)}:${outlineSymbols.length}:${outlineShowInSplit}`
     if (lastOutlineDomRestoreSignatureRef.current === signature) return
 
-    let frameId = 0
-    let attempts = 0
     const targetScrollTop = Math.max(0, savedScrollTop)
-    const maxAttempts = 60
+    let resizeObserver: ResizeObserver | null = null
+    let mutationObserver: MutationObserver | null = null
+    let mountFrameId = 0
 
-    const applyOutlineScroll = () => {
-      const tree = modalRef.current?.querySelector('.outline-panel-tree') as HTMLElement | null
-      attempts += 1
-      if (!tree) {
-        if (attempts < maxAttempts) {
-          frameId = window.requestAnimationFrame(applyOutlineScroll)
-        }
-        return
-      }
-
+    const tryApply = (tree: HTMLElement): boolean => {
       const maxScrollTop = Math.max(0, tree.scrollHeight - tree.clientHeight)
       if (targetScrollTop > 0 && maxScrollTop <= 0) {
-        if (attempts < maxAttempts) {
-          frameId = window.requestAnimationFrame(applyOutlineScroll)
-        }
-        return
+        // Tree exists but its children have not laid out yet; signal
+        // "not applied" so the caller keeps observing.
+        return false
       }
-
       const clampedTarget = Math.min(targetScrollTop, maxScrollTop)
       tree.scrollTop = clampedTarget
       handleOutlineScrollCapture(tree.scrollTop)
-
       const isApplied = Math.abs(tree.scrollTop - clampedTarget) <= 2
       if (isApplied) {
         lastOutlineDomRestoreSignatureRef.current = signature
       }
-      if (attempts < maxAttempts && (attempts < 4 || !isApplied)) {
-        frameId = window.requestAnimationFrame(applyOutlineScroll)
+      return isApplied
+    }
+
+    const observeTree = (tree: HTMLElement) => {
+      // Synchronous attempt first — covers the warm path where the
+      // outline is already laid out (file switch with cached symbols).
+      if (tryApply(tree)) return
+      // Tree exists but `scrollHeight` is still 0 (children rendering).
+      // ResizeObserver fires the moment the inner content commits a
+      // non-zero size, then we apply once and disconnect.
+      resizeObserver = new ResizeObserver(() => {
+        if (tryApply(tree)) {
+          resizeObserver?.disconnect()
+          resizeObserver = null
+        }
+      })
+      resizeObserver.observe(tree)
+    }
+
+    const tree = modalRef.current?.querySelector('.outline-panel-tree') as HTMLElement | null
+    if (tree) {
+      observeTree(tree)
+    } else {
+      // OutlinePanel has not mounted yet (rare race when the effect runs
+      // between the parent commit and the panel render). Watch the modal
+      // root for the tree to appear, then hand off to ResizeObserver.
+      const modalRoot = modalRef.current
+      if (modalRoot) {
+        mutationObserver = new MutationObserver(() => {
+          const found = modalRoot.querySelector('.outline-panel-tree') as HTMLElement | null
+          if (found) {
+            mutationObserver?.disconnect()
+            mutationObserver = null
+            observeTree(found)
+          }
+        })
+        mutationObserver.observe(modalRoot, { childList: true, subtree: true })
+      } else {
+        // Fall back to a single rAF to give React one frame to mount.
+        mountFrameId = window.requestAnimationFrame(() => {
+          mountFrameId = 0
+          const found = modalRef.current?.querySelector('.outline-panel-tree') as HTMLElement | null
+          if (found) observeTree(found)
+        })
       }
     }
 
-    frameId = window.requestAnimationFrame(applyOutlineScroll)
-
     return () => {
-      if (frameId) {
-        window.cancelAnimationFrame(frameId)
-      }
+      resizeObserver?.disconnect()
+      mutationObserver?.disconnect()
+      if (mountFrameId) window.cancelAnimationFrame(mountFrameId)
     }
   }, [activeFilePath, handleOutlineScrollCapture, isOpen, modalRef, outlineShowInSplit, outlineSymbols.length])
 
@@ -6029,6 +6184,7 @@ export function ProjectEditor({
 	      isPreviewTransitioning: () => previewRestorePhaseRef.current !== 'idle',
       isPreviewContentVisible: () => isPreviewContentVisibleNow(),
       getPreviewRestorePhase: () => previewRestorePhaseRef.current,
+      getLastPreviewReveal: () => lastPreviewRevealRef.current,
       getOutlineTarget: () => outlineTargetRef.current,
       setOutlineTarget: (target: 'editor' | 'preview') => {
         setOutlineTargetPreference(target)

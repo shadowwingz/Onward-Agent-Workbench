@@ -393,6 +393,12 @@ export interface ProjectEditorDebugApi {
   isPreviewTransitioning?: () => boolean
   isPreviewContentVisible?: () => boolean
   getPreviewRestorePhase?: () => 'idle' | 'waiting-html' | 'restoring-layout' | 'revealing'
+  getLastPreviewReveal?: () => {
+    durationMs: number
+    cause: 'fast-path' | 'safety-net'
+    hadWork: boolean
+    finalizedAt: number
+  } | null
   debugScanPreviewHeadings?: () => { nearest: string | null }
   runPreviewPositionTest?: (mdFilePath: string, otherFilePath: string) => Promise<boolean>
   getCursorPosition: () => { lineNumber: number; column: number } | null
