@@ -240,6 +240,30 @@ export interface ProjectEditorDebugApi {
   getEditorContent: () => string
   setEditorContent?: (content: string) => boolean
   getEditorLineCount: () => number
+  getDialogState?: () => { type: 'confirm' | 'prompt'; title: string; message: string } | null
+  confirmDialog?: () => void
+  cancelDialog?: () => void
+  getOpenChoiceDialogState?: () => {
+    visible: boolean
+    extension: string
+    remember: boolean
+  }
+  chooseOpenChoice?: (mode: 'text' | 'binary' | 'cancel', remember?: boolean) => void
+  getLargeFileState?: () => {
+    mode: 'large-text' | 'binary'
+    path: string
+    sizeBytes: number
+    offset: number
+    bytesRead: number
+    textLength: number
+    binaryLength: number
+    binaryRadix: 2 | 8 | 10 | 16
+    loading: boolean
+    error: string | null
+    readOnly: true
+  } | null
+  setLargeFileOffset?: (offset: number) => Promise<boolean>
+  setBinaryRadix?: (radix: 2 | 8 | 10 | 16) => boolean
   openFileByPath: (filePath: string) => Promise<void>
   openFileByPathAsUser: (filePath: string, options?: { trackRecent?: boolean }) => Promise<void>
   triggerEditorSaveCommand: () => boolean

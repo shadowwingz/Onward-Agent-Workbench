@@ -9,7 +9,9 @@ const path = require('path')
 
 const target = path.join(__dirname, '..', 'ThirdPartyNotices.txt')
 const before = fs.readFileSync(target, 'utf8')
-const after = before.replace(/\r\n?/g, '\n')
+const after = before
+  .replace(/\r\n?/g, '\n')
+  .replace(/[ \t]+$/gm, '')
 
 if (before === after) {
   process.exit(0)

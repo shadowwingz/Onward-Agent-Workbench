@@ -22,6 +22,7 @@ import type { GitFileStatus, GitHistoryDiffOptions, GitHistoryFileContentOptions
 import { gitIpcWorkerClient } from './git-ipc-worker-client'
 import {
   readProjectFile,
+  readProjectFileChunk,
   resolveInRoot,
   saveProjectFile,
   createProjectFile,
@@ -1610,8 +1611,33 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     return await projectFsWorkerClient.searchFilenames(root, query, limit ?? 80)
   })
 
-  ipcMain.handle(IPC.PROJECT_READ_FILE, async (_, root: string, path: string) => {
-    return await readProjectFile(root, path)
+  ipcMain.handle(IPC.PROJECT_READ_FILE, async (_, root: string, path: string, options: Parameters<typeof readProjectFile>[2]) => {
+    const startedAt = performance.now()
+    const result = await readProjectFile(root, path, options)
+    perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_IPC_PROJECT_READ_FILE, {
+      pathLen: path.length,
+      ok: Boolean(result?.success),
+      openMode: options?.openMode ?? result?.openMode ?? 'auto',
+      sizeBytes: result?.sizeBytes ?? 0,
+      durationMs: +(performance.now() - startedAt).toFixed(1)
+    })
+    return result
+  })
+
+  ipcMain.handle(IPC.PROJECT_READ_FILE_CHUNK, async (_, root: string, path: string, offset: number, length: number, mode: Parameters<typeof readProjectFileChunk>[4]) => {
+    const startedAt = performance.now()
+    const result = await readProjectFileChunk(root, path, offset, length, mode)
+    perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_IPC_PROJECT_READ_FILE_CHUNK, {
+      pathLen: path.length,
+      ok: Boolean(result?.success),
+      offset,
+      length,
+      mode,
+      bytesRead: result?.bytesRead ?? 0,
+      sizeBytes: result?.sizeBytes ?? 0,
+      durationMs: +(performance.now() - startedAt).toFixed(1)
+    })
+    return result
   })
 
   ipcMain.handle(IPC.PROJECT_SAVE_FILE, async (_, root: string, path: string, content: string) => {
@@ -2017,6 +2043,7 @@ export function cleanupIpcHandlers(): void {
   ipcMain.removeHandler(IPC.PROJECT_SEARCH_FILENAMES)
   ipcMain.removeHandler(IPC.PROJECT_INVALIDATE_FILE_INDEX)
   ipcMain.removeHandler(IPC.PROJECT_READ_FILE)
+  ipcMain.removeHandler(IPC.PROJECT_READ_FILE_CHUNK)
   ipcMain.removeHandler(IPC.PROJECT_SAVE_FILE)
   ipcMain.removeHandler(IPC.PROJECT_CREATE_FILE)
   ipcMain.removeHandler(IPC.PROJECT_CREATE_FOLDER)

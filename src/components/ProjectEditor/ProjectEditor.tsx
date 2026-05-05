@@ -7,7 +7,8 @@ import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, use
 import { createPortal } from 'react-dom'
 import { Editor } from '@monaco-editor/react'
 import DOMPurify from 'dompurify'
-import type { ProjectEntry } from '../../types/electron'
+import { hexy } from 'hexy'
+import type { ProjectEntry, ProjectFileOpenMode } from '../../types/electron'
 import type { FileViewMemory, ProjectEditorState } from '../../types/tab.d.ts'
 import { useSettings } from '../../contexts/SettingsContext'
 import { useAppState } from '../../hooks/useAppState'
@@ -127,6 +128,35 @@ type ConfirmOptions = {
   cancelText?: string
 }
 
+type FileOpenChoiceMode = 'text' | 'binary'
+
+type FileOpenChoiceDialogState = {
+  path: string
+  extension: string
+  extensionLabel: string
+  sizeLabel: string
+  remember: boolean
+}
+
+type FileOpenChoiceResult = {
+  mode: FileOpenChoiceMode
+  remember: boolean
+} | null
+
+type BinaryRadix = 2 | 8 | 10 | 16
+
+type LargeFileState = {
+  mode: 'large-text' | 'binary'
+  path: string
+  sizeBytes: number
+  offset: number
+  bytesRead: number
+  text: string
+  binaryBytes: Uint8Array
+  loading: boolean
+  error: string | null
+}
+
 type PromptOptions = {
   title: string
   message: string
@@ -178,6 +208,7 @@ const STORAGE_KEY_MARKDOWN_SESSION_CACHE_LIMIT = 'project-editor-markdown-sessio
 const STORAGE_KEY_OUTLINE_VISIBLE = 'project-editor-outline-visible'
 const STORAGE_KEY_OUTLINE_WIDTH = 'project-editor-outline-width'
 const STORAGE_KEY_OUTLINE_TARGET = 'project-editor-outline-target'
+const STORAGE_KEY_BINARY_OPEN_DEFAULTS = 'project-editor-binary-open-defaults'
 
 const DEFAULT_FILE_TREE_WIDTH = 260
 const MIN_FILE_TREE_WIDTH = 180
@@ -214,6 +245,9 @@ const MARKDOWN_SESSION_CACHE_MIN_LIMIT = 1
 const MARKDOWN_SESSION_CACHE_MAX_LIMIT = 20
 const MARKDOWN_SESSION_CACHE_RECENCY_HALF_LIFE_MS = 30 * 60 * 1000
 const QUICK_FILE_DRAG_MIME = 'application/x-onward-quick-file'
+const LARGE_FILE_CHUNK_BYTES = 512 * 1024
+const BINARY_VIEWER_BYTES_PER_LINE = 16
+const BINARY_DEFAULT_RADIX: BinaryRadix = 16
 
 const MARKDOWN_EXTENSIONS = new Set(['md', 'markdown', 'mdx'])
 
@@ -222,6 +256,54 @@ const DEBUG_PROJECT_EDITOR = Boolean(window.electronAPI?.debug?.enabled)
 
 function normalizePath(value: string): string {
   return value.replace(/\\/g, '/')
+}
+
+function formatFileSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let value = bytes
+  let unitIndex = 0
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024
+    unitIndex += 1
+  }
+  const digits = value >= 100 || unitIndex === 0 ? 0 : value >= 10 ? 1 : 2
+  return `${value.toFixed(digits)} ${units[unitIndex]}`
+}
+
+function getExtensionKey(path: string, extension?: string): string {
+  const ext = (extension || path.split('/').pop()?.match(/(\.[^.]+)$/)?.[1] || '').toLowerCase()
+  return ext || '__no_extension__'
+}
+
+function readBinaryOpenDefaults(): Record<string, FileOpenChoiceMode> {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_BINARY_OPEN_DEFAULTS)
+    if (!raw) return {}
+    const parsed = JSON.parse(raw) as Record<string, unknown>
+    const out: Record<string, FileOpenChoiceMode> = {}
+    for (const [key, value] of Object.entries(parsed)) {
+      if (value === 'text' || value === 'binary') out[key] = value
+    }
+    return out
+  } catch {
+    return {}
+  }
+}
+
+function writeBinaryOpenDefault(extensionKey: string, mode: FileOpenChoiceMode): void {
+  const defaults = readBinaryOpenDefaults()
+  defaults[extensionKey] = mode
+  localStorage.setItem(STORAGE_KEY_BINARY_OPEN_DEFAULTS, JSON.stringify(defaults))
+}
+
+function base64ToBytes(value: string): Uint8Array {
+  const binary = window.atob(value)
+  const bytes = new Uint8Array(binary.length)
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i)
+  }
+  return bytes
 }
 
 function trimTrailingPathSeparators(value: string): string {
@@ -955,6 +1037,8 @@ export function ProjectEditor({
   const [isMarkdownRenderEnabled, setIsMarkdownRenderEnabled] = useState(false)
   const [isDirty, setIsDirty] = useState(false)
   const [isLoadingFile, setIsLoadingFile] = useState(false)
+  const [largeFileState, setLargeFileState] = useState<LargeFileState | null>(null)
+  const [binaryRadix, setBinaryRadix] = useState<BinaryRadix>(BINARY_DEFAULT_RADIX)
   const [statusMessage, setStatusMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
   const [searchOpen, setSearchOpen] = useState(false)
   const searchOpenRef = useRef(false)
@@ -1013,7 +1097,9 @@ export function ProjectEditor({
 
   const [dialog, setDialog] = useState<DialogState | null>(null)
   const [dialogInput, setDialogInput] = useState('')
+  const [fileOpenChoiceDialog, setFileOpenChoiceDialog] = useState<FileOpenChoiceDialogState | null>(null)
   const dialogResolveRef = useRef<((value: boolean | string | null) => void) | null>(null)
+  const fileOpenChoiceResolveRef = useRef<((value: FileOpenChoiceResult) => void) | null>(null)
   const dialogInputRef = useRef<HTMLInputElement>(null)
   const searchInputRef = useRef<HTMLInputElement>(null)
   const globalSearchInputRef = useRef<HTMLInputElement>(null)
@@ -1038,6 +1124,8 @@ export function ProjectEditor({
   const mermaidRenderTokenRef = useRef(0)
   const mermaidRenderInFlightRef = useRef(false)
   const openFileTokenRef = useRef(0)
+  const largeFileChunkTokenRef = useRef(0)
+  const largeFileStateRef = useRef<LargeFileState | null>(null)
   const activeFilePathRef = useRef<string | null>(null)
   const isBinaryRef = useRef(false)
   const isImageRef = useRef(false)
@@ -2404,6 +2492,8 @@ export function ProjectEditor({
     setIsSqlite(false)
     setIsPdf(false)
     setIsEpub(false)
+    setLargeFileState(null)
+    largeFileStateRef.current = null
     setPdfOutlineSymbols([])
     setPdfActivePage(1)
     setEpubOutlineSymbols([])
@@ -2469,6 +2559,8 @@ export function ProjectEditor({
     setIsSqlite(false)
     setIsPdf(false)
     setIsEpub(false)
+    setLargeFileState(null)
+    largeFileStateRef.current = null
     setPdfOutlineSymbols([])
     setPdfActivePage(1)
     setEpubOutlineSymbols([])
@@ -3060,6 +3152,111 @@ export function ProjectEditor({
     }, 2000)
   }, [])
 
+  const applyLargeFileState = useCallback((
+    next: LargeFileState | null | ((prev: LargeFileState | null) => LargeFileState | null)
+  ) => {
+    setLargeFileState((prev) => {
+      const value = typeof next === 'function'
+        ? (next as (prev: LargeFileState | null) => LargeFileState | null)(prev)
+        : next
+      largeFileStateRef.current = value
+      return value
+    })
+  }, [])
+
+  const requestFileOpenChoice = useCallback((params: {
+    path: string
+    extensionKey: string
+    sizeBytes: number
+  }) => {
+    return new Promise<FileOpenChoiceResult>((resolve) => {
+      fileOpenChoiceResolveRef.current = resolve
+      setFileOpenChoiceDialog({
+        path: params.path,
+        extension: params.extensionKey,
+        extensionLabel: params.extensionKey === '__no_extension__'
+          ? t('projectEditor.binaryChoice.noExtension')
+          : params.extensionKey,
+        sizeLabel: formatFileSize(params.sizeBytes),
+        remember: false
+      })
+    })
+  }, [t])
+
+  const handleFileOpenChoiceCancel = useCallback(() => {
+    fileOpenChoiceResolveRef.current?.(null)
+    fileOpenChoiceResolveRef.current = null
+    setFileOpenChoiceDialog(null)
+  }, [])
+
+  const resolveFileOpenChoice = useCallback((mode: FileOpenChoiceMode, rememberOverride?: boolean) => {
+    const remember = rememberOverride ?? Boolean(fileOpenChoiceDialog?.remember)
+    fileOpenChoiceResolveRef.current?.({ mode, remember })
+    fileOpenChoiceResolveRef.current = null
+    setFileOpenChoiceDialog(null)
+  }, [fileOpenChoiceDialog])
+
+  const handleFileOpenChoiceSelect = useCallback((mode: FileOpenChoiceMode) => {
+    resolveFileOpenChoice(mode)
+  }, [resolveFileOpenChoice])
+
+  const loadLargeFileChunk = useCallback(async (params: {
+    path: string
+    mode: 'large-text' | 'binary'
+    sizeBytes: number
+    offset: number
+  }) => {
+    const root = rootRef.current
+    if (!root) return false
+    const token = largeFileChunkTokenRef.current + 1
+    largeFileChunkTokenRef.current = token
+    const safeOffset = Math.max(0, Math.min(Math.floor(params.offset), params.sizeBytes))
+    applyLargeFileState((prev) => {
+      if (!prev || prev.path !== params.path || prev.mode !== params.mode) {
+        return {
+          mode: params.mode,
+          path: params.path,
+          sizeBytes: params.sizeBytes,
+          offset: safeOffset,
+          bytesRead: 0,
+          text: '',
+          binaryBytes: new Uint8Array(),
+          loading: true,
+          error: null
+        }
+      }
+      return { ...prev, offset: safeOffset, loading: true, error: null }
+    })
+
+    const chunkMode = params.mode === 'binary' ? 'binary' : 'text'
+    const result = await window.electronAPI.project.readFileChunk(root, params.path, safeOffset, LARGE_FILE_CHUNK_BYTES, chunkMode)
+    if (token !== largeFileChunkTokenRef.current) return false
+
+    if (!result.success) {
+      const error = result.error || t('projectEditor.largeFile.chunkError')
+      applyLargeFileState((prev) => prev && prev.path === params.path
+        ? { ...prev, loading: false, error }
+        : prev)
+      showStatus('error', error)
+      return false
+    }
+
+    const text = chunkMode === 'text' ? (result.text ?? '') : ''
+    const binaryBytes = chunkMode === 'binary' ? base64ToBytes(result.base64 ?? '') : new Uint8Array()
+    applyLargeFileState({
+      mode: params.mode,
+      path: params.path,
+      sizeBytes: result.sizeBytes,
+      offset: result.offset,
+      bytesRead: result.bytesRead,
+      text,
+      binaryBytes,
+      loading: false,
+      error: null
+    })
+    return true
+  }, [applyLargeFileState, showStatus, t])
+
   // --- Path copy (shared hook) ---
   const { copyMessage: pathCopyMessage, copyToClipboard, showCopyError, flashCopyFeedback } = usePathCopy(t, 'projectEditor.copyFailed')
   const {
@@ -3623,11 +3820,70 @@ export function ProjectEditor({
     const openToken = openFileTokenRef.current + 1
     openFileTokenRef.current = openToken
     setIsLoadingFile(true)
-    debugLog('openFile:readFile', { path, token: openToken })
-    const result = await window.electronAPI.project.readFile(root, path)
-    if (openToken !== openFileTokenRef.current) {
-      debugLog('openFile:stale', { path, token: openToken, current: openFileTokenRef.current })
-      return
+    const readOptions: { openMode?: ProjectFileOpenMode; confirmLargeText?: boolean } = {}
+    let result = await window.electronAPI.project.readFile(root, path, readOptions)
+    while (true) {
+      if (openToken !== openFileTokenRef.current) {
+        debugLog('openFile:stale', { path, token: openToken, current: openFileTokenRef.current })
+        return
+      }
+      if (result.success) break
+
+      if (result.requiresOpenChoice) {
+        const extensionKey = getExtensionKey(path, result.extension)
+        const rememberedMode = readBinaryOpenDefaults()[extensionKey]
+        if (rememberedMode) {
+          readOptions.openMode = rememberedMode
+          debugLog('openFile:binary-choice-remembered', { path, mode: rememberedMode })
+        } else {
+          setIsLoadingFile(false)
+          const choice = await requestFileOpenChoice({
+            path,
+            extensionKey,
+            sizeBytes: result.sizeBytes ?? 0
+          })
+          if (openToken !== openFileTokenRef.current) return
+          if (!choice) {
+            debugLog('openFile:binary-choice-cancelled', { path })
+            return
+          }
+          if (choice.remember) {
+            writeBinaryOpenDefault(extensionKey, choice.mode)
+          }
+          readOptions.openMode = choice.mode
+          setIsLoadingFile(true)
+          debugLog('openFile:binary-choice', { path, mode: choice.mode, remember: choice.remember })
+        }
+        result = await window.electronAPI.project.readFile(root, path, readOptions)
+        continue
+      }
+
+      if (result.requiresConfirmation) {
+        setIsLoadingFile(false)
+        const confirmed = await requestConfirm({
+          title: result.readOnly
+            ? t('projectEditor.largeFile.readOnlyTitle')
+            : t('projectEditor.largeFile.warningTitle'),
+          message: result.readOnly
+            ? t('projectEditor.largeFile.readOnlyConfirmMessage', { size: formatFileSize(result.sizeBytes ?? 0) })
+            : t('projectEditor.largeFile.warningMessage', { size: formatFileSize(result.sizeBytes ?? 0) }),
+          confirmText: result.readOnly
+            ? t('projectEditor.largeFile.openReadOnly')
+            : t('projectEditor.largeFile.openAnyway'),
+          cancelText: t('common.cancel')
+        })
+        if (openToken !== openFileTokenRef.current) return
+        if (!confirmed) {
+          debugLog('openFile:large-confirm-cancelled', { path })
+          return
+        }
+        readOptions.confirmLargeText = true
+        setIsLoadingFile(true)
+        result = await window.electronAPI.project.readFile(root, path, readOptions)
+        continue
+      }
+
+      break
     }
     setIsLoadingFile(false)
 
@@ -3651,6 +3907,7 @@ export function ProjectEditor({
           isPdfRef.current = false
           setIsEpub(false)
           isEpubRef.current = false
+          applyLargeFileState(null)
           setPdfOutlineSymbols([])
           setPdfActivePage(1)
           setEpubOutlineSymbols([])
@@ -3687,9 +3944,12 @@ export function ProjectEditor({
       isBinary: result.isBinary,
       isImage: result.isImage,
       isSqlite: result.isSqlite,
-      size: result.content?.length ?? 0
+      size: result.sizeBytes ?? result.content?.length ?? 0,
+      openMode: result.openMode ?? 'text'
     })
     setMissingFileNotice(null)
+    applyLargeFileState(null)
+    largeFileChunkTokenRef.current += 1
 
     // Update the active path
     const sqliteFile = Boolean(result.isSqlite)
@@ -3795,6 +4055,35 @@ export function ProjectEditor({
       return
     }
 
+    if (result.openMode === 'large-text' || result.openMode === 'binary') {
+      pendingViewStateRef.current = null
+      pendingViewStatePathRef.current = null
+      pendingViewStateFallbackRef.current = null
+      setFileContent('')
+      fileContentRef.current = ''
+      originalContentRef.current = ''
+      originalModelVersionRef.current = null
+      setIsDirty(false)
+      setIsMarkdownRenderEnabled(false)
+      markdownSessionCacheRenderRef.current = null
+      pendingMarkdownSessionCacheRestoreRef.current = null
+      const mode = result.openMode
+      const sizeBytes = result.sizeBytes ?? 0
+      applyLargeFileState({
+        mode,
+        path,
+        sizeBytes,
+        offset: 0,
+        bytesRead: 0,
+        text: '',
+        binaryBytes: new Uint8Array(),
+        loading: true,
+        error: null
+      })
+      await loadLargeFileChunk({ path, mode, sizeBytes, offset: 0 })
+      return
+    }
+
     if (result.isBinary) {
       pendingViewStateRef.current = null
       pendingViewStatePathRef.current = null
@@ -3860,11 +4149,15 @@ export function ProjectEditor({
   }, [
     applyPendingCursorPosition,
     applyPendingViewState,
+    applyLargeFileState,
     beginPreviewRestore,
     clearActiveFileState,
     confirmDiscardChanges,
     isMarkdownPreviewOpen,
+    loadLargeFileChunk,
     removeQuickFileEntries,
+    requestConfirm,
+    requestFileOpenChoice,
     resetPreviewRestoreState,
     scheduleProjectStateSave,
     showStatus,
@@ -5400,7 +5693,7 @@ export function ProjectEditor({
   useEffect(() => {
     const root = rootRef.current
     const filePath = activeFilePath
-    if (!root || !filePath || isBinary || isImage || isSqlite) return
+    if (!root || !filePath || isBinary || isImage || isSqlite || largeFileState) return
 
     void window.electronAPI.project.watchFile(root, filePath)
 
@@ -5477,7 +5770,7 @@ export function ProjectEditor({
       unsubscribe()
       void window.electronAPI.project.unwatchFile(root, filePath)
     }
-  }, [activeFilePath, isBinary, isImage, isSqlite, scheduleMarkdownRender, showStatus, syncOriginalVersion, t])
+  }, [activeFilePath, isBinary, isImage, isSqlite, largeFileState, scheduleMarkdownRender, showStatus, syncOriginalVersion, t])
 
   const handleSave = useCallback(async (source: SaveSource = 'toolbar') => {
     const targetPath = activeFilePathRef.current
@@ -5485,9 +5778,10 @@ export function ProjectEditor({
     const binary = isBinaryRef.current
     const image = isImageRef.current
     const sqlite = isSqliteRef.current
-    if (!targetPath || !root || binary || image || sqlite) {
+    const largeReadonly = Boolean(largeFileStateRef.current)
+    if (!targetPath || !root || binary || image || sqlite || largeReadonly) {
       if (DEBUG_PROJECT_EDITOR) {
-        debugLog('save:skip', { source, targetPath, hasRoot: Boolean(root), binary, image, sqlite })
+        debugLog('save:skip', { source, targetPath, hasRoot: Boolean(root), binary, image, sqlite, largeReadonly })
       }
       return null
     }
@@ -5727,6 +6021,63 @@ export function ProjectEditor({
       getEditorLineCount: () => {
         const model = editorRef.current?.getModel()
         return model ? model.getLineCount() : 0
+      },
+      getDialogState: () => dialog
+        ? {
+            type: dialog.type,
+            title: dialog.title,
+            message: dialog.message
+          }
+        : null,
+      confirmDialog: () => {
+        handleDialogConfirm()
+      },
+      cancelDialog: () => {
+        handleDialogCancel()
+      },
+      getOpenChoiceDialogState: () => ({
+        visible: Boolean(fileOpenChoiceDialog),
+        extension: fileOpenChoiceDialog?.extension ?? '',
+        remember: Boolean(fileOpenChoiceDialog?.remember)
+      }),
+      chooseOpenChoice: (mode: 'text' | 'binary' | 'cancel', remember?: boolean) => {
+        if (mode === 'cancel') {
+          handleFileOpenChoiceCancel()
+          return
+        }
+        resolveFileOpenChoice(mode, remember)
+      },
+      getLargeFileState: () => {
+        const state = largeFileStateRef.current
+        if (!state) return null
+        return {
+          mode: state.mode,
+          path: state.path,
+          sizeBytes: state.sizeBytes,
+          offset: state.offset,
+          bytesRead: state.bytesRead,
+          textLength: state.text.length,
+          binaryLength: state.binaryBytes.length,
+          binaryRadix,
+          loading: state.loading,
+          error: state.error,
+          readOnly: true
+        }
+      },
+      setLargeFileOffset: async (offset: number) => {
+        const state = largeFileStateRef.current
+        if (!state) return false
+        return await loadLargeFileChunk({
+          path: state.path,
+          mode: state.mode,
+          sizeBytes: state.sizeBytes,
+          offset
+        })
+      },
+      setBinaryRadix: (radix: BinaryRadix) => {
+        if (![2, 8, 10, 16].includes(radix)) return false
+        setBinaryRadix(radix)
+        return true
       },
       getCursorPosition: () => {
         const position = editorRef.current?.getPosition()
@@ -6174,13 +6525,21 @@ export function ProjectEditor({
     }
   }, [
     beginPreviewRestore,
+    binaryRadix,
     capturePreviewScrollMemory,
+    dialog,
+    fileOpenChoiceDialog,
     getOutlineScrollContainer,
     getImageFilePreviewState,
     getMermaidPreviewState,
     getMarkdownCodeWrapDebugState,
+    handleDialogCancel,
+    handleDialogConfirm,
+    handleFileOpenChoiceCancel,
     handleOutlineScrollCapture,
     isPreviewContentVisibleNow,
+    loadLargeFileChunk,
+    resolveFileOpenChoice,
     scanPreviewNearestSlug,
     scheduleProjectStateSave,
     scrollFileBrowserToFraction,
@@ -6205,12 +6564,20 @@ export function ProjectEditor({
     }
   }, [
     beginPreviewRestore,
+    binaryRadix,
     capturePreviewScrollMemory,
+    dialog,
+    fileOpenChoiceDialog,
     getOutlineScrollContainer,
     getImageFilePreviewState,
     getMarkdownCodeWrapDebugState,
+    handleDialogCancel,
+    handleDialogConfirm,
+    handleFileOpenChoiceCancel,
     handleOutlineScrollCapture,
     isPreviewContentVisibleNow,
+    loadLargeFileChunk,
+    resolveFileOpenChoice,
     scanPreviewNearestSlug,
     scheduleProjectStateSave,
     scrollFileBrowserToFraction,
@@ -7034,7 +7401,7 @@ export function ProjectEditor({
       <SubpagePanelButton
         className="project-editor-save"
         onClick={() => void handleSaveRef.current('toolbar')}
-        disabled={!activeFilePath || !isDirty || isBinary || isImage || isSqlite}
+        disabled={!activeFilePath || !isDirty || isBinary || isImage || isSqlite || Boolean(largeFileState)}
       >
         {t('common.save')}
       </SubpagePanelButton>
@@ -7046,7 +7413,7 @@ export function ProjectEditor({
         {t('projectEditor.returnToTerminal')}
       </SubpagePanelButton>
     </>
-  ), [activeFilePath, handleRequestClose, isBinary, isDirty, isImage, isSqlite, t])
+  ), [activeFilePath, handleRequestClose, isBinary, isDirty, isImage, isSqlite, largeFileState, t])
   const externalPanelShellState = useMemo<SubpagePanelShellState>(() => ({
     current: 'editor',
     onSelect: handleSelectSubpage,
@@ -7077,6 +7444,29 @@ export function ProjectEditor({
     onPanelShellStateChange,
     panelShellMode
   ])
+
+  const largeFileRangeLabel = useMemo(() => {
+    if (!largeFileState || largeFileState.bytesRead <= 0) return null
+    return t('projectEditor.largeFile.range', {
+      start: largeFileState.offset + 1,
+      end: largeFileState.offset + largeFileState.bytesRead,
+      total: formatFileSize(largeFileState.sizeBytes)
+    })
+  }, [largeFileState, t])
+
+  const binaryDump = useMemo(() => {
+    if (!largeFileState || largeFileState.mode !== 'binary') return ''
+    if (largeFileState.binaryBytes.length === 0) return ''
+    return hexy(Array.from(largeFileState.binaryBytes), {
+      bytesPerLine: BINARY_VIEWER_BYTES_PER_LINE,
+      bytesPerGroup: 1,
+      showAddress: true,
+      displayOffset: largeFileState.offset,
+      annotate: 'ascii',
+      radix: binaryRadix,
+      caps: 'upper'
+    })
+  }, [binaryRadix, largeFileState])
 
   if (!isOpen && !keepMountedInPanel) return null
 
@@ -7125,7 +7515,7 @@ export function ProjectEditor({
                 <SubpagePanelButton
                   className="project-editor-save"
                   onClick={() => void handleSaveRef.current('toolbar')}
-                  disabled={!activeFilePath || !isDirty || isBinary || isImage || isSqlite}
+                  disabled={!activeFilePath || !isDirty || isBinary || isImage || isSqlite || Boolean(largeFileState)}
                 >
                   {t('common.save')}
                 </SubpagePanelButton>
@@ -7157,7 +7547,7 @@ export function ProjectEditor({
                 <SubpagePanelButton
                   className="project-editor-save"
                   onClick={() => void handleSaveRef.current('toolbar')}
-                  disabled={!activeFilePath || !isDirty || isBinary || isImage || isSqlite}
+                  disabled={!activeFilePath || !isDirty || isBinary || isImage || isSqlite || Boolean(largeFileState)}
                 >
                   {t('common.save')}
                 </SubpagePanelButton>
@@ -7533,10 +7923,28 @@ export function ProjectEditor({
               </div>
               <div className="project-editor-editor-controls">
                 <div className="project-editor-editor-meta">
-                  {isLoadingFile && <span className="project-editor-editor-loading">{t('projectEditor.loading')}</span>}
+                  {isLoadingFile && (
+                    <span className="project-editor-editor-loading">
+                      {t('projectEditor.loading')}
+                      <span className="preview-loading-dots mini"><span /><span /><span /></span>
+                    </span>
+                  )}
+                  {largeFileState?.loading && (
+                    <span className="project-editor-editor-loading">
+                      {t('projectEditor.largeFile.loadingChunk')}
+                      <span className="preview-loading-dots mini"><span /><span /><span /></span>
+                    </span>
+                  )}
+                  {largeFileState && (
+                    <span className="project-editor-editor-binary">
+                      {largeFileState.mode === 'binary'
+                        ? t('projectEditor.binaryViewer.readOnlyBadge')
+                        : t('projectEditor.largeFile.readOnlyBadge')}
+                    </span>
+                  )}
                   {isImage && <span className="project-editor-editor-binary">{t('projectEditor.imagePreview')}</span>}
                   {isSqlite && <span className="project-editor-editor-binary">{t('projectEditor.sqliteView')}</span>}
-                  {!isImage && !isSqlite && isBinary && <span className="project-editor-editor-binary">{t('projectEditor.binaryReadonly')}</span>}
+                  {!largeFileState && !isImage && !isSqlite && isBinary && <span className="project-editor-editor-binary">{t('projectEditor.binaryReadonly')}</span>}
                 </div>
                 {activeFilePath && isMarkdownFile && !isBinary && !isImage && !isSqlite && (
                   <button
@@ -7608,7 +8016,92 @@ export function ProjectEditor({
                   </div>
                 </div>
               )}
-              {activeFilePath && isImage && imagePreviewUrl ? (
+              {activeFilePath && largeFileState ? (
+                <div className="project-editor-large-viewer">
+                  <div className="project-editor-large-toolbar">
+                    <div className="project-editor-large-info">
+                      <span className="project-editor-large-title">
+                        {largeFileState.mode === 'binary'
+                          ? t('projectEditor.binaryViewer.title')
+                          : t('projectEditor.largeFile.title')}
+                      </span>
+                      <span className="project-editor-large-size">{formatFileSize(largeFileState.sizeBytes)}</span>
+                      {largeFileRangeLabel && (
+                        <span className="project-editor-large-range">{largeFileRangeLabel}</span>
+                      )}
+                    </div>
+                    {largeFileState.mode === 'binary' && (
+                      <div className="project-editor-binary-radix" role="group" aria-label={t('projectEditor.binaryViewer.radixLabel')}>
+                        {([
+                          [16, t('projectEditor.binaryViewer.hex')],
+                          [8, t('projectEditor.binaryViewer.octal')],
+                          [2, t('projectEditor.binaryViewer.binary')],
+                          [10, t('projectEditor.binaryViewer.decimal')]
+                        ] as Array<[BinaryRadix, string]>).map(([radix, label]) => (
+                          <button
+                            key={radix}
+                            type="button"
+                            className={`project-editor-binary-radix-btn ${binaryRadix === radix ? 'active' : ''}`}
+                            onClick={() => setBinaryRadix(radix)}
+                          >
+                            {label}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                    <div className="project-editor-large-actions">
+                      <button
+                        type="button"
+                        className="project-editor-action-btn"
+                        disabled={largeFileState.loading || largeFileState.offset <= 0}
+                        onClick={() => void loadLargeFileChunk({
+                          path: largeFileState.path,
+                          mode: largeFileState.mode,
+                          sizeBytes: largeFileState.sizeBytes,
+                          offset: Math.max(0, largeFileState.offset - LARGE_FILE_CHUNK_BYTES)
+                        })}
+                      >
+                        {t('projectEditor.largeFile.previous')}
+                      </button>
+                      <button
+                        type="button"
+                        className="project-editor-action-btn"
+                        disabled={
+                          largeFileState.loading ||
+                          largeFileState.offset + largeFileState.bytesRead >= largeFileState.sizeBytes
+                        }
+                        onClick={() => void loadLargeFileChunk({
+                          path: largeFileState.path,
+                          mode: largeFileState.mode,
+                          sizeBytes: largeFileState.sizeBytes,
+                          offset: largeFileState.offset + Math.max(largeFileState.bytesRead, LARGE_FILE_CHUNK_BYTES)
+                        })}
+                      >
+                        {t('projectEditor.largeFile.next')}
+                      </button>
+                    </div>
+                  </div>
+                  <div className="project-editor-large-notice">
+                    {largeFileState.mode === 'binary'
+                      ? t('projectEditor.binaryViewer.readOnlyNotice')
+                      : t('projectEditor.largeFile.readOnlyNotice')}
+                  </div>
+                  <div className="project-editor-large-content">
+                    {largeFileState.loading && (
+                      <div className="project-editor-large-loading">
+                        <div className="preview-loading-dots"><span /><span /><span /></div>
+                      </div>
+                    )}
+                    {largeFileState.error ? (
+                      <div className="project-editor-large-error">{largeFileState.error}</div>
+                    ) : (
+                      <pre className={largeFileState.mode === 'binary' ? 'project-editor-binary-dump' : 'project-editor-large-text'}>
+                        {largeFileState.mode === 'binary' ? binaryDump : largeFileState.text}
+                      </pre>
+                    )}
+                  </div>
+                </div>
+              ) : activeFilePath && isImage && imagePreviewUrl ? (
                 <div className="project-editor-image-preview">
                   <img ref={imagePreviewRef} src={imagePreviewUrl} alt={activeFilePath} />
                 </div>
@@ -8005,6 +8498,47 @@ export function ProjectEditor({
                 </button>
                 <button className="project-editor-dialog-btn primary" onClick={handleDialogConfirm}>
                   {dialog.confirmText || t('common.confirm')}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {fileOpenChoiceDialog && (
+          <div className="project-editor-dialog-overlay" onClick={handleFileOpenChoiceCancel}>
+            <div className="project-editor-dialog project-editor-open-choice-dialog" onClick={(event) => event.stopPropagation()}>
+              <div className="project-editor-dialog-title">{t('projectEditor.binaryChoice.title')}</div>
+              <div className="project-editor-dialog-message">
+                {t('projectEditor.binaryChoice.message', {
+                  extension: fileOpenChoiceDialog.extensionLabel,
+                  size: fileOpenChoiceDialog.sizeLabel
+                })}
+              </div>
+              <label className="project-editor-open-choice-remember">
+                <input
+                  type="checkbox"
+                  checked={fileOpenChoiceDialog.remember}
+                  onChange={(event) => {
+                    setFileOpenChoiceDialog((prev) => prev
+                      ? { ...prev, remember: event.currentTarget.checked }
+                      : prev)
+                  }}
+                />
+                <span>
+                  {t('projectEditor.binaryChoice.remember', {
+                    extension: fileOpenChoiceDialog.extensionLabel
+                  })}
+                </span>
+              </label>
+              <div className="project-editor-dialog-actions project-editor-open-choice-actions">
+                <button className="project-editor-dialog-btn" onClick={handleFileOpenChoiceCancel}>
+                  {t('common.cancel')}
+                </button>
+                <button className="project-editor-dialog-btn" onClick={() => handleFileOpenChoiceSelect('text')}>
+                  {t('projectEditor.binaryChoice.openAsText')}
+                </button>
+                <button className="project-editor-dialog-btn primary" onClick={() => handleFileOpenChoiceSelect('binary')}>
+                  {t('projectEditor.binaryChoice.openAsBinary')}
                 </button>
               </div>
             </div>

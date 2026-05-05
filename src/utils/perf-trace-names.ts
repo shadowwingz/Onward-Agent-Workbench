@@ -56,6 +56,7 @@ export const PERF_TRACE_EVENT = {
   // ───────── Main process — IPC hot paths (latency ph='X') ─────────
   // Newly instrumented; see `electron/main/ipc-handlers.ts`.
   MAIN_IPC_PROJECT_READ_FILE: 'main:ipc.project.read-file',
+  MAIN_IPC_PROJECT_READ_FILE_CHUNK: 'main:ipc.project.read-file-chunk',
   MAIN_IPC_PROJECT_SAVE_FILE: 'main:ipc.project.save-file',
   MAIN_IPC_GIT_GET_DIFF: 'main:ipc.git.get-diff',
   MAIN_IPC_GIT_GET_HISTORY: 'main:ipc.git.get-history',
@@ -215,6 +216,7 @@ export const PERF_TRACE_EVENT = {
   // renderer→main→renderer round trips show up on the renderer thread
   // track alongside the input events that triggered them.
   RENDERER_IPC_PROJECT_READ_FILE: 'renderer:ipc.project.read-file',
+  RENDERER_IPC_PROJECT_READ_FILE_CHUNK: 'renderer:ipc.project.read-file-chunk',
   RENDERER_IPC_GIT_GET_DIFF: 'renderer:ipc.git.get-diff',
   RENDERER_IPC_TERMINAL_WRITE: 'renderer:ipc.terminal.write',
 

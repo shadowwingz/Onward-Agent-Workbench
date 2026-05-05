@@ -418,6 +418,15 @@ export interface ProjectListResult {
   error?: string
 }
 
+export type ProjectFileOpenMode = 'auto' | 'text' | 'binary'
+export type ProjectFileResolvedOpenMode = 'text' | 'large-text' | 'binary'
+export type ProjectFileChunkMode = 'text' | 'binary'
+
+export interface ProjectReadOptions {
+  openMode?: ProjectFileOpenMode
+  confirmLargeText?: boolean
+}
+
 export interface ProjectReadResult {
   success: boolean
   root: string
@@ -433,6 +442,25 @@ export interface ProjectReadResult {
   previewData?: string
   /** Absolute filesystem path of the previewed file (PDF/EPUB). */
   previewPath?: string
+  sizeBytes?: number
+  openMode?: ProjectFileResolvedOpenMode
+  requiresConfirmation?: boolean
+  requiresOpenChoice?: boolean
+  readOnly?: boolean
+  extension?: string
+  error?: string
+}
+
+export interface ProjectFileChunkResult {
+  success: boolean
+  root: string
+  path: string
+  offset: number
+  requestedLength: number
+  bytesRead: number
+  sizeBytes: number
+  text?: string
+  base64?: string
   error?: string
 }
 
@@ -598,7 +626,8 @@ export interface ProjectAPI {
   buildFileIndex: (root: string) => Promise<string[]>
   searchFilenames: (root: string, query: string, limit?: number) => Promise<string[]>
   invalidateFileIndex: (root: string) => Promise<{ success: boolean }>
-  readFile: (root: string, path: string) => Promise<ProjectReadResult>
+  readFile: (root: string, path: string, options?: ProjectReadOptions) => Promise<ProjectReadResult>
+  readFileChunk: (root: string, path: string, offset: number, length: number, mode: ProjectFileChunkMode) => Promise<ProjectFileChunkResult>
   saveFile: (root: string, path: string, content: string) => Promise<ProjectSaveResult>
   createFile: (root: string, path: string, content?: string) => Promise<ProjectActionResult>
   createFolder: (root: string, path: string) => Promise<ProjectActionResult>

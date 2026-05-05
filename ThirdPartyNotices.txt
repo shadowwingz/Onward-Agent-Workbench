@@ -978,13 +978,13 @@ Copyright (c) 2013, FuturePress
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are met: 
+modification, are permitted provided that the following conditions are met:
 
 1. Redistributions of source code must retain the above copyright notice, this
-   list of conditions and the following disclaimer. 
+   list of conditions and the following disclaimer.
 2. Redistributions in binary form must reproduce the above copyright notice,
    this list of conditions and the following disclaimer in the documentation
-   and/or other materials provided with the distribution. 
+   and/or other materials provided with the distribution.
 
 THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
 ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
@@ -998,8 +998,35 @@ ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 The views and conclusions contained in the software and documentation are those
-of the authors and should not be interpreted as representing official policies, 
+of the authors and should not be interpreted as representing official policies,
 either expressed or implied, of the FreeBSD Project.
+
+
+hexy 0.4.0
+MIT
+Copyright 2010, 2011 Tim Becker
+All rights reserved.
+
+Permission is hereby granted, free of charge, to any person
+obtaining a copy of this software and associated documentation
+files (the "Software"), to deal in the Software without
+restriction, including without limitation the rights to use,
+copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the
+Software is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice shall be
+included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES
+OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
+OTHER DEALINGS IN THE SOFTWARE.
 
 
 highlight.js 11.11.1
@@ -1494,7 +1521,7 @@ MIT
 
 > File icons from Seti-UI
 
-All of the icons come from [jesseweed/seti-ui](https://github.com/jesseweed/seti-ui). 
+All of the icons come from [jesseweed/seti-ui](https://github.com/jesseweed/seti-ui).
 This repo just packages them up so you can use them with `npm install`.
 
 This package is primarily intended for use in static sites.
@@ -1502,7 +1529,7 @@ All of the icons are stored in a JSON file as SVG strings.
 For most static sites, you only want a few icons on a page (and will likely reuse the same few icons across the entire site).
 As a result, it is best to inline the icons in the pages.
 
-In other cases, this approach does not make sense. 
+In other cases, this approach does not make sense.
 For example, in a webapp where the icons are used dynamically, it would likely be better to use an SVG spritesheet to enable caching of the icons instead of bundling 100K of SVG strings.
 
 # Usage

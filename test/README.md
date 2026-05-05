@@ -71,6 +71,7 @@ point at files under `test/unittest/`.
 | Trace events emit on click / snapshot / rename | `run-terminal-title-rename` (TTM-20) |
 | Outside-click / Escape closes the title menu | `run-terminal-title-rename` (TTM-18, TTM-19) |
 | Per-task ESC routes to terminal, not subpages | `run-subpage-navigation` (SN-*) |
+| Terminal startup creates a packaged PTY and accepts shell input | `run-terminal-autofollow` (TA-00a, TA-00b) |
 | Terminal viewport keeps bottom-follow during refresh | `run-terminal-autofollow` (TA-02, TA-04, TA-06) |
 | Wheel / PageUp scroll detaches viewport from bottom | `run-terminal-autofollow` (TA-03, TA-05) |
 | Fit / remount preserves viewport position | `run-terminal-autofollow` (TA-07, TA-08, TA-09, TA-10, TA-11) |
@@ -135,6 +136,7 @@ point at files under `test/unittest/`.
 | Editor restore on app reopen (last file, cursor, scroll) | `run-project-editor-restore` (PE-*) |
 | Restore unit logic (Set / Map serialisation, key normalization) | `run-project-editor-restore-unit` (PEU-*) |
 | File open positions exact-line scroll | `run-project-editor-open-position` (POP-*) |
+| Large text warning, read-only chunk viewer, unknown binary open choices, supported PNG/PDF bypass binary prompt | `run-project-editor-large-file` (PLF-*) |
 | Editor scope = active terminal (multi-terminal isolation) | `run-project-editor-multi-terminal-scope` (PEMS-*) |
 | SQLite viewer (open `.db`, table list, paging) | `run-project-editor-sqlite` (PSQL-*) |
 | File index cache + Quick Open behaviour | `run-file-index-cache-ui` (FIC-01..21) |

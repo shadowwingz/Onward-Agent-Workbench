@@ -119,6 +119,7 @@ export const IPC = {
   PROJECT_INVALIDATE_FILE_INDEX: 'project:invalidate-file-index',
   PROJECT_LIST_DIRECTORY: 'project:list-directory',
   PROJECT_READ_FILE: 'project:read-file',
+  PROJECT_READ_FILE_CHUNK: 'project:read-file-chunk',
   PROJECT_RENAME_PATH: 'project:rename-path',
   PROJECT_SAVE_FILE: 'project:save-file',
   PROJECT_SEARCH_CANCEL: 'project:search-cancel',

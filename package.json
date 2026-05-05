@@ -20,14 +20,14 @@
     "build": "electron-vite build",
     "typecheck": "tsc -p tsconfig.typecheck.json --noEmit",
     "preview": "electron-vite preview",
-    "postinstall": "electron-rebuild -f -w node-pty,better-sqlite3 && node scripts/ensure-ripgrep-binary.js",
+    "postinstall": "electron-rebuild -f -w node-pty,better-sqlite3 && node scripts/ensure-node-pty-spawn-helper.js && node scripts/ensure-ripgrep-binary.js",
     "rebuild": "electron-rebuild -f -w node-pty,better-sqlite3",
     "lint:comments": "node scripts/check-chinese-comments.js",
     "compile:changelog": "node scripts/compile-changelog.js",
     "generate:changelog": "node scripts/generate-changelog.js",
     "generate:icons": "node scripts/generate-icons.js",
-    "pack": "electron-vite build && electron-builder --dir",
-    "dist": "electron-vite build && electron-builder",
+    "pack": "node scripts/ensure-node-pty-spawn-helper.js && electron-vite build && electron-builder --dir",
+    "dist": "node scripts/ensure-node-pty-spawn-helper.js && electron-vite build && electron-builder",
     "dist:dev": "node scripts/dist-dev.js",
     "dist:release": "node scripts/dist-release.js",
     "generate-notices": "license-checker-rseidelsohn --production --plainVertical --out ThirdPartyNotices.txt && node scripts/normalize-notices.js",
@@ -45,7 +45,8 @@
       "out/**/*"
     ],
     "asarUnpack": [
-      "node_modules/@vscode/ripgrep/**"
+      "node_modules/@vscode/ripgrep/**",
+      "node_modules/node-pty/**"
     ],
     "extraResources": [
       {
@@ -107,6 +108,7 @@
     "better-sqlite3": "^12.8.0",
     "dompurify": "^3.3.2",
     "epubjs": "^0.3.93",
+    "hexy": "0.4.0",
     "highlight.js": "^11.11.1",
     "katex": "^0.16.33",
     "marked": "^17.0.1",
