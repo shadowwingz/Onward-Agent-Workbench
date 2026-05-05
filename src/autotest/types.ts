@@ -11,6 +11,23 @@
 // Debug API interface
 // ============================================================
 
+// Mirror of clickLatencyTracker.ClickLatencyMeasurement, kept inline so this
+// file does not pull in renderer-only modules.
+export interface ClickLatencyMeasurementForAutotest {
+  fileKey: string
+  filename: string
+  cacheState: 'hit' | 'miss' | 'unknown'
+  clickAt: number
+  ipcStartAt: number | null
+  ipcEndAt: number | null
+  stateSetAt: number | null
+  editorReadyAt: number | null
+  diffComputedAt: number | null
+  paintReadyAt: number | null
+  totalMs: number | null
+  cancelled: boolean
+}
+
 export interface GitDiffDebugApi {
   isOpen: () => boolean
   getFileList: () => Array<{ filename: string; originalFilename?: string; status?: string; changeType?: string; resourceGroup?: string; originalRef?: string | null; modifiedRef?: string | null; repoRoot?: string; repoLabel?: string }>
@@ -52,6 +69,10 @@ export interface GitDiffDebugApi {
     lastReason: string
     lastDurationMs: number | null
   }
+  getLastClickLatency?: () => ClickLatencyMeasurementForAutotest | null
+  getLastClickLatencyForFile?: (fileKey: string) => ClickLatencyMeasurementForAutotest | null
+  getClickLatencyHistory?: () => ClickLatencyMeasurementForAutotest[]
+  resetClickLatencyHistory?: () => void
   setSelectedDraftContent?: (content: string) => boolean
   getIsDraftDirty?: () => boolean
   getRestoreNotice: () => { type: 'missing' | 'changed'; message: string; fileName?: string } | null
@@ -72,6 +93,15 @@ export interface GitDiffDebugApi {
     openToCwdReadyMs: number | null
     openToDiffLoadedMs: number | null
     cwdReadyToDiffLoadedMs: number | null
+  }
+  getLoadState?: () => {
+    inFlight: boolean
+    queued: { reset: boolean; silent: boolean; force: boolean } | null
+    hasDiffResult: boolean
+    fileCount: number | null
+    submodulesLoading: boolean
+    hasLastDiff: boolean
+    lastDiffAgeMs: number | null
   }
   getSplitViewState?: () => {
     mode?: 'side-by-side' | 'inline'
@@ -94,6 +124,23 @@ export interface GitDiffDebugApi {
   getTermsPopoverOpen?: () => boolean
   toggleTermsPopover?: () => boolean
   getHunkActionWidgetCount?: () => number
+  getHunkActionDebugState?: () => {
+    hasEditor: boolean
+    hasMonaco: boolean
+    selectedFile: { filename: string; changeType: string; status: string } | null
+    selectedFileKey: string | null
+    hasState: boolean
+    loading: boolean | null
+    error: string | null
+    isBinary: boolean | null
+    isDraftDirty: boolean
+    lineChanges: number
+    widgetDomCount: number
+    visibleWidgetDomCount: number
+    widgetDisposableCount: number
+  }
+  revealFirstHunkActionForTest?: () => boolean
+  hideHunkActionsForTest?: () => void
   triggerFirstHunkAction?: (action: 'stage' | 'revert' | 'unstage') => Promise<boolean>
   setSelectedLineRangeForTest?: (start: number, end: number, side?: 'additions' | 'deletions') => boolean
   triggerLineAction?: (action: 'keep' | 'deny') => Promise<boolean>

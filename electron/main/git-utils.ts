@@ -16,6 +16,7 @@ import { MAX_IMAGE_FILE_SIZE, bufferToImageDataUrl, isSupportedImageFile } from 
 import { perfTraceLogger } from './perf-trace-logger'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 import { gitDiffCacheInvalidator } from './git-diff-cache-invalidator'
+import { GitDiffRequestCacheController } from './git-diff-request-cache'
 // Static circular import is intentional and safe: every consumer below
 // reads `gitRepositorySnapshotService` / `snapshotToLegacySubmoduleInfos`
 // from inside async function bodies, never at module-eval time. ESM live
@@ -370,8 +371,7 @@ const SUBMODULE_CACHE_TTL = 5000
 const superprojectCache = new Map<string, { value: string | null; at: number }>()
 const singleRepoDiffCache = new Map<string, { value: { files: GitFileStatus[]; error?: string }; at: number }>()
 const singleRepoDiffInFlight = new Map<string, Promise<{ files: GitFileStatus[]; error?: string }>>()
-const gitDiffRequestCache = new Map<string, { value: GitDiffResult; at: number }>()
-const gitDiffRequestInFlight = new Map<string, Promise<GitDiffResult>>()
+let gitDiffRequestCacheController: GitDiffRequestCacheController<GitDiffResult> | null = null
 
 /**
  * Clear every cached `getGitDiff` result for `cwd`:
@@ -393,10 +393,8 @@ const gitDiffRequestInFlight = new Map<string, Promise<GitDiffResult>>()
 export function invalidateGitDiffCache(cwd: string, reason: string): number {
   const normalized = resolve(cwd)
   let cleared = 0
-  for (const key of Array.from(gitDiffRequestCache.keys())) {
-    // Cache key shape is `${resolve(cwd)}::${scope}` — match by prefix.
-    if (key === `${normalized}::root-only` || key === `${normalized}::full`) {
-      gitDiffRequestCache.delete(key)
+  for (const scope of ['root-only', 'full'] as const) {
+    if (invalidateGitDiffRequestKey(`${normalized}::${scope}`)) {
       cleared += 1
     }
   }
@@ -1624,13 +1622,19 @@ function getGitDiffRequestKey(cwd: string, options?: GitDiffLoadOptions): string
   return `${resolve(cwd)}::${scope}`
 }
 
-function pruneGitDiffRequestCache(now: number): void {
-  if (gitDiffRequestCache.size <= 64) return
-  for (const [key, entry] of gitDiffRequestCache) {
-    if (now - entry.at > GIT_DIFF_REQUEST_CACHE_TTL) {
-      gitDiffRequestCache.delete(key)
-    }
+function getGitDiffRequestCacheController(): GitDiffRequestCacheController<GitDiffResult> {
+  if (!gitDiffRequestCacheController) {
+    gitDiffRequestCacheController = new GitDiffRequestCacheController<GitDiffResult>({
+      ttlMs: GIT_DIFF_REQUEST_CACHE_TTL,
+      maxEntries: 64,
+      clone: cloneGitDiffResult
+    })
   }
+  return gitDiffRequestCacheController
+}
+
+function invalidateGitDiffRequestKey(key: string): boolean {
+  return getGitDiffRequestCacheController().invalidateKey(key)
 }
 
 function isGitPathAtOrInside(pathValue: string, parentPath: string): boolean {
@@ -1875,46 +1879,24 @@ export async function getGitDiff(cwd: string, options?: GitDiffLoadOptions): Pro
   const cacheKey = getGitDiffRequestKey(cwd, options)
   const scope = options?.scope === 'root-only' ? 'root-only' : 'full'
   const force = Boolean(options?.force)
-  const now = Date.now()
-  const cached = gitDiffRequestCache.get(cacheKey)
-  if (!force && cached && now - cached.at < GIT_DIFF_REQUEST_CACHE_TTL) {
-    perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_GIT_DIFF_CACHE_HIT, {
-      cwd: resolve(cwd),
-      scope,
-      ageMs: now - cached.at
-    })
-    return cloneGitDiffResult(cached.value)
-  }
-
-  // force=true while a request is in-flight joins the in-flight call rather
-  // than spawning a duplicate git status — the in-flight call started after
-  // the most recent watcher invalidation, so its result is fresh by
-  // construction.
-  const inflight = gitDiffRequestInFlight.get(cacheKey)
-  if (inflight) {
-    return cloneGitDiffResult(await inflight)
-  }
-
-  if (force && cached) {
-    gitDiffRequestCache.delete(cacheKey)
-    perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_GIT_DIFF_CACHE_INVALIDATE, {
-      cwd: resolve(cwd),
-      reason: 'force',
-      entriesCleared: 1
-    })
-  }
-
-  const task = loadGitDiff(cwd, options)
-  gitDiffRequestInFlight.set(cacheKey, task)
-  try {
-    const value = await task
-    const capturedAt = Date.now()
-    gitDiffRequestCache.set(cacheKey, { value: cloneGitDiffResult(value), at: capturedAt })
-    pruneGitDiffRequestCache(capturedAt)
-    return cloneGitDiffResult(value)
-  } finally {
-    gitDiffRequestInFlight.delete(cacheKey)
-  }
+  return getGitDiffRequestCacheController().get(cacheKey, {
+    force,
+    load: () => loadGitDiff(cwd, options),
+    onCacheHit: (ageMs) => {
+      perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_GIT_DIFF_CACHE_HIT, {
+        cwd: resolve(cwd),
+        scope,
+        ageMs
+      })
+    },
+    onForceInvalidate: (entriesCleared) => {
+      perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_GIT_DIFF_CACHE_INVALIDATE, {
+        cwd: resolve(cwd),
+        reason: 'force',
+        entriesCleared
+      })
+    }
+  })
 }
 
 async function loadGitDiff(cwd: string, options?: GitDiffLoadOptions): Promise<GitDiffResult> {

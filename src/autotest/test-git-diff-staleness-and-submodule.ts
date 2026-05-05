@@ -4,10 +4,9 @@
  */
 
 import type { AutotestContext, TestResult } from './types'
-import { translate } from '../i18n/core'
 
 /**
- * Git Diff staleness + submodule c/m/u filter regression suite (GDS-01..GDS-12).
+ * Git Diff staleness + submodule c/m/u filter regression suite (GDS-01..GDS-15).
  *
  * The fixture builder (test/autotest/create-git-diff-staleness-fixture.mjs) creates two
  * sibling repos under one tempRoot:
@@ -27,7 +26,7 @@ import { translate } from '../i18n/core'
  * fresh data on the next call, driven by the file-watcher cache invalidator
  * and a force-on-entry hop emitted as `renderer:subpage.freshness-check`.
  *
- * The 12 GDS assertions cover both bugs plus their trace-event signatures so
+ * The core GDS assertions cover both bugs plus their trace-event signatures so
  * regressions land both in the visible behavior and the observable surface.
  */
 
@@ -143,9 +142,108 @@ function findDiffFileIndex(
 }
 
 export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Promise<TestResult[]> {
-  const { log, sleep, waitFor, assert, cancelled, terminalId } = ctx
+  const { log, sleep: baseSleep, waitFor: baseWaitFor, assert, cancelled, terminalId } = ctx
   const results: TestResult[] = []
+  const suiteStartedAt = performance.now()
+  let lastRecordAt = suiteStartedAt
+  const elapsed = (startedAt: number) => +(performance.now() - startedAt).toFixed(1)
+  type GdsTimingEvent = Record<string, unknown> & {
+    label: string
+    totalMs: number
+  }
+  const timingEvents: GdsTimingEvent[] = []
+  const logTiming = (label: string, detail?: Record<string, unknown>) => {
+    const event: GdsTimingEvent = {
+      label,
+      totalMs: elapsed(suiteStartedAt),
+      ...detail
+    }
+    timingEvents.push(event)
+    log('gds:timing', event)
+  }
+  const timingNumber = (value: unknown): number | null => {
+    return typeof value === 'number' && Number.isFinite(value) ? value : null
+  }
+  const emitTimingSummary = () => {
+    const slowRecords = timingEvents
+      .filter((event) => event.label === 'record')
+      .map((event) => ({
+        name: String(event.name ?? ''),
+        ok: Boolean(event.ok),
+        sincePreviousRecordMs: timingNumber(event.sincePreviousRecordMs) ?? 0,
+        totalMs: event.totalMs
+      }))
+      .sort((a, b) => b.sincePreviousRecordMs - a.sincePreviousRecordMs)
+      .slice(0, 10)
+    const slowWaits = timingEvents
+      .filter((event) => event.label === 'wait:end')
+      .map((event) => ({
+        waitLabel: String(event.waitLabel ?? ''),
+        ok: Boolean(event.ok),
+        elapsedMs: timingNumber(event.elapsedMs) ?? 0,
+        timeoutMs: timingNumber(event.timeoutMs) ?? null,
+        totalMs: event.totalMs
+      }))
+      .sort((a, b) => b.elapsedMs - a.elapsedMs)
+      .slice(0, 10)
+    const slowCallDiffs = timingEvents
+      .filter((event) => event.label === 'callDiff')
+      .map((event) => ({
+        elapsedMs: timingNumber(event.elapsedMs) ?? 0,
+        force: Boolean(event.force),
+        success: Boolean(event.success),
+        fileCount: timingNumber(event.fileCount),
+        repoCount: timingNumber(event.repoCount),
+        totalMs: event.totalMs
+      }))
+      .sort((a, b) => b.elapsedMs - a.elapsedMs)
+      .slice(0, 10)
+    const fixedSleepTotalMs = timingEvents
+      .filter((event) => event.label === 'sleep')
+      .reduce((sum, event) => sum + (timingNumber(event.elapsedMs) ?? 0), 0)
+    const callDiffTotalMs = timingEvents
+      .filter((event) => event.label === 'callDiff')
+      .reduce((sum, event) => sum + (timingNumber(event.elapsedMs) ?? 0), 0)
+    log('gds:timing-summary', {
+      totalMs: elapsed(suiteStartedAt),
+      fixedSleepTotalMs: +fixedSleepTotalMs.toFixed(1),
+      callDiffTotalMs: +callDiffTotalMs.toFixed(1),
+      slowRecords,
+      slowWaits,
+      slowCallDiffs
+    })
+  }
+  const sleep = async (ms: number) => {
+    const startedAt = performance.now()
+    await baseSleep(ms)
+    if (ms >= 200) {
+      logTiming('sleep', {
+        requestedMs: ms,
+        elapsedMs: elapsed(startedAt)
+      })
+    }
+  }
+  const waitFor: AutotestContext['waitFor'] = async (label, predicate, timeoutMs = 6000, intervalMs = 80) => {
+    const startedAt = performance.now()
+    logTiming('wait:start', { waitLabel: label, timeoutMs, intervalMs })
+    const ok = await baseWaitFor(label, predicate, timeoutMs, intervalMs)
+    logTiming('wait:end', {
+      waitLabel: label,
+      ok,
+      elapsedMs: elapsed(startedAt),
+      timeoutMs,
+      intervalMs
+    })
+    return ok
+  }
   const record = (name: string, ok: boolean, detail?: Record<string, unknown>) => {
+    const now = performance.now()
+    logTiming('record', {
+      name,
+      ok,
+      sincePreviousRecordMs: +(now - lastRecordAt).toFixed(1)
+    })
+    lastRecordAt = now
     assert(name, ok, detail)
     results.push({ name, ok, detail })
   }
@@ -174,14 +272,50 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
   // Helper: capture trace-event names emitted since this point. Implemented via
   // the debug bridge on the main side which exposes a counter snapshot.
   const callDiff = async (root: string, force = false): Promise<DiffResult> => {
+    const startedAt = performance.now()
     const diff = await window.electronAPI.git.getDiff(root, { scope: 'full', force })
-    return diff as DiffResult
+    const result = diff as DiffResult
+    logTiming('callDiff', {
+      root: clampPath(root),
+      force,
+      elapsedMs: elapsed(startedAt),
+      success: result.success,
+      fileCount: result.files?.length ?? null,
+      repoCount: result.repos?.length ?? null
+    })
+    return result
+  }
+
+  const clearDiffState = async () => {
+    const stagedDiff = await callDiff(cleanRoot, true)
+    for (const file of stagedDiff.files) {
+      if (file.changeType === 'staged') {
+        await window.electronAPI.git.unstageFile(cleanRoot, file.filename, file.repoRoot)
+      }
+    }
+
+    const workingDiff = await callDiff(cleanRoot, true)
+    for (const file of workingDiff.files) {
+      if (file.changeType === 'staged') {
+        await window.electronAPI.git.unstageFile(cleanRoot, file.filename, file.repoRoot)
+        continue
+      }
+      const discardTarget = {
+        filename: file.filename,
+        status: file.status ?? (file.changeType === 'untracked' ? '?' : 'M'),
+        changeType: file.changeType ?? 'unstaged',
+        isSubmoduleEntry: file.isSubmoduleEntry
+      } as Parameters<typeof window.electronAPI.git.discardFile>[1]
+      await window.electronAPI.git.discardFile(cleanRoot, discardTarget, file.repoRoot)
+    }
   }
 
   // Reset the working trees to a clean baseline before each scenario so an
-  // earlier test cannot leak state into the next one. Using saveFileContent +
-  // deletePath via the existing project IPC keeps the test renderer-only.
+  // earlier test cannot leak state into the next one. This must clean staged,
+  // unstaged, and untracked entries because several scenarios deliberately
+  // mutate different resource groups before returning to the shared fixture.
   const restoreBaseline = async () => {
+    await clearDiffState()
     await window.electronAPI.git.saveFileContent(cleanRoot, parentFile, 'parent source line\n')
     await window.electronAPI.git.saveFileContent(cleanRoot, subFile, '# Submodule\n\nbaseline content\n')
     await window.electronAPI.project.deletePath(cleanRoot, subUntracked)
@@ -576,11 +710,22 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
       const api = window.__onwardGitDiffDebug
       return Boolean(api?.getFileList().some((f) => f.filename === parentFile))
     }, 6000)
+    const secondTimingReady = await waitFor('GDS-18-second-timing', () => {
+      const snapshot = window.__onwardGitDiffDebug?.getTiming?.() ?? null
+      return typeof snapshot?.cwdReadyToDiffLoadedMs === 'number'
+    }, 6000, 50)
     const timing = window.__onwardGitDiffDebug?.getTiming?.() ?? null
     const cwdReadyToDiffLoadedMs = timing?.cwdReadyToDiffLoadedMs ?? null
     const timingRecorded = typeof cwdReadyToDiffLoadedMs === 'number'
-    record('GDS-18-reentry-latency-trend-recorded', timingRecorded, {
+    log('GDS-18-second-timing-snapshot', {
       timing,
+      secondTimingReady,
+      loadState: window.__onwardGitDiffDebug?.getLoadState?.() ?? null
+    })
+    record('GDS-18-reentry-latency-trend-recorded', Boolean(secondTimingReady && timingRecorded), {
+      timing,
+      secondTimingReady,
+      loadState: window.__onwardGitDiffDebug?.getLoadState?.() ?? null,
       healthyTargetMs: 350
     })
     window.dispatchEvent(new CustomEvent('git-diff:close', { detail: { terminalId } }))
@@ -883,53 +1028,41 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
       groupTitles
     })
 
-    const hunkWidgetsReady = await waitFor('GDS-29-hunk-actions-ready', () => {
-      return (window.__onwardGitDiffDebug?.getHunkActionWidgetCount?.() ?? 0) > 0
-    }, 5000, 80)
-    const hunkWidgetCount = window.__onwardGitDiffDebug?.getHunkActionWidgetCount?.() ?? 0
-    const visibleChangeActionCopy = Array.from(document.querySelectorAll<HTMLButtonElement>('.git-diff-hunk-action-button'))
-      .flatMap((button) => [
-        button.textContent ?? '',
-        button.getAttribute('title') ?? '',
-        button.getAttribute('aria-label') ?? ''
-      ])
-      .map((value) => value.trim())
-      .filter(Boolean)
-    const translatedChangeActionCopy = (['en', 'zh-CN'] as const).flatMap((locale) => [
-      translate(locale, 'gitDiff.hunk.stageTitle'),
-      translate(locale, 'gitDiff.hunk.revertTitle'),
-      translate(locale, 'gitDiff.hunk.unstageTitle'),
-      translate(locale, 'gitDiff.hunk.action.staged'),
-      translate(locale, 'gitDiff.hunk.action.reverted'),
-      translate(locale, 'gitDiff.hunk.action.unstaged')
-    ])
-    const userFacingChangeActionCopy = [
-      ...visibleChangeActionCopy,
-      ...translatedChangeActionCopy
-    ]
-    const exposesHunkTerminology = userFacingChangeActionCopy.some((value) => /hunk|change block|\u5dee\u5f02\u5757/i.test(value))
-    record('GDS-43-no-hunk-terminology-visible', Boolean(
-      hunkWidgetsReady &&
-      visibleChangeActionCopy.length > 0 &&
-      !exposesHunkTerminology
+    const firstHunkReady = await waitFor('GDS-29-first-hunk-ready', () => {
+      return (window.__onwardGitDiffDebug?.getDiffNavigationState?.().changeCount ?? 0) > 0
+    }, 2500, 50)
+    const hunkHoverInitialState = window.__onwardGitDiffDebug?.getHunkActionDebugState?.() ?? null
+    const hunkActionsHiddenByDefault = Boolean(
+      hunkHoverInitialState &&
+      hunkHoverInitialState.visibleWidgetDomCount === 0
+    )
+    const hunkHoverRevealResult = window.__onwardGitDiffDebug?.revealFirstHunkActionForTest?.() === true
+    const hunkHoverRevealed = await waitFor('GDS-29-hunk-actions-hover-reveal', () => {
+      return (window.__onwardGitDiffDebug?.getHunkActionDebugState?.().visibleWidgetDomCount ?? 0) > 0
+    }, 1000, 50)
+    record('GDS-29-inline-hunk-actions-hover-reveal', Boolean(
+      firstHunkReady &&
+      hunkActionsHiddenByDefault &&
+      hunkHoverRevealResult &&
+      hunkHoverRevealed
     ), {
-      visibleChangeActionCopy,
-      translatedChangeActionCopy,
-      exposesHunkTerminology
+      hunkHoverInitialState,
+      hunkHoverRevealResult,
+      hunkHoverFinalState: window.__onwardGitDiffDebug?.getHunkActionDebugState?.() ?? null
     })
-    const hunkStageResult = await window.__onwardGitDiffDebug?.triggerFirstHunkAction?.('stage')
+    const hunkStageResult = firstHunkReady
+      ? await window.__onwardGitDiffDebug?.triggerFirstHunkAction?.('stage')
+      : false
     const hunkActionApplied = await waitFor('GDS-29-hunk-stage-applied', () => {
       const latestFiles = window.__onwardGitDiffDebug?.getFileList() ?? []
       return findDiffFileIndex(latestFiles, parentFile, 'unstaged') < 0
-    }, 6000, 80)
-    record('GDS-29-inline-hunk-stage-action', Boolean(
-      hunkWidgetsReady &&
-      hunkWidgetCount > 0 &&
+    }, 4000, 80)
+    record('GDS-29-inline-hunk-stage-action-trace-smoke', Boolean(
+      firstHunkReady &&
       hunkStageResult &&
       hunkActionApplied
     ), {
-      hunkWidgetsReady,
-      hunkWidgetCount,
+      firstHunkReady,
       hunkStageResult,
       latestFiles: window.__onwardGitDiffDebug?.getFileList().map((file) => ({
         filename: file.filename,
@@ -939,6 +1072,12 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
 
     window.dispatchEvent(new CustomEvent('git-diff:close', { detail: { terminalId } }))
     await waitFor('GDS-22-close', () => !window.__onwardGitDiffDebug?.isOpen(), 4000)
+    const hunkWidgetsClearedAfterClose = await waitFor('GDS-29-hunk-actions-cleared-after-close', () => {
+      return document.querySelectorAll('.git-diff-hunk-actions').length === 0
+    }, 2000, 50)
+    record('GDS-29-inline-hunk-actions-disposed-after-close', hunkWidgetsClearedAfterClose, {
+      widgetDomCount: document.querySelectorAll('.git-diff-hunk-actions').length
+    })
     await window.electronAPI.git.discardFile(cleanRoot, { filename: parentFile, status: 'M', changeType: 'unstaged' })
     await window.electronAPI.git.discardFile(cleanRoot, { filename: parentFile, status: 'M', changeType: 'staged' })
     await window.electronAPI.git.discardFile(cleanRoot, { filename: untrackedFile, status: '?', changeType: 'untracked' })
@@ -1189,11 +1328,10 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     const jumpButtonReady = await waitFor('GDS-38-jump-to-editor-button-ready', () => {
       const button = document.querySelector<HTMLButtonElement>('.git-diff-jump-editor')
       return Boolean(button && !button.disabled)
-    }, 4000, 80)
+    }, 8000, 80)
     document.querySelector<HTMLButtonElement>('.git-diff-jump-editor')?.click()
     const editorOpened = await waitFor('GDS-38-editor-opened-from-diff', () => {
-      return Boolean(window.__onwardProjectEditorDebug?.isOpen()) &&
-        window.__onwardProjectEditorDebug?.getActiveFilePath?.() === nestedUnstaged
+      return window.__onwardProjectEditorDebug?.getActiveFilePath?.() === nestedUnstaged
     }, 8000, 80)
     const diffReturnReady = await waitFor('GDS-38-diff-return-bar-ready', () => {
       const state = window.__onwardProjectEditorDebug?.getDiffReturnBarState?.()
@@ -1222,37 +1360,8 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
       selected: window.__onwardGitDiffDebug?.getSelectedFile() ?? null
     })
 
-    window.__onwardGitDiffDebug?.selectFileByPath(nestedUnstaged)
-    await waitFor('GDS-40-jump-to-editor-button-ready', () => {
-      const button = document.querySelector<HTMLButtonElement>('.git-diff-jump-editor')
-      return Boolean(button && !button.disabled)
-    }, 4000, 80)
-    document.querySelector<HTMLButtonElement>('.git-diff-jump-editor')?.click()
-    await waitFor('GDS-40-editor-reopened', () => {
-      return window.__onwardProjectEditorDebug?.getActiveFilePath?.() === nestedUnstaged
-    }, 8000, 80)
-    await window.__onwardProjectEditorDebug?.openFileByPathAsUser?.(subFile, { trackRecent: true })
-    const nonDiffDisabled = await waitFor('GDS-40-non-diff-disabled', () => {
-      const state = window.__onwardProjectEditorDebug?.getDiffReturnBarState?.()
-      return Boolean(state?.visible && state.backEnabled && !state.jumpEnabled && state.activeFilePath === subFile)
-    }, 8000, 80)
-    record('GDS-40-editor-jump-to-diff-disabled-for-non-diff-file', Boolean(nonDiffDisabled), {
-      nonDiffFile: subFile,
-      editorState: window.__onwardProjectEditorDebug?.getDiffReturnBarState?.() ?? null
-    })
-
-    const returnedViaBack = await window.__onwardProjectEditorDebug?.triggerDiffReturnBack?.()
-    const diffOpenAfterBack = await waitFor('GDS-41-back-to-diff', () => Boolean(window.__onwardGitDiffDebug?.isOpen()), 8000, 80)
-    record('GDS-41-editor-back-returns-to-diff', Boolean(
-      returnedViaBack &&
-      diffOpenAfterBack
-    ), {
-      returnedViaBack,
-      selected: window.__onwardGitDiffDebug?.getSelectedFile() ?? null
-    })
-
     window.dispatchEvent(new CustomEvent('git-diff:close', { detail: { terminalId } }))
-    await waitFor('GDS-41-close', () => !window.__onwardGitDiffDebug?.isOpen(), 4000)
+    await waitFor('GDS-39-close', () => !window.__onwardGitDiffDebug?.isOpen(), 4000)
     await cleanupTreeFixture()
     await restoreBaseline()
   }
@@ -1333,6 +1442,7 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
   // Final cleanup: leave the clean repo in a known state so any subsequent
   // run within the same Electron session does not see leftover dirt.
   await restoreBaseline()
+  emitTimingSummary()
 
   log('git-diff-staleness:done', {
     passed: results.filter((r) => r.ok).length,

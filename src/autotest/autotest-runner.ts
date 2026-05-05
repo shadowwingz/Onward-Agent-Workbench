@@ -29,6 +29,7 @@ import { testGitDiffSubdir } from './test-git-diff-subdir'
 import { testGitDiffSubmodules } from './test-git-diff-submodules'
 import { testGitDiffRecursiveSubmodules } from './test-git-diff-recursive-submodules'
 import { testGitDiffStalenessAndSubmodule } from './test-git-diff-staleness-and-submodule'
+import { testGitDiffClickLatency } from './test-git-diff-click-latency'
 import { testGitStateMirrorLatency } from './test-git-state-mirror-latency'
 import { testGitNestedSubmodules } from './test-git-nested-submodules'
 import { testGitCrossPlatform } from './test-git-cross-platform'
@@ -523,6 +524,16 @@ export async function runAllTests(ctx: AutotestContext): Promise<void> {
       const results = await testGitDiffStalenessAndSubmodule(ctx)
       collectSuiteResults('GitDiffStalenessAndSubmodule', results)
       await ctx.reopenProjectEditor('phase5.49-cleanup')
+      await sleep(500)
+    }
+
+    if (!ctx.cancelled() && shouldRun('git-diff-click-latency')) {
+      log('phase5.493:begin')
+      await ctx.reopenProjectEditor('phase5.493-setup')
+      await sleep(300)
+      const results = await testGitDiffClickLatency(ctx)
+      collectSuiteResults('GitDiffClickLatency', results)
+      await ctx.reopenProjectEditor('phase5.493-cleanup')
       await sleep(500)
     }
 

@@ -333,12 +333,14 @@ body.git-diff-modal-resizing {
   }
 }
 
-/* working directory column */
+/* working directory column. Hosts the cwd path on the left and the
+ * diff-session action cluster (view-mode toggle, hunk navigation,
+ * jump-to-editor, refresh-changes) on the right. */
 .git-diff-cwd-bar {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 16px;
+  gap: 12px;
+  padding: 6px 16px;
   background-color: var(--bg-1);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
@@ -362,6 +364,29 @@ body.git-diff-modal-resizing {
   white-space: nowrap;
   cursor: text;
   user-select: text;
+}
+
+.git-diff-cwd-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+@media (max-width: 900px) {
+  .git-diff-cwd-bar {
+    flex-wrap: wrap;
+    padding-top: 8px;
+    padding-bottom: 8px;
+  }
+
+  .git-diff-cwd-bar-actions {
+    width: 100%;
+    margin-left: 0;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+  }
 }
 
 /* main body */
@@ -390,25 +415,37 @@ body.git-diff-modal-resizing {
   background-color: var(--bg-1);
 }
 
-/* Width adjustment drag bar */
+/* Width adjustment drag bar (file list <-> diff details).
+ * Always renders a faint 1px guide so users can locate the drag affordance
+ * at a glance; widens to a 2px accent bar on hover or while dragging. The
+ * 12px hit area lets the cursor latch onto the bar without pixel-precise
+ * aiming. */
 .git-diff-resizer {
   position: absolute;
-  right: -3px;
+  right: -6px;
   top: 0;
-  width: 6px;
+  width: 12px;
   height: 100%;
   cursor: col-resize;
   z-index: 10;
 }
 
-.git-diff-resizer:hover::after,
-body.git-diff-resizing .git-diff-resizer::after {
+.git-diff-resizer::after {
   content: '';
   position: absolute;
-  left: 2px;
+  left: 5px;
   top: 0;
-  width: 2px;
+  width: 1px;
   height: 100%;
+  background-color: color-mix(in srgb, var(--border-strong) 55%, transparent);
+  transition: background-color 0.12s ease, width 0.12s ease, left 0.12s ease;
+  pointer-events: none;
+}
+
+.git-diff-resizer:hover::after,
+body.git-diff-resizing .git-diff-resizer::after {
+  left: 5px;
+  width: 2px;
   background-color: var(--accent);
 }
 
@@ -419,6 +456,34 @@ body.git-diff-resizing {
 
 body.git-diff-resizing * {
   cursor: col-resize !important;
+}
+
+/* Monaco-internal split view divider between original and modified panes.
+ * Monaco renders a transparent .monaco-sash by default which is invisible
+ * unless hovered. We force a faint 1px guide to always show, then upgrade
+ * to a 2px accent bar on hover/active for parity with .git-diff-resizer. */
+.git-diff-monaco .monaco-sash.vertical {
+  background: transparent !important;
+}
+
+.git-diff-monaco .monaco-sash.vertical::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 0;
+  width: 1px;
+  height: 100%;
+  margin-left: -0.5px;
+  background-color: color-mix(in srgb, var(--border-strong) 55%, transparent);
+  transition: background-color 0.12s ease, width 0.12s ease, margin-left 0.12s ease;
+  pointer-events: none;
+}
+
+.git-diff-monaco .monaco-sash.vertical:hover::after,
+.git-diff-monaco .monaco-sash.vertical.active::after {
+  width: 2px;
+  margin-left: -1px;
+  background-color: var(--accent);
 }
 
 .git-diff-file-list-header {
@@ -855,6 +920,10 @@ body.git-diff-resizing * {
   background-color: color-mix(in srgb, var(--accent) 20%, transparent) !important;
 }
 
+/* Per-hunk action toolbar — Monaco content widget anchored ABOVE each hunk's
+ * first modified line. Always visible (no hover gating); each hunk owns its
+ * own toolbar so Stage / Revert / Unstage are reachable in a single click
+ * without the user having to discover any hidden interaction. */
 .git-diff-hunk-actions {
   display: inline-flex;
   align-items: center;
@@ -864,27 +933,39 @@ body.git-diff-resizing * {
   border-radius: 6px;
   background: var(--panel);
   box-shadow: var(--shadow-1);
-  transform: translateX(-78px);
-  opacity: 0.92;
+  white-space: nowrap;
+  z-index: 4;
+  pointer-events: auto;
+  transform: translateY(2px);
 }
 
-.git-diff-hunk-actions:hover {
-  opacity: 1;
+.git-diff-hunk-actions:hover,
+.git-diff-hunk-actions:focus-within {
+  border-color: var(--border-strong);
 }
 
 .git-diff-hunk-action-button {
   appearance: none;
   -webkit-appearance: none;
-  height: 20px;
-  padding: 0 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 8px;
   border: 1px solid transparent;
   border-radius: 4px;
   background: transparent;
   color: var(--text-2);
   cursor: pointer;
   font-family: inherit;
-  font-size: 10px;
+  font-size: 11px;
+  font-weight: 500;
   line-height: 1;
+  transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+
+.git-diff-hunk-action-button svg {
+  flex: 0 0 auto;
 }
 
 .git-diff-hunk-action-button.success {
@@ -897,7 +978,16 @@ body.git-diff-resizing * {
 
 .git-diff-hunk-action-button:hover {
   border-color: currentColor;
-  background: color-mix(in srgb, currentColor 12%, transparent);
+  background: color-mix(in srgb, currentColor 14%, transparent);
+}
+
+.git-diff-hunk-action-button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);
+  outline-offset: 1px;
+}
+
+.git-diff-hunk-action-label {
+  white-space: nowrap;
 }
 
 /* Tag not saved */
@@ -916,6 +1006,49 @@ body.git-diff-resizing * {
   justify-content: flex-end;
   gap: 6px;
   flex-wrap: wrap;
+}
+
+/* Side-by-side / Inline / Auto toggle — segmented control in the top
+ * git-diff header, sitting alongside prev/next change nav, jump-to-editor,
+ * and refresh-changes. Mirrors the file-list view-toggle for visual
+ * consistency. */
+.git-diff-split-mode-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-2);
+  flex-shrink: 0;
+}
+
+.git-diff-split-mode-button {
+  appearance: none;
+  -webkit-appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+}
+
+.git-diff-split-mode-button:hover {
+  color: var(--text-1);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.git-diff-split-mode-button.active {
+  color: var(--text-1);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
 }
 
 .git-diff-action-bar,

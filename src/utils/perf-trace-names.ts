@@ -225,6 +225,12 @@ export const PERF_TRACE_EVENT = {
   MAIN_GIT_DIFF_CACHE_INVALIDATE: 'main:git.diff.cache-invalidate',
   MAIN_GIT_DIFF_FS_WATCH_EVENT: 'main:git.diff.fs-watch-event',
   MAIN_GIT_DIFF_SUBMODULE_FILTER: 'main:git.diff.submodule-filter',
+  MAIN_GIT_DIFF_CONTENT_CACHE_HIT: 'main:git.diff.content-cache.hit',
+  MAIN_GIT_DIFF_CONTENT_CACHE_MISS: 'main:git.diff.content-cache.miss',
+  MAIN_GIT_DIFF_CONTENT_CACHE_INVALIDATE_PROJECT: 'main:git.diff.content-cache.invalidate-project',
+  MAIN_GIT_DIFF_CONTENT_CACHE_INVALIDATE_LRU: 'main:git.diff.content-cache.invalidate-lru',
+  MAIN_GIT_DIFF_PRECOMPUTE_SCHEDULE: 'main:git.diff.precompute.schedule',
+  MAIN_GIT_DIFF_PRECOMPUTE_SKIP_TOO_LARGE: 'main:git.diff.precompute.skip-too-large',
   RENDERER_SUBPAGE_FRESHNESS_CHECK: 'renderer:subpage.freshness-check',
 
   // ───────── Main process — Git Repository Snapshot Service ─────────
@@ -284,6 +290,7 @@ export const PERF_TRACE_EVENT = {
   RENDERER_GIT_DIFF_BODY_RENDERED: 'renderer:git-diff.body-rendered',
   RENDERER_GIT_DIFF_FILE_LIST_MODE_CHANGE: 'renderer:git-diff.file-list-mode-change',
   RENDERER_GIT_DIFF_JUMP_TO_EDITOR: 'renderer:git-diff.jump-to-editor',
+  RENDERER_GIT_DIFF_SPLIT_MODE_TOGGLE: 'renderer:git-diff.split-mode-toggle',
   RENDERER_PROJECT_EDITOR_JUMP_TO_DIFF: 'renderer:project-editor.jump-to-diff'
 } as const
 

@@ -110,5 +110,17 @@ if ! grep -q "GSM-00-fixture-loaded" "$LOG_FILE"; then
   exit 1
 fi
 
+if ! grep -q "GSM-13-trace-marker-mirror-events-expected" "$LOG_FILE"; then
+  echo "Missing GSM-13 marker; the mirror trace coverage test did not run to completion" >&2
+  tail -n 40 "$LOG_FILE" >&2
+  exit 1
+fi
+
+if ! grep -q "git-state-mirror-latency:done" "$LOG_FILE"; then
+  echo "Missing git-state-mirror-latency:done marker; the suite did not finish cleanly" >&2
+  tail -n 40 "$LOG_FILE" >&2
+  exit 1
+fi
+
 echo "Git State Mirror latency autotest passed"
 echo "  Log: $LOG_FILE"

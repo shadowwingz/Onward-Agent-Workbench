@@ -44,6 +44,12 @@ import { FileWatchManager } from './file-watch-manager'
 import { ImageWatchManager } from './image-watch-manager'
 import { ProjectTreeWatchManager } from './project-tree-watch-manager'
 import { gitDiffCacheInvalidator } from './git-diff-cache-invalidator'
+import {
+  fetchFileContentWithCache,
+  gitDiffContentCache,
+  gitDiffPrecomputeScheduler,
+  installContentCacheInvalidatorOnce
+} from './git-diff-content-cache-wiring'
 import { gitStateMirrorRouter } from './git-state-mirror-router'
 import { getUpdateService } from './update-service'
 import { perfTraceLogger } from './perf-trace-logger'
@@ -480,6 +486,11 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     if (mainWindow.isDestroyed()) return
     mainWindow.webContents.send(IPC.GIT_DIFF_CACHE_INVALIDATED, cwd, reason)
   })
+
+  // Content cache + precompute scheduler. Subscribes to the same invalidator
+  // signal above so per-project file-body cache stays in sync with fs.watch
+  // and the GitStateMirror's HEAD-change deltas.
+  installContentCacheInvalidatorOnce()
 
   ipcMain.on(IPC.DEBUG_LOG, (_event, payload: { message?: string; data?: unknown }) => {
     log('[RendererDebug]', payload?.message ?? '', payload?.data ?? '')
@@ -1508,6 +1519,12 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     // cwd when the path is not a git repo.
     if (result?.cwd) {
       gitDiffCacheInvalidator.registerWatch(result.cwd)
+      // Cold-start prefetch: the GitStateMirror's mirror-update is the
+      // primary trigger, but the very first `getDiff` call after launch
+      // happens before the mirror has emitted anything. Kick the scheduler
+      // here so the user's first click on a file already finds a warm cache.
+      // Idempotent: the scheduler debounces internally.
+      gitDiffPrecomputeScheduler.onProjectInvalidated(result.cwd)
     } else {
       gitDiffCacheInvalidator.registerWatch(cwd)
     }
@@ -1528,11 +1545,13 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     return await gitIpcWorkerClient.getHistoryFileContent(cwd, options)
   })
 
-  // Get Git file content for diff view
+  // Get Git file content for diff view. Goes through the per-project content
+  // cache so repeat clicks (and clicks on files the precompute scheduler has
+  // already fetched) return in microseconds without touching the worker.
   ipcMain.handle(IPC.GIT_GET_FILE_CONTENT, async (_, cwd: string, file: Pick<GitFileStatus, 'filename' | 'status' | 'originalFilename' | 'changeType' | 'isSubmoduleEntry'>, repoRoot?: string) => {
     const startedAt = Date.now()
     try {
-      const result = await gitIpcWorkerClient.getFileContent(cwd, file, repoRoot)
+      const result = await fetchFileContentWithCache({ cwd, file, repoRoot })
       perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_IPC_GIT_GET_FILE_CONTENT, {
         cwd,
         repoRoot,
@@ -1559,20 +1578,48 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   })
 
   // Save file content to workspace
+  // Mutating IPCs (stage / unstage / discard / save / index update) all
+  // change the git working tree or index in ways that the renderer-facing
+  // diff view depends on. fs.watch in `gitDiffCacheInvalidator` excludes
+  // `.git/**` events, so .git/index changes don't fire its listener and
+  // our content cache would otherwise serve a pre-mutation snapshot until
+  // the next non-`.git` file event. Wipe the project bucket explicitly
+  // after every successful mutation so the next click refetches fresh.
+  const invalidateContentCacheForProject = (project: string | undefined | null) => {
+    if (!project) return
+    const dropped = gitDiffContentCache.invalidateProject(project)
+    if (dropped > 0) {
+      perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_GIT_DIFF_CONTENT_CACHE_INVALIDATE_PROJECT, {
+        project,
+        reason: 'mutation',
+        droppedEntries: dropped
+      })
+    }
+    gitDiffPrecomputeScheduler.onProjectInvalidated(project)
+  }
+
   ipcMain.handle(IPC.GIT_SAVE_FILE_CONTENT, async (_, cwd: string, filename: string, content: string) => {
-    return await gitIpcWorkerClient.saveFileContent(cwd, filename, content)
+    const result = await gitIpcWorkerClient.saveFileContent(cwd, filename, content)
+    invalidateContentCacheForProject(cwd)
+    return result
   })
 
   ipcMain.handle(IPC.GIT_STAGE_FILE, async (_, cwd: string, filename: string, repoRoot?: string) => {
-    return await gitIpcWorkerClient.stageFile(cwd, filename, repoRoot)
+    const result = await gitIpcWorkerClient.stageFile(cwd, filename, repoRoot)
+    invalidateContentCacheForProject(repoRoot ?? cwd)
+    return result
   })
 
   ipcMain.handle(IPC.GIT_UNSTAGE_FILE, async (_, cwd: string, filename: string, repoRoot?: string) => {
-    return await gitIpcWorkerClient.unstageFile(cwd, filename, repoRoot)
+    const result = await gitIpcWorkerClient.unstageFile(cwd, filename, repoRoot)
+    invalidateContentCacheForProject(repoRoot ?? cwd)
+    return result
   })
 
   ipcMain.handle(IPC.GIT_DISCARD_FILE, async (_, cwd: string, file: Pick<GitFileStatus, 'filename' | 'changeType' | 'status' | 'isSubmoduleEntry'>, repoRoot?: string) => {
-    return await gitIpcWorkerClient.discardFile(cwd, file, repoRoot)
+    const result = await gitIpcWorkerClient.discardFile(cwd, file, repoRoot)
+    invalidateContentCacheForProject(repoRoot ?? cwd)
+    return result
   })
 
   ipcMain.handle(IPC.GIT_GET_SUBMODULES, async (_, cwd: string) => {
@@ -1580,7 +1627,9 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   })
 
   ipcMain.handle(IPC.GIT_UPDATE_INDEX_CONTENT, async (_, cwd: string, filename: string, content: string) => {
-    return await gitIpcWorkerClient.updateIndexContent(cwd, filename, content)
+    const result = await gitIpcWorkerClient.updateIndexContent(cwd, filename, content)
+    invalidateContentCacheForProject(cwd)
+    return result
   })
 
   // Get terminal's current working directory

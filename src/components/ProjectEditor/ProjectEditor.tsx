@@ -7,7 +7,7 @@ import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, use
 import { createPortal } from 'react-dom'
 import { Editor } from '@monaco-editor/react'
 import DOMPurify from 'dompurify'
-import type { GitDiffResult, GitFileStatus, ProjectEntry } from '../../types/electron'
+import type { GitDiffResult, ProjectEntry } from '../../types/electron'
 import type { FileViewMemory, ProjectEditorState } from '../../types/tab.d.ts'
 import { useSettings } from '../../contexts/SettingsContext'
 import { useAppState } from '../../hooks/useAppState'
@@ -75,6 +75,12 @@ import {
   getParentPath
 } from './quickFileUtils'
 import { createThemedSetiFileIconResolver, sanitizeSetiSvgOnce } from './setiFileIconTheme'
+import {
+  buildDiffReturnBarState,
+  findDiffFileForEditorPath,
+  resolveNavigationFilePath,
+  type DiffJumpTarget
+} from './diffJumpState'
 import { performanceTrace } from '../../utils/performance-trace'
 import './ProjectEditor.css'
 
@@ -236,55 +242,6 @@ function normalizeComparablePath(value: string): string {
     : normalized
 }
 
-function resolveNavigationFilePath(params: {
-  editorRoot: string
-  filePath: string
-  repoRoot: string | null
-}): string | null {
-  const normalizedRoot = trimTrailingPathSeparators(normalizePath(params.editorRoot))
-  const normalizedFilePath = normalizePath(params.filePath).replace(/^\/+/, '')
-  const normalizedRepoRoot = params.repoRoot
-    ? trimTrailingPathSeparators(normalizePath(params.repoRoot))
-    : normalizedRoot
-  if (!normalizedRoot || !normalizedFilePath || !normalizedRepoRoot) return null
-
-  const absoluteTargetPath = trimTrailingPathSeparators(`${normalizedRepoRoot}/${normalizedFilePath}`)
-  const comparableRoot = normalizeComparablePath(normalizedRoot)
-  const comparableTarget = normalizeComparablePath(absoluteTargetPath)
-
-  if (comparableTarget === comparableRoot) return null
-  if (!comparableTarget.startsWith(`${comparableRoot}/`)) return null
-
-  const relativePath = absoluteTargetPath.slice(normalizedRoot.length + 1)
-  return relativePath || null
-}
-
-function joinProjectPath(root: string | null | undefined, relativePath: string | null | undefined): string | null {
-  if (!root || !relativePath) return null
-  const normalizedRoot = trimTrailingPathSeparators(normalizePath(root))
-  const normalizedRelative = normalizePath(relativePath).replace(/^\/+/, '')
-  if (!normalizedRoot || !normalizedRelative) return null
-  return `${normalizedRoot}/${normalizedRelative}`
-}
-
-function findDiffFileForEditorPath(
-  diff: GitDiffResult | null,
-  editorRoot: string | null,
-  editorFilePath: string | null
-): GitFileStatus | null {
-  if (!diff?.success || !editorRoot || !editorFilePath) return null
-  const targetAbsolute = joinProjectPath(editorRoot, editorFilePath)
-  if (!targetAbsolute) return null
-  const comparableTarget = normalizeComparablePath(targetAbsolute)
-  for (const file of diff.files) {
-    const fileAbsolute = joinProjectPath(file.repoRoot || diff.cwd, file.filename)
-    if (fileAbsolute && normalizeComparablePath(fileAbsolute) === comparableTarget) {
-      return file
-    }
-  }
-  return null
-}
-
 // Quick-file pure functions imported from ./quickFileUtils
 
 type ProjectEditorScope = {
@@ -297,12 +254,6 @@ type DiffReturnContext = {
   filePath: string | null
   repoRoot: string | null
   createdAt: number
-}
-
-type DiffJumpTarget = {
-  filename: string
-  repoRoot: string | null
-  changeType: GitFileStatus['changeType']
 }
 
 type PreviewScrollMemory = {
@@ -1035,22 +986,23 @@ export function ProjectEditor({
   const markdownPurifyLogCountRef = useRef(0)
   const profileRunRef = useRef(false)
   const autotestRunRef = useRef(false)
+  const autotestBootstrapLogRef = useRef<string | null>(null)
   const openGitDiffRef = useRef<(source?: 'user' | 'debug', target?: { filePath?: string | null; repoRoot?: string | null }) => Promise<void>>(async () => {})
   const lastHandledOpenRequestRef = useRef<number | null>(null)
   const [diffReturnContext, setDiffReturnContext] = useState<DiffReturnContext | null>(null)
   const diffReturnContextRef = useRef<DiffReturnContext | null>(null)
   const [diffJumpTarget, setDiffJumpTarget] = useState<DiffJumpTarget | null>(null)
   const diffJumpTargetRef = useRef<DiffJumpTarget | null>(null)
+  const setDiffJumpTargetValue = useCallback((nextTarget: DiffJumpTarget | null) => {
+    diffJumpTargetRef.current = nextTarget
+    setDiffJumpTarget(nextTarget)
+  }, [])
   const [diffJumpChecking, setDiffJumpChecking] = useState(false)
   const diffJumpCheckTokenRef = useRef(0)
 
   useEffect(() => {
     diffReturnContextRef.current = diffReturnContext
   }, [diffReturnContext])
-
-  useEffect(() => {
-    diffJumpTargetRef.current = diffJumpTarget
-  }, [diffJumpTarget])
 
   const originalContentRef = useRef('')
   const originalModelVersionRef = useRef<number | null>(null)
@@ -1092,6 +1044,10 @@ export function ProjectEditor({
   const mermaidRenderInFlightRef = useRef(false)
   const openFileTokenRef = useRef(0)
   const activeFilePathRef = useRef<string | null>(null)
+  const setActiveFilePathValue = useCallback((nextPath: string | null) => {
+    activeFilePathRef.current = nextPath
+    setActiveFilePath(nextPath)
+  }, [])
   const isBinaryRef = useRef(false)
   const isImageRef = useRef(false)
   const isSqliteRef = useRef(false)
@@ -2426,9 +2382,6 @@ export function ProjectEditor({
       fileContentRef.current = ''
     }
     openFileTokenRef.current += 1
-    if (!preserveContent) {
-      activeFilePathRef.current = null
-    }
     isBinaryRef.current = false
     isImageRef.current = false
     isSqliteRef.current = false
@@ -2439,7 +2392,7 @@ export function ProjectEditor({
     markdownWorkerQueuedRef.current = false
     setSelectedPath(null)
     if (!preserveContent) {
-      setActiveFilePath(null)
+      setActiveFilePathValue(null)
     }
     // NOTE: pinnedFiles and recentFiles are persistent metadata scoped to the
     // editor session — they must NOT be cleared here.  Callers that genuinely
@@ -2479,7 +2432,7 @@ export function ProjectEditor({
     if (DEBUG_PROJECT_EDITOR) {
       debugLog('reset:done', { activeFilePath: null })
     }
-  }, [cancelFileTreeRestoreFrame, cancelMarkdownIdle, resetPreviewRestoreState, updatePreviewActiveSlug])
+  }, [cancelFileTreeRestoreFrame, cancelMarkdownIdle, resetPreviewRestoreState, setActiveFilePathValue, updatePreviewActiveSlug])
 
   const clearActiveFileState = useCallback((options?: { preserveMissingNotice?: boolean }) => {
     cancelFileTreeRestoreFrame()
@@ -2505,7 +2458,6 @@ export function ProjectEditor({
     originalModelVersionRef.current = null
     fileContentRef.current = ''
     openFileTokenRef.current += 1
-    activeFilePathRef.current = null
     isBinaryRef.current = false
     isImageRef.current = false
     isSqliteRef.current = false
@@ -2515,7 +2467,7 @@ export function ProjectEditor({
     markdownWorkerInFlightRef.current = false
     markdownWorkerQueuedRef.current = false
     setSelectedPath(null)
-    setActiveFilePath(null)
+    setActiveFilePathValue(null)
     setFileContent('')
     setIsBinary(false)
     setIsImage(false)
@@ -2787,10 +2739,6 @@ export function ProjectEditor({
   useEffect(() => {
     markdownRenderAllowedRef.current = isMarkdownRenderAllowed
   }, [isMarkdownRenderAllowed])
-
-  useEffect(() => {
-    activeFilePathRef.current = activeFilePath
-  }, [activeFilePath])
 
   useEffect(() => {
     isBinaryRef.current = isBinary
@@ -3649,6 +3597,10 @@ export function ProjectEditor({
       return
     }
 
+    if (diffReturnContextRef.current) {
+      setDiffJumpTargetValue(null)
+    }
+
     // Save ALL state for the old file in one call
     if (currentActiveFilePath) {
       saveCurrentFileMemory()
@@ -3691,8 +3643,7 @@ export function ProjectEditor({
         if (options?.missingBehavior === 'empty-state') {
           clearActiveFileState({ preserveMissingNotice: true })
         } else {
-          setActiveFilePath(path)
-          activeFilePathRef.current = path
+          setActiveFilePathValue(path)
           setSelectedPath(path)
           setIsBinary(false)
           isBinaryRef.current = false
@@ -3754,8 +3705,7 @@ export function ProjectEditor({
     if (options?.suppressFileBrowserReveal || source === 'restore') {
       suppressNextRevealRef.current = true
     }
-    setActiveFilePath(path)
-    activeFilePathRef.current = path
+    setActiveFilePathValue(path)
     setSelectedPath(path)
     if (source === 'user' && options?.trackRecent) {
       touchRecentFile(path)
@@ -3920,6 +3870,8 @@ export function ProjectEditor({
     removeQuickFileEntries,
     resetPreviewRestoreState,
     scheduleProjectStateSave,
+    setActiveFilePathValue,
+    setDiffJumpTargetValue,
     showStatus,
     syncOriginalVersion,
     applyMarkdownSessionCacheHit,
@@ -4043,14 +3995,13 @@ export function ProjectEditor({
       restoringStateRef.current = false
       setTree([])
       setSelectedPath(null)
-      setActiveFilePath(null)
+      setActiveFilePathValue(null)
       setPinnedFiles([])
       setRecentFiles([])
       setDraggingPinnedPath(null)
       setDraggingQuickPath(null)
       setDraggingQuickSource(null)
       setDragOverPinnedPath(null)
-      activeFilePathRef.current = null
       setFileContent('')
       fileContentRef.current = ''
       setIsBinary(false)
@@ -4130,7 +4081,7 @@ export function ProjectEditor({
     rootRef.current = effectiveCwd
     setSearchResults([])
     void loadRoot(effectiveCwd)
-  }, [cwd, isOpen, loadRoot, resetActiveFileState, t])
+  }, [cwd, isOpen, loadRoot, resetActiveFileState, setActiveFilePathValue, t])
 
   useEffect(() => {
     if (!isOpen || !rootPath) return
@@ -4166,7 +4117,8 @@ export function ProjectEditor({
     const navigationPath = resolveNavigationFilePath({
       editorRoot: rootPath,
       filePath: openRequest.filePath,
-      repoRoot: openRequest.repoRoot
+      repoRoot: openRequest.repoRoot,
+      platform: window.electronAPI.platform
     })
 
     if (!navigationPath) {
@@ -4189,13 +4141,13 @@ export function ProjectEditor({
   useEffect(() => {
     if (isOpen) return
     setDiffReturnContext(null)
-    setDiffJumpTarget(null)
+    setDiffJumpTargetValue(null)
     setDiffJumpChecking(false)
-  }, [isOpen])
+  }, [isOpen, setDiffJumpTargetValue])
 
   useEffect(() => {
     if (!isOpen || !diffReturnContext || !rootPath || !activeFilePath) {
-      setDiffJumpTarget(null)
+      setDiffJumpTargetValue(null)
       setDiffJumpChecking(false)
       return
     }
@@ -4206,8 +4158,13 @@ export function ProjectEditor({
     void window.electronAPI.git.getDiff(rootPath, { scope: 'full' })
       .then((result) => {
         if (diffJumpCheckTokenRef.current !== token) return
-        const match = findDiffFileForEditorPath(result as GitDiffResult, rootPath, activeFilePath)
-        setDiffJumpTarget(match
+        const match = findDiffFileForEditorPath({
+          diff: result as GitDiffResult,
+          editorRoot: rootPath,
+          editorFilePath: activeFilePath,
+          platform: window.electronAPI.platform
+        })
+        setDiffJumpTargetValue(match
           ? {
               filename: match.filename,
               repoRoot: match.repoRoot || (result as GitDiffResult).cwd || rootPath,
@@ -4217,7 +4174,7 @@ export function ProjectEditor({
       })
       .catch(() => {
         if (diffJumpCheckTokenRef.current === token) {
-          setDiffJumpTarget(null)
+          setDiffJumpTargetValue(null)
         }
       })
       .finally(() => {
@@ -4225,7 +4182,7 @@ export function ProjectEditor({
           setDiffJumpChecking(false)
         }
       })
-  }, [activeFilePath, diffReturnContext, isOpen, rootPath])
+  }, [activeFilePath, diffReturnContext, isOpen, rootPath, setDiffJumpTargetValue])
 
   useEffect(() => {
     const currentScope = buildProjectEditorScope(_terminalId, cwd ?? rootRef.current ?? null)
@@ -4261,8 +4218,7 @@ export function ProjectEditor({
       const subpageReturn = subpageReturnFileRef.current
       if (subpageReturn && isSameProjectEditorScope(subpageReturn.scope, currentScope)) {
         subpageReturnFileRef.current = null
-        activeFilePathRef.current = subpageReturn.path
-        setActiveFilePath(subpageReturn.path)
+        setActiveFilePathValue(subpageReturn.path)
         fileContentRef.current = subpageReturn.content
         setFileContent(subpageReturn.content)
         isBinaryRef.current = subpageReturn.isBinary
@@ -4303,7 +4259,7 @@ export function ProjectEditor({
       }
     }
     wasOpenRef.current = true
-  }, [beginPreviewRestore, cwd, getProjectEditorState, isOpen, persistProjectEditorState, resetPreviewRestoreState, _terminalId])
+  }, [beginPreviewRestore, cwd, getProjectEditorState, isOpen, persistProjectEditorState, resetPreviewRestoreState, setActiveFilePathValue, _terminalId])
 
   useEffect(() => {
     const flushProjectEditorBeforeUnload = () => {
@@ -5846,11 +5802,10 @@ export function ProjectEditor({
       isOpen: () => isOpenRef.current,
       getRootPath: () => rootRef.current,
       getActiveFilePath: () => activeFilePathRef.current,
-      getDiffReturnBarState: () => ({
-        visible: Boolean(diffReturnContextRef.current),
-        backEnabled: Boolean(diffReturnContextRef.current),
-        jumpEnabled: Boolean(diffJumpTargetRef.current) && !diffJumpChecking,
-        checking: diffJumpChecking,
+      getDiffReturnBarState: () => buildDiffReturnBarState({
+        hasDiffReturnContext: Boolean(diffReturnContextRef.current),
+        diffJumpTarget: diffJumpTargetRef.current,
+        diffJumpChecking,
         activeFilePath: activeFilePathRef.current
       }),
       triggerDiffReturnBack: async () => handleBackToDiff(),
@@ -6376,9 +6331,33 @@ export function ProjectEditor({
 
   useEffect(() => {
     if (!window.electronAPI?.debug?.autotest) return
-    if (!isOpen || !rootPath || rootError) return
-    if (tree.length === 0) return
+    const logBootstrap = (reason: string) => {
+      const payload = {
+        reason,
+        isOpen,
+        hasRootPath: Boolean(rootPath),
+        rootError: rootError ?? null,
+        treeLength: tree.length,
+        alreadyRan: autotestRunRef.current,
+        suite: window.electronAPI.debug.autotestSuite ?? null,
+        cwd: window.electronAPI.debug.autotestCwd ?? null
+      }
+      const signature = JSON.stringify(payload)
+      if (autotestBootstrapLogRef.current === signature) return
+      autotestBootstrapLogRef.current = signature
+      console.log('[AutoTest] bootstrap', payload)
+      window.electronAPI.debug.log('[AutoTest] bootstrap', payload)
+    }
+    if (!isOpen || !rootPath || rootError) {
+      logBootstrap('waiting-for-open-root')
+      return
+    }
+    if (tree.length === 0) {
+      logBootstrap('waiting-for-tree')
+      return
+    }
     if (autotestRunRef.current) return
+    logBootstrap('starting')
     autotestRunRef.current = true
 
     const log = (message: string, data?: unknown) => {
@@ -6398,10 +6377,13 @@ export function ProjectEditor({
       intervalMs = 80
     ) => {
       const start = performance.now()
-      while (performance.now() - start < timeoutMs) {
+      while (true) {
         if (predicate()) return true
-        await sleep(intervalMs)
+        const elapsed = performance.now() - start
+        if (elapsed >= timeoutMs) break
+        await sleep(Math.min(intervalMs, Math.max(0, timeoutMs - elapsed)))
       }
+      if (predicate()) return true
       log('timeout', { label, timeoutMs })
       return false
     }
@@ -6831,12 +6813,10 @@ export function ProjectEditor({
 
     if (activeFilePath) {
       if (activeFilePath === sourcePath) {
-        setActiveFilePath(nextPath)
-        activeFilePathRef.current = nextPath
+        setActiveFilePathValue(nextPath)
       } else if (activeFilePath.startsWith(`${sourcePath}/`)) {
         const replacedPath = activeFilePath.replace(sourcePath, nextPath)
-        setActiveFilePath(replacedPath)
-        activeFilePathRef.current = replacedPath
+        setActiveFilePathValue(replacedPath)
       }
     }
     replaceQuickFileEntries(sourcePath, nextPath)
@@ -6845,7 +6825,7 @@ export function ProjectEditor({
     fileIndexRenameFile(root, sourcePath, nextPath)
     void window.electronAPI.project.invalidateFileIndex(root)
     showStatus('success', t('projectEditor.renameSuccess'))
-  }, [activeFilePath, refreshDirectory, replaceQuickFileEntries, requestPrompt, selectedPath, showStatus, t, tree])
+  }, [activeFilePath, refreshDirectory, replaceQuickFileEntries, requestPrompt, selectedPath, setActiveFilePathValue, showStatus, t, tree])
 
   const handleDelete = useCallback(async (targetPathOverride?: string) => {
     const root = rootRef.current
@@ -6875,8 +6855,7 @@ export function ProjectEditor({
 
     if (activeFilePath) {
       if (activeFilePath === targetPath || activeFilePath.startsWith(`${targetPath}/`)) {
-        setActiveFilePath(null)
-        activeFilePathRef.current = null
+        setActiveFilePathValue(null)
         setFileContent('')
         fileContentRef.current = ''
         setIsBinary(false)
@@ -6899,7 +6878,7 @@ export function ProjectEditor({
     fileIndexRemoveFile(root, targetPath)
     void window.electronAPI.project.invalidateFileIndex(root)
     showStatus('success', t('projectEditor.deleteSuccess'))
-  }, [activeFilePath, refreshDirectory, removeQuickFileEntries, requestConfirm, selectedPath, showStatus, t, tree])
+  }, [activeFilePath, refreshDirectory, removeQuickFileEntries, requestConfirm, selectedPath, setActiveFilePathValue, showStatus, t, tree])
 
   const handleResizeMouseDown = useCallback((event: React.MouseEvent) => {
     event.preventDefault()

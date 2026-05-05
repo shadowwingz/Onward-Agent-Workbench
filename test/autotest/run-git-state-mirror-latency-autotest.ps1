@@ -93,6 +93,18 @@ try {
     exit 1
   }
 
+  if (-not (Select-String -Path $LogFile -Pattern 'GSM-13-trace-marker-mirror-events-expected' -Quiet)) {
+    Write-Host 'Missing GSM-13 marker; the mirror trace coverage test did not run to completion'
+    Get-Content $LogFile -Tail 40 | Out-Host
+    exit 1
+  }
+
+  if (-not (Select-String -Path $LogFile -Pattern 'git-state-mirror-latency:done' -Quiet)) {
+    Write-Host 'Missing git-state-mirror-latency:done marker; the suite did not finish cleanly'
+    Get-Content $LogFile -Tail 40 | Out-Host
+    exit 1
+  }
+
   Write-Host 'Git State Mirror latency autotest passed'
   Write-Host "  Log: $LogFile"
 
