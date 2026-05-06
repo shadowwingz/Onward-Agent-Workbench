@@ -77,12 +77,9 @@ point at files under `test/unittest/`.
 | Bug fix: focus does not jump viewport (preventScroll) | `run-terminal-autofollow` (TA-12) |
 | Terminal focus / activation across shortcuts and restore | `run-terminal-focus-activation` (TFA-01..TFA-08) |
 | Renderer surface restored after a `simulateRendererSurfaceLoss` deactivate (legacy code path) | `run-terminal-focus-activation` (TFA-09) |
-| Bug fix: blank Task + broken-image after macOS Spaces / Win virtual desktop swipe — phantom-blank canvas re-rendered after a host surface event (path B `clearTextureAtlas` + `terminal.refresh`) | `run-terminal-focus-activation` (TFA-10, TFA-11, TFA-12) |
-| Bug fix: `webglcontextlost` handler must call `event.preventDefault()` so Chromium fires `webglcontextrestored` after a real GPU loss | `run-terminal-focus-activation` (TFA-13) |
-| Bug fix: lost handler must NOT synchronously dispose the addon — that tears the WebGL canvas + restored listener out of the DOM and strands recovery | `run-terminal-focus-activation` (TFA-14) |
-| Bug fix: full real `WEBGL_lose_context` lost+restored round-trip recovers renderable pixels (canvas-level listeners, defer ensureWebgl while `gl.isContextLost`, dispose+recreate on restored, force `terminal.refresh`) | `run-terminal-focus-activation` (TFA-15) |
-| Bug fix: host surface event interleaved with a still-lost context defers `ensureWebgl` instead of spawning a dead-context addon | `run-terminal-focus-activation` (TFA-16) |
-| Bug fix: 3 repeated lost+restored cycles stay stable (each successful `ensureWebgl` resets the failure counter, no listener / cooldown / addon accumulation) | `run-terminal-focus-activation` (TFA-17) |
+| Bug fix: blank Task + broken-image after macOS Spaces / Win virtual desktop swipe — phantom-blank canvas re-rendered after a host surface event (path B `clearTextureAtlas` + `terminal.refresh`) and real WebGL context loss follows VS Code-aligned DOM fallback semantics | `run-terminal-focus-activation` (TFA-10..TFA-18) |
+| Bug fix: xterm `webglcontextlost` handling calls `event.preventDefault()`, then `WebglAddon.onContextLoss` disposes WebGL and keeps terminal content visible through DOM rendering | `run-terminal-focus-activation` (TFA-13, TFA-14, TFA-15) |
+| Bug fix: host surface events and later old-canvas restore events do not recreate or disturb WebGL while cooldown-backed DOM fallback is active | `run-terminal-focus-activation` (TFA-16, TFA-17, TFA-18) |
 | Terminal output rendering perf (frame budget, longtask) | `run-terminal-perf` (TP-*) |
 | Multi-task terminal stress under concurrent output | `run-terminal-stress` (ST-*) |
 | Off-renderer scheduling architecture invariants | `run-terminal-architecture-baseline` (TAB-00, TAB-01) |

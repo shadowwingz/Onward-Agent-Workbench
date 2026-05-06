@@ -1187,6 +1187,20 @@ export class TerminalSessionManager {
     this.scheduleVisibleRendererSurfaceRestore(reason)
   }
 
+  suspendVisibleRendererSurfaces(reason: 'document-hidden' | 'hidden' = 'document-hidden'): number {
+    let suspended = 0
+
+    for (const session of this.sessions.values()) {
+      if (!session.visible || !session.open || session.status === 'disposed') continue
+      const result = session.renderer.deactivate(reason)
+      if (result.changedRenderer) {
+        suspended += 1
+      }
+    }
+
+    return suspended
+  }
+
   scheduleVisibleRendererSurfaceRestore(reason: TerminalRendererSurfaceEvent): void {
     if (this.surfaceRestoreTimeoutId !== null) {
       window.clearTimeout(this.surfaceRestoreTimeoutId)

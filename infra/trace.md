@@ -415,6 +415,17 @@ so every call through `window.electronAPI.<domain>.<method>()` gets a
 | `RENDERER_MONACO_VIEWSTATE_RESTORE` | `renderer:monaco.viewstate-restore` | `X` | `ProjectEditor.tsx::editor.restoreViewState` |
 | `RENDERER_XTERM_WEBGL_INIT` | `renderer:xterm.webgl-context-init` | `X` | `src/components/Terminal/Terminal.tsx` WebGL addon attach |
 
+#### Terminal renderer surface lifecycle
+
+| Constant | Name | Phase | Call site |
+|---|---|---|---|
+| `RENDERER_XTERM_RENDERER_CONTEXT_LOST` | `renderer:xterm.renderer.context-lost` | `i` | `terminal-renderer-lifecycle.ts` xterm `WebglAddon.onContextLoss` callback; enters the VS Code-aligned DOM fallback path |
+| `RENDERER_XTERM_RENDERER_RESTORE_DEFERRED` | `renderer:xterm.renderer.restore-deferred` | `i` | Same file, `ensureWebgl()` defers while cooldown makes WebGL unsafe |
+| `RENDERER_XTERM_RENDERER_CONTEXT_LOSS_FALLBACK` | `renderer:xterm.renderer.context-loss-fallback` | `i` | Same file, DOM fallback path after xterm reports an unrecovered context loss; tagged with `trigger`, `changedRenderer`, `cooldownMs` |
+| `RENDERER_XTERM_RENDERER_ENSURE_WEBGL` | `renderer:xterm.renderer.ensure-webgl` | `i` | Same file, WebGL addon attach / attach failure |
+| `RENDERER_XTERM_RENDERER_DISPOSE_WEBGL` | `renderer:xterm.renderer.dispose-webgl` | `i` | Same file, WebGL addon dispose; `reason=document-hidden` means host page visibility released GPU ownership |
+| `RENDERER_XTERM_RENDERER_FAILURE` | `renderer:xterm.renderer.failure` | `i` | Same file, WebGL attach failures and cooldown accounting |
+
 #### User-input hot paths (wired)
 
 | Constant | Name | Phase | Call site |

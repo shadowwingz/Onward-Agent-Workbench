@@ -847,7 +847,9 @@ export const TerminalGrid = memo(function TerminalGrid({
     }
 
     const handleVisibilityChange = () => {
-      if (!document.hidden) {
+      if (document.hidden) {
+        terminalSessionManager.suspendVisibleRendererSurfaces('document-hidden')
+      } else {
         notifySurfaceEvent('document-visible')
       }
     }

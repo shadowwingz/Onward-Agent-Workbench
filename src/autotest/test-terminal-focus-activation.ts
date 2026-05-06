@@ -12,6 +12,7 @@ const SURFACE_IDLE_SAMPLE_MS = 160
 const SURFACE_IDLE_STABLE_SAMPLE_COUNT = 4
 const SURFACE_LOSS_TIMEOUT_MS = 1000
 const SURFACE_RESTORE_TIMEOUT_MS = 1500
+const CONTEXT_LOSS_FALLBACK_TIMEOUT_MS = 12000
 
 type WebglContext = WebGLRenderingContext | WebGL2RenderingContext
 
@@ -414,7 +415,7 @@ export async function testTerminalFocusActivation(ctx: AutotestContext): Promise
   }
 
   // ───────────────────────────────────────────────────────────────────
-  // TFA-10..17 — "blank Task after desktop swipe" lifecycle regression
+  // TFA-10..18 — "blank Task after desktop swipe" lifecycle regression
   //
   // TFA-09 above exercises the legacy `simulateRendererSurfaceLoss` path
   // which goes through `lifecycle.deactivate('manual-debug')` → synchronous
@@ -427,15 +428,12 @@ export async function testTerminalFocusActivation(ctx: AutotestContext): Promise
   //   TFA-10 phantom-blank repro infrastructure self-test
   //   TFA-11 path B (visibilitychange) re-renders blanked canvas
   //   TFA-12 path B (window-focus) re-renders blanked canvas
-  //   TFA-13 webglcontextlost handler calls preventDefault — without this
-  //          Chromium never schedules webglcontextrestored after a real loss
-  //   TFA-14 lost handler does NOT synchronously disposeWebgl — that
-  //          would tear out the canvas + listener and strand the session
-  //   TFA-15 full lost+restored round-trip recovers renderable pixels
-  //   TFA-16 host surface event during the lost window doesn't strand
-  //          recovery (ensureWebgl defers via gl.isContextLost check)
-  //   TFA-17 3 repeated lost+restored cycles stay stable (no listener /
-  //          cooldown / addon state accumulation)
+  //   TFA-13 xterm's webglcontextlost path still calls preventDefault
+  //   TFA-14 xterm onContextLoss disposes WebGL like VS Code
+  //   TFA-15 DOM renderer shows the live terminal buffer after loss
+  //   TFA-16 document-visible during cooldown keeps DOM rendering
+  //   TFA-17 repeated host events during cooldown do not recreate WebGL
+  //   TFA-18 restoring the old canvas context does not disturb DOM fallback
   // ───────────────────────────────────────────────────────────────────
   const repro = window.__blankTaskRepro
   if (!repro) {
@@ -513,11 +511,7 @@ export async function testTerminalFocusActivation(ctx: AutotestContext): Promise
         })
       }
 
-      // ---- TFA-13: webglcontextlost handler calls preventDefault ----
-      // Spy via a listener registered AFTER the lifecycle's. preventDefault
-      // is sticky across the listener chain, so a later listener observes
-      // `event.defaultPrevented === true` iff the lifecycle handler called
-      // it. Without preventDefault, Chromium never schedules a restore.
+      // ---- TFA-13..18: real WebGL context loss follows VS Code fallback semantics ----
       {
         await sleep(200)
         const spySurface = findWebglSurface(terminalId)
@@ -531,28 +525,40 @@ export async function testTerminalFocusActivation(ctx: AutotestContext): Promise
           spySurface.canvas.addEventListener('webglcontextlost', spyListener, false)
         }
         const lossResult = repro.triggerWebglLoss(terminalId)
-        await sleep(80)
-        // Capture lifecycle state mid-flight for TFA-14.
-        const stateMidLost = repro.getSessionDebugState(terminalId) as {
+        const fallbackObserved = await waitFor(
+          'tfa-context-loss-xterm-addon-dom-fallback',
+          () => {
+            const state = repro.getSessionDebugState(terminalId) as {
+              webglActive?: boolean
+              rendererMode?: string
+              rendererContextLost?: boolean
+              rendererWebglDisabledUntil?: number | null
+            } | null
+            return state !== null &&
+              state.webglActive === false &&
+              state.rendererMode === 'fallback' &&
+              state.rendererContextLost === false &&
+              (state.rendererWebglDisabledUntil ?? null) !== null
+          },
+          CONTEXT_LOSS_FALLBACK_TIMEOUT_MS,
+          RESTORE_POLL_MS
+        )
+        const stateAfterLoss = repro.getSessionDebugState(terminalId) as {
           webglActive?: boolean
+          rendererMode?: string
           rendererContextLost?: boolean
+          rendererWebglDisabledUntil?: number | null
         } | null
         if (spySurface) {
           spySurface.canvas.removeEventListener('webglcontextlost', spyListener)
         }
-        // Drive the round trip closed so the next case starts with a live
-        // WebGL surface.
-        repro.forceWebglRestore(terminalId)
-        await waitFor(
-          'tfa-13-recovery-after-prevent-default-spy',
-          () => {
-            const surface = findWebglSurface(terminalId)
-            if (!surface) return false
-            return hasRenderablePixels(readWebglPixels(surface.gl))
-          },
-          RESTORE_TIMEOUT_MS,
-          RESTORE_POLL_MS
+        await waitForFrames(2)
+        const terminalCell = document.querySelector<HTMLElement>(
+          `.terminal-grid-cell[data-terminal-id="${escapeCssIdent(terminalId)}"]`
         )
+        const domRowsText = terminalCell?.querySelector<HTMLElement>('.xterm-rows')?.textContent ?? ''
+        const tailText = terminalApi?.getTailText(terminalId, 5) ?? ''
+
         _assert(
           'TFA-13-webglcontextlost-handler-calls-preventDefault',
           Boolean(spySurface) && lossResult.triggered && listenerFired && defaultPreventedSeen,
@@ -562,148 +568,110 @@ export async function testTerminalFocusActivation(ctx: AutotestContext): Promise
             listenerFired,
             defaultPreventedSeen,
             bugHypothesisFix:
-              'attachContextListeners must call event.preventDefault() — without it Chromium never fires webglcontextrestored after a real GPU loss'
+              'xterm keeps Chromium free to restore the old canvas context, while the lifecycle follows VS Code and relies on WebglAddon.onContextLoss for user-visible fallback'
           }
         )
 
-        // ---- TFA-14: addon stays alive after webglcontextlost ----
-        // The pre-fix v1 design synchronously disposeWebgl()'d in the lost
-        // handler, which tore the WebGL canvas out of the DOM and killed
-        // our restored listener. This canary catches that regression.
         _assert(
-          'TFA-14-addon-alive-after-webglcontextlost',
-          stateMidLost !== null &&
-            stateMidLost.webglActive === true &&
-            stateMidLost.rendererContextLost === true,
-          {
-            stateMidLost,
-            bugHypothesisFix:
-              'lost handler must NOT synchronously disposeWebgl — that lets xterm tear out the canvas and kill the restored listener. addon stays alive (its render becomes a no-op) until webglcontextrestored fires'
-          }
-        )
-      }
-
-      // ---- TFA-15: full real-loss + restored round trip recovers ----
-      {
-        await sleep(150)
-        const surfaceBeforeLoss = findWebglSurface(terminalId)
-        const statsBeforeLoss = surfaceBeforeLoss ? readWebglPixels(surfaceBeforeLoss.gl) : null
-        const lossResult = repro.triggerWebglLoss(terminalId)
-        await sleep(80)
-        const restoreResult = repro.forceWebglRestore(terminalId)
-        const recovered = await waitFor(
-          'tfa-15-restored-after-real-loss-roundtrip',
-          () => {
-            const surface = findWebglSurface(terminalId)
-            if (!surface) return false
-            return hasRenderablePixels(readWebglPixels(surface.gl))
-          },
-          RESTORE_TIMEOUT_MS,
-          RESTORE_POLL_MS
-        )
-        const surfaceAfter = findWebglSurface(terminalId)
-        const statsAfter = surfaceAfter ? readWebglPixels(surfaceAfter.gl) : null
-        _assert(
-          'TFA-15-real-webgl-loss-restored-roundtrip',
-          lossResult.triggered && restoreResult.triggered && recovered,
+          'TFA-14-context-loss-disposes-webgl-renderer',
+          lossResult.triggered &&
+            fallbackObserved &&
+            stateAfterLoss !== null &&
+            stateAfterLoss.webglActive === false &&
+            stateAfterLoss.rendererMode === 'fallback' &&
+            stateAfterLoss.rendererContextLost === false &&
+            (stateAfterLoss.rendererWebglDisabledUntil ?? null) !== null,
           {
             lossResult,
-            restoreResult,
-            recovered,
-            statsBeforeLoss,
-            statsAfter,
+            fallbackObserved,
+            stateAfterLoss,
             bugHypothesisFix:
-              'canvas-level lost listener calls preventDefault, defers ensureWebgl while gl.isContextLost is true, then on webglcontextrestored re-arms via dispose+ensureWebgl+terminal.refresh'
+              'match VS Code: dispose the WebGL renderer from xterm WebglAddon.onContextLoss and keep the terminal readable through xterm DOM rendering'
           }
         )
-      }
 
-      // ---- TFA-16: host event interleaved with lost window doesn't strand ----
-      // Real users sometimes swipe back and forth across desktops faster
-      // than the GPU finishes restoring. A visibilitychange that lands
-      // mid-loss must not let ensureWebgl create a new addon on a still-
-      // dead canvas — that's exactly the original bug.
-      {
-        await sleep(200)
-        const lossResult = repro.triggerWebglLoss(terminalId)
-        await sleep(50)
-        document.dispatchEvent(new Event('visibilitychange'))
-        await sleep(180)
-        const restoreResult = repro.forceWebglRestore(terminalId)
-        const recovered = await waitFor(
-          'tfa-16-recovery-after-interleaved-host-event',
-          () => {
-            const surface = findWebglSurface(terminalId)
-            if (!surface) return false
-            return hasRenderablePixels(readWebglPixels(surface.gl))
-          },
-          RESTORE_TIMEOUT_MS,
-          RESTORE_POLL_MS
-        )
         _assert(
-          'TFA-16-host-event-during-lost-window-recovers-cleanly',
-          lossResult.triggered && restoreResult.triggered && recovered,
+          'TFA-15-context-loss-dom-fallback-shows-live-buffer',
+          lossResult.triggered &&
+            fallbackObserved &&
+            (domRowsText.trim().length > 0 || tailText.trim().length > 0),
           {
-            lossResult,
-            restoreResult,
-            recovered,
+            domRowsTextLength: domRowsText.trim().length,
+            tailTextLength: tailText.trim().length,
             bugHypothesisFix:
-              'ensureWebgl must check gl.isContextLost() before creating a new addon — otherwise an interleaved host surface event spawns a dead-context addon that strands the session'
+              'after WebGL is disposed, the DOM renderer must paint existing buffer text without waiting for new PTY output'
           }
         )
-      }
 
-      // ---- TFA-17: repeated lost+restored cycles stay stable ----
-      {
-        await sleep(200)
-        const cycleResults: Array<{ index: number; recovered: boolean }> = []
-        let allCyclesRecovered = true
-        for (let i = 0; i < 3; i += 1) {
-          const lossResult = repro.triggerWebglLoss(terminalId)
-          if (!lossResult.triggered) {
-            allCyclesRecovered = false
-            cycleResults.push({ index: i, recovered: false })
-            break
-          }
-          await sleep(50)
-          const restoreResult = repro.forceWebglRestore(terminalId)
-          if (!restoreResult.triggered) {
-            allCyclesRecovered = false
-            cycleResults.push({ index: i, recovered: false })
-            break
-          }
-          const recovered = await waitFor(
-            `tfa-17-cycle-${i}`,
-            () => {
-              const surface = findWebglSurface(terminalId)
-              if (!surface) return false
-              return hasRenderablePixels(readWebglPixels(surface.gl))
-            },
-            RESTORE_TIMEOUT_MS,
-            RESTORE_POLL_MS
-          )
-          cycleResults.push({ index: i, recovered })
-          if (!recovered) {
-            allCyclesRecovered = false
-            break
-          }
-          await sleep(150)
-        }
-        const finalState = repro.getSessionDebugState(terminalId) as {
+        terminalApi?.notifyHostSurfaceEvent('document-visible')
+        await sleep(220)
+        const stateAfterDocumentVisible = repro.getSessionDebugState(terminalId) as {
           webglActive?: boolean
+          rendererMode?: string
           rendererWebglDisabledUntil?: number | null
         } | null
         _assert(
-          'TFA-17-repeated-lost-restored-cycles-stable',
-          allCyclesRecovered &&
-            finalState !== null &&
-            finalState.webglActive === true &&
-            (finalState.rendererWebglDisabledUntil ?? null) === null,
+          'TFA-16-document-visible-keeps-dom-during-webgl-cooldown',
+          stateAfterDocumentVisible !== null &&
+            stateAfterDocumentVisible.webglActive === false &&
+            stateAfterDocumentVisible.rendererMode === 'fallback' &&
+            (stateAfterDocumentVisible.rendererWebglDisabledUntil ?? null) !== null,
           {
-            cycleResults,
-            finalState,
+            stateAfterDocumentVisible,
             bugHypothesisFix:
-              'each successful ensureWebgl must reset webglFailureCount to 0 — otherwise rapid swipes accumulate failures and trigger cooldown spuriously'
+              'focus/visibility restoration must not recreate WebGL while the cooldown is active after a GPU context loss'
+          }
+        )
+
+        terminalApi?.notifyHostSurfaceEvent('window-focus')
+        terminalApi?.notifyHostSurfaceEvent('page-show')
+        await sleep(260)
+        const stateAfterRepeatedHostEvents = repro.getSessionDebugState(terminalId) as {
+          webglActive?: boolean
+          rendererMode?: string
+          rendererWebglDisabledUntil?: number | null
+        } | null
+        const surfaceAfterRepeatedHostEvents = findWebglSurface(terminalId)
+        _assert(
+          'TFA-17-repeated-host-events-do-not-recreate-webgl-during-cooldown',
+          stateAfterRepeatedHostEvents !== null &&
+            stateAfterRepeatedHostEvents.webglActive === false &&
+            stateAfterRepeatedHostEvents.rendererMode === 'fallback' &&
+            (stateAfterRepeatedHostEvents.rendererWebglDisabledUntil ?? null) !== null &&
+            surfaceAfterRepeatedHostEvents === null,
+          {
+            stateAfterRepeatedHostEvents,
+            hasWebglSurface: surfaceAfterRepeatedHostEvents !== null,
+            bugHypothesisFix:
+              'multiple host surface events after Spaces/sleep recovery must not churn WebGL contexts while DOM fallback is already showing the buffer'
+          }
+        )
+
+        const cleanupRestoreResult = repro.forceWebglRestore(terminalId)
+        await sleep(120)
+        const stateAfterOldContextRestore = repro.getSessionDebugState(terminalId) as {
+          webglActive?: boolean
+          rendererMode?: string
+          rendererContextLost?: boolean
+          rendererWebglDisabledUntil?: number | null
+        } | null
+        const domRowsTextAfterOldRestore =
+          terminalCell?.querySelector<HTMLElement>('.xterm-rows')?.textContent ?? ''
+        _assert(
+          'TFA-18-old-context-restore-does-not-disturb-dom-fallback',
+          cleanupRestoreResult.triggered &&
+            stateAfterOldContextRestore !== null &&
+            stateAfterOldContextRestore.webglActive === false &&
+            stateAfterOldContextRestore.rendererMode === 'fallback' &&
+            stateAfterOldContextRestore.rendererContextLost === false &&
+            (stateAfterOldContextRestore.rendererWebglDisabledUntil ?? null) !== null &&
+            domRowsTextAfterOldRestore.trim().length > 0,
+          {
+            cleanupRestoreResult,
+            stateAfterOldContextRestore,
+            domRowsTextAfterOldRestoreLength: domRowsTextAfterOldRestore.trim().length,
+            bugHypothesisFix:
+              'once the lifecycle has switched to DOM rendering, a later restore of the old detached WebGL context must not flip the terminal back into a blank GPU surface'
           }
         )
       }

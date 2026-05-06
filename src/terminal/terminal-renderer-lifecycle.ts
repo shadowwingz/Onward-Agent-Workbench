@@ -19,12 +19,12 @@ export type TerminalRendererSurfaceEvent =
   | 'page-show'
   | 'manual-debug'
   | 'webgl-context-loss'
-  | 'webgl-context-restored'
 
 export type TerminalRendererLifecycleReason =
   | 'attach'
   | 'visible'
   | 'hidden'
+  | 'document-hidden'
   | 'dispose'
   | TerminalRendererSurfaceEvent
 
@@ -63,11 +63,11 @@ export interface TerminalRendererLifecycleOptions {
   platform: RuntimePlatform
 }
 
-// Cooldown thresholds are tuned for "single transient context loss should not
-// disable WebGL for 15 seconds". macOS Spaces / Windows virtual desktop swipes
-// can produce one short loss; falling back immediately on the first failure
-// (the previous Win/Linux policy) was over-aggressive and was part of why the
-// blank-Task symptom persisted on those platforms.
+// Match VS Code's terminal renderer stance: once xterm's WebGL addon reports
+// that a lost context did not recover, dispose the WebGL addon and let xterm's
+// DOM renderer keep the live buffer visible. The short cooldown prevents our
+// focus/visibility surface-restore pipeline from immediately recreating WebGL
+// while the host GPU surface is still unstable.
 export function createTerminalRendererPolicy(platform: RuntimePlatform): TerminalRendererPolicy {
   if (platform === 'darwin') {
     return {
@@ -100,15 +100,13 @@ export class TerminalRendererLifecycle {
   private lastSurfaceEvent: TerminalRendererSurfaceEvent | null = null
   private lastSurfaceEventAt: number | null = null
 
-  // Canvas-level state. These survive `disposeWebgl` so the
-  // `webglcontextrestored` listener can re-arm the renderer once the GPU
-  // surface is alive again — the previous design tore down the addon's
-  // `onContextLoss` callback synchronously, so nothing was left listening
-  // for the restoration the browser eventually emits.
+  // Canvas-level state. This follows the VS Code/xterm.js guidance: let
+  // xterm's WebGL addon decide that the lost context did not recover, then
+  // dispose the addon and render through xterm's DOM fallback after macOS
+  // Spaces, sleep/resume, or GPU resource pressure.
   private observedCanvas: HTMLCanvasElement | null = null
   private contextLost = false
-  private boundHandleContextLost: ((event: Event) => void) | null = null
-  private boundHandleContextRestored: ((event: Event) => void) | null = null
+  private webglContextLossDisposable: { dispose(): void } | null = null
 
   constructor(options: TerminalRendererLifecycleOptions) {
     this.terminalId = options.terminalId
@@ -128,7 +126,7 @@ export class TerminalRendererLifecycle {
       webglFailureCount: this.webglFailureCount,
       webglDisabledUntil: this.webglDisabledUntil,
       contextLost: this.contextLost,
-      hasContextListeners: this.observedCanvas !== null,
+      hasContextListeners: this.webglContextLossDisposable !== null,
       lastLifecycleReason: this.lastLifecycleReason,
       lastLifecycleAt: this.lastLifecycleAt,
       lastSurfaceEvent: this.lastSurfaceEvent,
@@ -146,9 +144,9 @@ export class TerminalRendererLifecycle {
 
   /**
    * Returns the canvas this lifecycle is currently observing for context
-   * lost/restored events, or null if no listeners are attached. Exposed so
-   * the autotest repro layer can reach the same canvas reference we hold
-   * (xterm may detach the node from the DOM tree we'd otherwise query).
+   * loss events, or null if no listeners are attached. Exposed so the
+   * autotest repro layer can reach the same canvas reference we hold before
+   * WebGL fallback disposes it.
    */
   getObservedCanvas(): HTMLCanvasElement | null {
     return this.observedCanvas ?? this.findWebglCanvas()
@@ -209,11 +207,9 @@ export class TerminalRendererLifecycle {
     }
 
     // If we know the GL context is currently lost, do not hand a brand-new
-    // WebglAddon a dead context — that is the original bug. The
-    // `webglcontextrestored` listener will re-enter ensureWebgl once the
-    // browser successfully re-creates the GPU surface. The same check covers
-    // the case where this lifecycle never observed a `lost` event but the
-    // canvas drifted into a lost state externally (e.g., GPU process crash).
+    // WebglAddon a dead context. The xterm onContextLoss path normally flips
+    // to the DOM renderer; this guard covers re-entrant restore attempts that
+    // race while that transition is in progress.
     if (this.canvasContextIsLost()) {
       perfTrace(PERF_TRACE_EVENT.RENDERER_XTERM_RENDERER_RESTORE_DEFERRED, {
         terminalId: this.terminalId,
@@ -249,7 +245,7 @@ export class TerminalRendererLifecycle {
         terminalId: this.terminalId,
         reason,
         ok: true,
-        listenersAttached: this.observedCanvas !== null
+        listenersAttached: this.webglContextLossDisposable !== null
       })
       return this.buildResult(true, true)
     } catch (error) {
@@ -282,6 +278,7 @@ export class TerminalRendererLifecycle {
     const webglAddon = this.webglAddon
     if (!webglAddon) return false
 
+    this.detachContextListeners()
     this.webglAddon = null
     let disposeError: unknown = null
     try {
@@ -324,73 +321,46 @@ export class TerminalRendererLifecycle {
   // ─────────── Canvas-level WebGL context lifecycle ───────────
 
   private attachContextListeners(): void {
+    const webglAddon = this.webglAddon
+    if (!webglAddon) return
     const canvas = this.findWebglCanvas()
-    if (!canvas) return
-    if (this.observedCanvas === canvas && this.boundHandleContextLost) return
+    if (this.observedCanvas === canvas && this.webglContextLossDisposable) return
 
     this.detachContextListeners()
     this.observedCanvas = canvas
 
-    this.boundHandleContextLost = (event: Event) => {
-      // Calling preventDefault on `webglcontextlost` tells Chromium we want
-      // it to attempt to restore the context. Without this the browser
-      // never fires `webglcontextrestored` and our recovery never gets a
-      // chance to re-run — which is precisely the failure path that the
-      // previous synchronous-dispose design never escaped.
-      event.preventDefault()
+    this.webglContextLossDisposable = webglAddon.onContextLoss(() => {
       this.contextLost = true
       perfTrace(PERF_TRACE_EVENT.RENDERER_XTERM_RENDERER_CONTEXT_LOST, {
         terminalId: this.terminalId,
         webglFailureCountBefore: this.webglFailureCount
       })
-      // Intentionally DO NOT call disposeWebgl here. Disposing the addon
-      // synchronously prompts xterm to swap to its DOM renderer, which
-      // tears the WebGL canvas out of the DOM — and with it our listener
-      // for `webglcontextrestored`. The original Spaces-swipe blank Task
-      // bug is exactly this: the canvas gets destroyed before Chromium can
-      // tell us the GPU surface is back. Keep the addon alive (its render
-      // calls are silent no-ops while the GL context is lost — that just
-      // freezes the last frame) so the canvas + this listener survive
-      // until the restored event arrives.
-      this.registerWebglFailure('webgl-context-loss')
-    }
+      this.fallbackAfterContextLoss('xterm-on-context-loss')
+    })
+  }
 
-    this.boundHandleContextRestored = () => {
-      this.contextLost = false
-      perfTrace(PERF_TRACE_EVENT.RENDERER_XTERM_RENDERER_CONTEXT_RESTORED, {
-        terminalId: this.terminalId,
-        webglFailureCount: this.webglFailureCount
-      })
-      // The addon's internal renderer still references the old (now-stale)
-      // GL state, so swap it out for a fresh one now that the canvas's GL
-      // context is alive again, then force a viewport refresh so the live
-      // buffer is repainted into the recovered tile.
-      this.disposeWebgl('webgl-context-restored')
-      const ensureResult = this.ensureWebgl('webgl-context-restored')
-      if (ensureResult.webglActive) {
-        this.refreshTerminalIfActive()
-        perfTrace(PERF_TRACE_EVENT.RENDERER_XTERM_RENDERER_REFRESH_AFTER_RESTORE, {
-          terminalId: this.terminalId
-        })
-      }
-    }
+  private fallbackAfterContextLoss(trigger: string): boolean {
+    if (!this.contextLost) return false
 
-    canvas.addEventListener('webglcontextlost', this.boundHandleContextLost, false)
-    canvas.addEventListener('webglcontextrestored', this.boundHandleContextRestored, false)
+    this.contextLost = false
+    this.webglFailureCount = Math.max(this.webglFailureCount, this.policy.webglFailureFallbackThreshold)
+    this.webglDisabledUntil = performance.now() + this.policy.webglFallbackCooldownMs
+    this.detachContextListeners()
+    const changedRenderer = this.disposeWebgl('webgl-context-loss')
+    this.refreshTerminalIfActive()
+    perfTrace(PERF_TRACE_EVENT.RENDERER_XTERM_RENDERER_CONTEXT_LOSS_FALLBACK, {
+      terminalId: this.terminalId,
+      trigger,
+      changedRenderer,
+      cooldownMs: this.policy.webglFallbackCooldownMs
+    })
+    return changedRenderer
   }
 
   private detachContextListeners(): void {
-    const canvas = this.observedCanvas
-    if (!canvas) return
-    if (this.boundHandleContextLost) {
-      canvas.removeEventListener('webglcontextlost', this.boundHandleContextLost)
-    }
-    if (this.boundHandleContextRestored) {
-      canvas.removeEventListener('webglcontextrestored', this.boundHandleContextRestored)
-    }
+    this.webglContextLossDisposable?.dispose()
+    this.webglContextLossDisposable = null
     this.observedCanvas = null
-    this.boundHandleContextLost = null
-    this.boundHandleContextRestored = null
   }
 
   private findWebglCanvas(): HTMLCanvasElement | null {
@@ -406,15 +376,12 @@ export class TerminalRendererLifecycle {
 
   private canvasContextIsLost(): boolean {
     // Trust the lifecycle's own `contextLost` flag, which is set in our
-    // `webglcontextlost` listener and cleared in our `webglcontextrestored`
-    // listener. Querying `observedCanvas.getContext(...).isContextLost()` is
-    // tempting but unreliable across xterm WebglAddon's `dispose()` path —
-    // the addon may release GPU resources via WEBGL_lose_context internally,
-    // leaving the (now-detached) canvas's GL context permanently lost even
-    // though we never observed a real context-loss event. That false
-    // positive would make ensureWebgl defer forever after a manual
-    // deactivate (which the existing TFA-09 surface-loss regression
-    // exercises).
+    // `webglcontextlost` listener and cleared once we have switched to DOM
+    // rendering. Querying `observedCanvas.getContext(...).isContextLost()` is
+    // unreliable across xterm WebglAddon's `dispose()` path because the addon
+    // may release GPU resources via WEBGL_lose_context internally, leaving a
+    // detached canvas's GL context permanently lost even though the live
+    // terminal renderer is healthy.
     return this.contextLost
   }
 
