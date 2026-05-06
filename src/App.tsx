@@ -410,7 +410,10 @@ const TabPromptNotebook = memo(function TabPromptNotebook({
   }, [tab.id, updatePromptEditorHeightForTab])
 
   const handlePromptInputModeChange = useCallback((mode: 'canvas' | 'line') => {
-    updateTabById(tab.id, { promptInputMode: mode })
+    updateTabById(tab.id, {
+      promptInputMode: mode,
+      promptInputModePreferenceVersion: 2
+    })
   }, [tab.id, updateTabById])
 
   const handleExportAllPrompts = useCallback(async () => {
@@ -493,7 +496,7 @@ const TabPromptNotebook = memo(function TabPromptNotebook({
       onUpdatePromptCleanup={onUpdatePromptCleanup}
       promptEditorHeight={tab.promptEditorHeight}
       onPromptEditorHeightChange={handlePromptEditorHeightChange}
-      promptInputMode={tab.promptInputMode ?? 'canvas'}
+      promptInputMode={tab.promptInputMode ?? 'line'}
       onPromptInputModeChange={handlePromptInputModeChange}
       editorDraft={editorDraft}
       onEditorDraftChange={handleEditorDraftChange}

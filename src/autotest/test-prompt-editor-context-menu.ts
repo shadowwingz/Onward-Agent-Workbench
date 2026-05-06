@@ -86,11 +86,13 @@ export async function testPromptEditorContextMenu(ctx: AutotestContext): Promise
       ta.dispatchEvent(new Event('input', { bubbles: true }))
     }
     dispatch()
+    notebookApi()?.setEditorContent(text)
     const ok = await waitFor('pecm-text-set', () => {
       if (getContent() === text) return true
       // Re-dispatch in case the previous one was dropped by a coincident
       // React render. Idempotent — value setter just rewrites.
       dispatch()
+      notebookApi()?.setEditorContent(text)
       return false
     }, 4000, 80)
     return ok
@@ -232,6 +234,33 @@ export async function testPromptEditorContextMenu(ctx: AutotestContext): Promise
     }
   }
 
+  const findModeTrigger = () =>
+    document.querySelector('.prompt-notebook:not(.prompt-notebook-hidden) [data-testid="prompt-mode-trigger"]') as HTMLButtonElement | null
+  const findModeMenu = () =>
+    document.querySelector('.prompt-notebook:not(.prompt-notebook-hidden) .prompt-mode-menu') as HTMLElement | null
+  const clickModeOption = async (option: 'canvas' | 'line'): Promise<boolean> => {
+    const trigger = findModeTrigger()
+    if (!trigger) return false
+    trigger.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+    // React commits the menu DOM on the next render; wait for it before
+    // querying the option button.
+    const menuOpened = await waitFor(`pecm-mode-menu-${option}`, () => {
+      return document.querySelector(
+        `.prompt-notebook:not(.prompt-notebook-hidden) [data-testid="prompt-mode-${option}"]`
+      ) !== null
+    }, 2000, 40)
+    if (!menuOpened) return false
+    const item = document.querySelector(
+      `.prompt-notebook:not(.prompt-notebook-hidden) [data-testid="prompt-mode-${option}"]`
+    ) as HTMLButtonElement | null
+    if (!item) return false
+    item.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+    return true
+  }
+  const waitForMode = async (expected: 'canvas' | 'line') => {
+    return waitFor('pecm-mode-applied', () => findModeTrigger()?.dataset.mode === expected, 2000, 40)
+  }
+
   // ─────────── PECM-01: menu opens on contextmenu ───────────
   if (cancelled()) return results
   let menu = await openMenuWith('hello world', 0, 0)
@@ -241,6 +270,17 @@ export async function testPromptEditorContextMenu(ctx: AutotestContext): Promise
     items: itemCount
   })
   if (!menu) return results
+
+  // ─────────── PECM-04: Send to Task is the first top-level action ───────────
+  const topLevelIds = Array.from(menu.querySelectorAll<HTMLElement>('[role="menuitem"]'))
+    .map(el => el.getAttribute('data-testid') ?? '')
+  const sendIndex04 = topLevelIds.indexOf('pecm-send-to-task')
+  const undoIndex04 = topLevelIds.indexOf('pecm-undo')
+  record('PECM-04-send-to-task-before-undo', sendIndex04 === 0 && undoIndex04 === 1, {
+    topLevelIds,
+    sendIndex: sendIndex04,
+    undoIndex: undoIndex04
+  })
 
   // ─────────── PECM-02: cut / copy disabled when no selection ───────────
   const cutDisabled = isItemDisabled('pecm-cut')
@@ -416,6 +456,35 @@ export async function testPromptEditorContextMenu(ctx: AutotestContext): Promise
     expectedPaste
   })
   await closeMenu()
+
+  // ─────────── PECM-23..24: per-Tab Canvas/Line mode dropdown default + menu ───────────
+  // PECM-23: dropdown defaults to Line (default tab value, validateTab fallback)
+  if (cancelled()) return results
+  const trigger23 = findModeTrigger()
+  record('PECM-23-mode-dropdown-default-line', trigger23 !== null && trigger23.dataset.mode === 'line', {
+    triggerFound: trigger23 !== null,
+    mode: trigger23?.dataset.mode
+  })
+
+  // PECM-24: clicking the trigger opens a menu with two options
+  if (trigger23) {
+    trigger23.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+  }
+  await waitFor('pecm-24-menu', () => findModeMenu() !== null, 2000, 40)
+  const menu24 = findModeMenu()
+  const opts24 = menu24 ? menu24.querySelectorAll('[role="menuitem"]') : null
+  record('PECM-24-mode-dropdown-opens-menu', menu24 !== null && (opts24?.length ?? 0) === 2, {
+    menuFound: menu24 !== null,
+    optionCount: opts24?.length ?? 0
+  })
+  // Close it (Escape) before next assertion to start clean.
+  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+  await waitFor('pecm-24-menu-closed', () => findModeMenu() === null, 1000, 40)
+
+  // The next group validates virtual-cursor behavior, so switch into Canvas
+  // mode explicitly now that the default has been asserted.
+  await clickModeOption('canvas')
+  await waitForMode('canvas')
 
   // ─────────── Helpers for PECM-17..22 (virtual cursor / send transform) ───────────
   // Simulate a mousedown at logical (row, col) inside the textarea by computing
@@ -669,57 +738,7 @@ export async function testPromptEditorContextMenu(ctx: AutotestContext): Promise
   })
   await setText('')
 
-  // ─────────── PECM-23..27: per-Tab Canvas/Line mode dropdown ───────────
-  const findModeTrigger = () =>
-    document.querySelector('.prompt-notebook:not(.prompt-notebook-hidden) [data-testid="prompt-mode-trigger"]') as HTMLButtonElement | null
-  const findModeMenu = () =>
-    document.querySelector('.prompt-notebook:not(.prompt-notebook-hidden) .prompt-mode-menu') as HTMLElement | null
-  const clickModeOption = async (option: 'canvas' | 'line'): Promise<boolean> => {
-    const trigger = findModeTrigger()
-    if (!trigger) return false
-    trigger.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
-    // React commits the menu DOM on the next render; wait for it before
-    // querying the option button.
-    const menuOpened = await waitFor(`pecm-mode-menu-${option}`, () => {
-      return document.querySelector(
-        `.prompt-notebook:not(.prompt-notebook-hidden) [data-testid="prompt-mode-${option}"]`
-      ) !== null
-    }, 2000, 40)
-    if (!menuOpened) return false
-    const item = document.querySelector(
-      `.prompt-notebook:not(.prompt-notebook-hidden) [data-testid="prompt-mode-${option}"]`
-    ) as HTMLButtonElement | null
-    if (!item) return false
-    item.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
-    return true
-  }
-  const waitForMode = async (expected: 'canvas' | 'line') => {
-    return waitFor('pecm-mode-applied', () => findModeTrigger()?.dataset.mode === expected, 2000, 40)
-  }
-
-  // PECM-23: dropdown defaults to Canvas (default tab value, validateTab fallback)
-  if (cancelled()) return results
-  const trigger23 = findModeTrigger()
-  record('PECM-23-mode-dropdown-default-canvas', trigger23 !== null && trigger23.dataset.mode === 'canvas', {
-    triggerFound: trigger23 !== null,
-    mode: trigger23?.dataset.mode
-  })
-
-  // PECM-24: clicking the trigger opens a menu with two options
-  if (trigger23) {
-    trigger23.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
-  }
-  await waitFor('pecm-24-menu', () => findModeMenu() !== null, 2000, 40)
-  const menu24 = findModeMenu()
-  const opts24 = menu24 ? menu24.querySelectorAll('[role="menuitem"]') : null
-  record('PECM-24-mode-dropdown-opens-menu', menu24 !== null && (opts24?.length ?? 0) === 2, {
-    menuFound: menu24 !== null,
-    optionCount: opts24?.length ?? 0
-  })
-  // Close it (Escape) before next assertion to start clean.
-  document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
-  await waitFor('pecm-24-menu-closed', () => findModeMenu() === null, 1000, 40)
-
+  // ─────────── PECM-25..27: per-Tab Canvas/Line mode behavior ───────────
   // PECM-25: switching to Line short-circuits the virtual mousedown handler
   await setText('')
   const switchedToLine = await clickModeOption('line')
@@ -769,7 +788,7 @@ export async function testPromptEditorContextMenu(ctx: AutotestContext): Promise
   record('PECM-27-mode-line-still-submits', Boolean(submitted27), {
     found: Boolean(submitted27)
   })
-  // Restore the default Canvas mode so subsequent suites start from a clean state.
+  // Return to Canvas for the remaining virtual-cursor-specific assertions.
   await clickModeOption('canvas')
   await waitForMode('canvas')
 
@@ -917,9 +936,9 @@ export async function testPromptEditorContextMenu(ctx: AutotestContext): Promise
     tailHasMarker: tail34.includes(ctxMarker34)
   })
 
-  // Restore the default Canvas mode and empty editor so subsequent suites start clean.
-  await clickModeOption('canvas')
-  await waitForMode('canvas')
+  // Restore the default Line mode and empty editor so subsequent suites start clean.
+  await clickModeOption('line')
+  await waitForMode('line')
   await setText('')
 
   log('PECM:done', {

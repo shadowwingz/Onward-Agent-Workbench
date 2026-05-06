@@ -136,6 +136,7 @@ interface TabState {
   activeSubpage?: 'diff' | 'editor' | 'history' | null
   subpageTerminalId?: string | null
   promptInputMode?: 'canvas' | 'line'
+  promptInputModePreferenceVersion?: number
 }
 
 /**
@@ -350,7 +351,9 @@ function createDefaultTabState(id: string): TabState {
     promptEditorHeight: DEFAULT_PROMPT_EDITOR_HEIGHT,
     activeTerminalId: null,
     terminals: [],
-    localPrompts: []
+    localPrompts: [],
+    promptInputMode: 'line',
+    promptInputModePreferenceVersion: 2
   }
 }
 
@@ -489,7 +492,9 @@ class AppStateStorage {
       promptEditorHeight: DEFAULT_PROMPT_EDITOR_HEIGHT,
       activeTerminalId: legacyConfig?.activeTerminalId ?? null,
       terminals: migratedTerminals,
-      localPrompts
+      localPrompts,
+      promptInputMode: 'line',
+      promptInputModePreferenceVersion: 2
     }
 
     const newState: AppState = {
@@ -782,7 +787,10 @@ class AppStateStorage {
       subpageTerminalId: typeof tab.subpageTerminalId === 'string' && tab.subpageTerminalId
         ? tab.subpageTerminalId
         : null,
-      promptInputMode: tab.promptInputMode === 'line' ? 'line' : 'canvas'
+      promptInputMode: tab.promptInputModePreferenceVersion === 2 && tab.promptInputMode === 'canvas'
+        ? 'canvas'
+        : 'line',
+      promptInputModePreferenceVersion: 2
     }
   }
 

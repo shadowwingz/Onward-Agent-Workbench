@@ -215,8 +215,10 @@ export interface TabState {
   activeSubpage?: 'diff' | 'editor' | 'history' | null
   /** Terminal that owns the active subpage (used for correct CWD on restore) */
   subpageTerminalId?: string | null
-  /** Prompt input mode: 'canvas' = click-anywhere virtual cursor, 'line' = native line-by-line. Defaults to 'canvas'. */
+  /** Prompt input mode: 'canvas' = click-anywhere virtual cursor, 'line' = native line-by-line. Defaults to 'line'. */
   promptInputMode?: 'canvas' | 'line'
+  /** Version marker so old persisted default-canvas values can migrate to the new default line mode. */
+  promptInputModePreferenceVersion?: number
 }
 
 /**

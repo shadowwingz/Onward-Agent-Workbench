@@ -241,7 +241,9 @@ function createDefaultTabState(id: string): TabState {
     promptEditorHeight: DEFAULT_PROMPT_EDITOR_HEIGHT,
     activeTerminalId: null,
     terminals: [],
-    localPrompts: []
+    localPrompts: [],
+    promptInputMode: 'line',
+    promptInputModePreferenceVersion: 2
   }
 }
 
@@ -497,6 +499,10 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
             promptEditorHeight: normalizePromptEditorHeight(
               tab.promptEditorHeight ?? tab.editorDraft?.height ?? DEFAULT_PROMPT_EDITOR_HEIGHT
             ),
+            promptInputMode: tab.promptInputModePreferenceVersion === 2 && tab.promptInputMode === 'canvas'
+              ? 'canvas'
+              : 'line',
+            promptInputModePreferenceVersion: 2,
             terminals: (tab.terminals ?? []).map((terminal) => ({
               ...terminal,
               customName: terminal.customName ?? null,

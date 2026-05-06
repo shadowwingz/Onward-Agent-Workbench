@@ -375,7 +375,52 @@ export function PromptEditorContextMenu({
       onMouseDown={(e) => e.stopPropagation()}
       onContextMenu={(e) => e.preventDefault()}
     >
-      {/* Group 0: undo last menu mutation */}
+      {/* Group 0: send to Task */}
+      <div
+        className="prompt-editor-context-submenu-wrapper"
+        onMouseEnter={() => openSubmenu('task')}
+        onMouseLeave={scheduleCloseSubmenu}
+      >
+        <button
+          className={`prompt-editor-context-item has-submenu ${submenu === 'task' ? 'submenu-open' : ''}`}
+          role="menuitem"
+          aria-haspopup="menu"
+          aria-expanded={submenu === 'task'}
+          onClick={() => openSubmenu('task')}
+          disabled={!hasContent || terminals.length === 0}
+          data-testid="pecm-send-to-task"
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M15.854.146a.5.5 0 0 1 .11.54l-5.819 14.547a.75.75 0 0 1-1.329.124l-3.178-4.995L.643 7.184a.75.75 0 0 1 .124-1.33L15.314.037a.5.5 0 0 1 .54.11zM6.636 10.07l2.761 4.338L14.13 2.576 6.636 10.07zm6.787-8.201L1.591 6.602l4.339 2.76 7.494-7.493z" /></svg>
+          <span className="prompt-editor-context-label">{t('promptNotebook.editor.contextMenu.sendToTask')}</span>
+          <svg className="prompt-editor-context-chevron" width="10" height="10" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M4.646 1.646a.5.5 0 0 1 .708 0l6 6a.5.5 0 0 1 0 .708l-6 6a.5.5 0 0 1-.708-.708L10.293 8 4.646 2.354a.5.5 0 0 1 0-.708z" /></svg>
+        </button>
+        {submenu === 'task' && hasContent && terminals.length > 0 && (
+          <div
+            ref={submenuRef}
+            className={`prompt-editor-context-submenu ${submenuFlip.horizontal ? 'flip-h' : ''} ${submenuFlip.vertical ? 'flip-v' : ''}`}
+            role="menu"
+            onMouseEnter={() => openSubmenu('task')}
+            onMouseLeave={scheduleCloseSubmenu}
+            onMouseDown={(e) => e.stopPropagation()}
+            data-testid="pecm-send-to-task-submenu"
+          >
+            {terminals.map((terminal) => (
+              <button
+                key={terminal.id}
+                className="prompt-editor-context-item"
+                role="menuitem"
+                onClick={() => handleSendToTaskClick(terminal.id)}
+              >
+                <span className="prompt-editor-context-label">{terminal.title}</span>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="prompt-editor-context-separator" role="separator" />
+
+      {/* Group 1: undo last menu mutation */}
       <button
         className="prompt-editor-context-item"
         role="menuitem"
@@ -389,7 +434,7 @@ export function PromptEditorContextMenu({
 
       <div className="prompt-editor-context-separator" role="separator" />
 
-      {/* Group 1: clipboard primitives */}
+      {/* Group 2: clipboard primitives */}
       <button
         className="prompt-editor-context-item"
         role="menuitem"
@@ -435,7 +480,7 @@ export function PromptEditorContextMenu({
 
       <div className="prompt-editor-context-separator" role="separator" />
 
-      {/* Group 2: Pin Prompt closed loop */}
+      {/* Group 3: Pin Prompt closed loop */}
       <div
         className="prompt-editor-context-submenu-wrapper"
         onMouseEnter={() => openSubmenu('pinPrimary')}
@@ -504,7 +549,7 @@ export function PromptEditorContextMenu({
 
       <div className="prompt-editor-context-separator" role="separator" />
 
-      {/* Group 3: project / branch / task title inserts */}
+      {/* Group 4: project / branch / task title inserts */}
       <button
         className="prompt-editor-context-item"
         role="menuitem"
@@ -538,51 +583,6 @@ export function PromptEditorContextMenu({
         <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M2.5 2a.5.5 0 0 0 0 1h11a.5.5 0 0 0 0-1h-11zM5 5.5a.5.5 0 0 1 .5-.5h5a.5.5 0 0 1 0 1H8.5v7a.5.5 0 0 1-1 0V6H5.5a.5.5 0 0 1-.5-.5z" /></svg>
         <span className="prompt-editor-context-label">{t('promptNotebook.editor.contextMenu.insertTaskTitle')}</span>
       </button>
-
-      <div className="prompt-editor-context-separator" role="separator" />
-
-      {/* Group 4: send to Task */}
-      <div
-        className="prompt-editor-context-submenu-wrapper"
-        onMouseEnter={() => openSubmenu('task')}
-        onMouseLeave={scheduleCloseSubmenu}
-      >
-        <button
-          className={`prompt-editor-context-item has-submenu ${submenu === 'task' ? 'submenu-open' : ''}`}
-          role="menuitem"
-          aria-haspopup="menu"
-          aria-expanded={submenu === 'task'}
-          onClick={() => openSubmenu('task')}
-          disabled={!hasContent || terminals.length === 0}
-          data-testid="pecm-send-to-task"
-        >
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M15.854.146a.5.5 0 0 1 .11.54l-5.819 14.547a.75.75 0 0 1-1.329.124l-3.178-4.995L.643 7.184a.75.75 0 0 1 .124-1.33L15.314.037a.5.5 0 0 1 .54.11zM6.636 10.07l2.761 4.338L14.13 2.576 6.636 10.07zm6.787-8.201L1.591 6.602l4.339 2.76 7.494-7.493z" /></svg>
-          <span className="prompt-editor-context-label">{t('promptNotebook.editor.contextMenu.sendToTask')}</span>
-          <svg className="prompt-editor-context-chevron" width="10" height="10" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M4.646 1.646a.5.5 0 0 1 .708 0l6 6a.5.5 0 0 1 0 .708l-6 6a.5.5 0 0 1-.708-.708L10.293 8 4.646 2.354a.5.5 0 0 1 0-.708z" /></svg>
-        </button>
-        {submenu === 'task' && hasContent && terminals.length > 0 && (
-          <div
-            ref={submenuRef}
-            className={`prompt-editor-context-submenu ${submenuFlip.horizontal ? 'flip-h' : ''} ${submenuFlip.vertical ? 'flip-v' : ''}`}
-            role="menu"
-            onMouseEnter={() => openSubmenu('task')}
-            onMouseLeave={scheduleCloseSubmenu}
-            onMouseDown={(e) => e.stopPropagation()}
-            data-testid="pecm-send-to-task-submenu"
-          >
-            {terminals.map((terminal) => (
-              <button
-                key={terminal.id}
-                className="prompt-editor-context-item"
-                role="menuitem"
-                onClick={() => handleSendToTaskClick(terminal.id)}
-              >
-                <span className="prompt-editor-context-label">{terminal.title}</span>
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
 
     </div>,
     document.body

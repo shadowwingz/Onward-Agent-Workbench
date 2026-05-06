@@ -331,6 +331,8 @@ export interface TabState {
   terminals: PersistedTerminalState[]
   localPrompts: LocalPrompt[]
   editorDraft?: EditorDraft
+  promptInputMode?: 'canvas' | 'line'
+  promptInputModePreferenceVersion?: number
 }
 
 export interface AppState {

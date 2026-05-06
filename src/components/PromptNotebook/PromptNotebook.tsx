@@ -109,7 +109,7 @@ interface PromptNotebookProps {
   promptEditorHeight: number
   onPromptEditorHeightChange: (height: number) => void
   // Per-tab prompt input mode toggle ('canvas' = click-anywhere virtual cursor,
-  // 'line' = native line-by-line). Defaults to 'canvas' upstream.
+  // 'line' = native line-by-line). Defaults to 'line' upstream.
   promptInputMode: 'canvas' | 'line'
   onPromptInputModeChange: (mode: 'canvas' | 'line') => void
   // Draft related
@@ -503,8 +503,8 @@ export const PromptNotebook = memo(function PromptNotebook({
           const valueSetter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set
           valueSetter?.call(textarea, content)
           textarea.dispatchEvent(new Event('input', { bubbles: true }))
-          return
         }
+        editorContentRef.current = content
         setEditorContent(content)
       },
       submitEditor: () => {
