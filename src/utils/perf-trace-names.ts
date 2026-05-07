@@ -191,6 +191,13 @@ export const PERF_TRACE_EVENT = {
   // Instant marker (ph='i') with payload counts so usage frequency and
   // populated submenus are observable without leaking content.
   RENDERER_PROMPT_EDITOR_CTX_MENU_OPEN: 'renderer:prompt.editor.ctx-menu-open',
+  // Measures the renderer-side layout pass that keeps Send-to-Task and
+  // Import Pin submenus inside the viewport. Args contain only geometry
+  // and clamp metadata; no prompt or pinned-prompt content is recorded.
+  RENDERER_PROMPT_EDITOR_CTX_SUBMENU_LAYOUT: 'renderer:prompt.editor.ctx-submenu-layout',
+  // User changed the global Prompt input mode preference from the title-row
+  // selector. Args carry the target mode and tab count only.
+  RENDERER_PROMPT_INPUT_MODE_CHANGE: 'renderer:prompt.input-mode-change',
   // Mousedown past EOL/EOF physically pads the textarea value with spaces
   // and newlines, then setSelectionRange to the target. Args carry a
   // breakdown of the input → paint pipeline:

@@ -140,7 +140,12 @@ export async function testPromptEditorContextMenu(ctx: AutotestContext): Promise
   // captures the freshly-set value, even if React reconciliation would
   // otherwise revert it on the next render. Use this whenever a PECM
   // block needs the menu to operate on a specific value/cursor pair.
-  const openMenuWith = async (text: string, cursorStart: number, cursorEnd: number): Promise<HTMLElement | null> => {
+  const openMenuWith = async (
+    text: string,
+    cursorStart: number,
+    cursorEnd: number,
+    point?: { clientX: number; clientY: number }
+  ): Promise<HTMLElement | null> => {
     const ta = findTextarea()
     if (!ta) return null
     const proto = Object.getPrototypeOf(ta) as HTMLTextAreaElement
@@ -154,6 +159,7 @@ export async function testPromptEditorContextMenu(ctx: AutotestContext): Promise
       // setSelectionRange can throw on Firefox/detached nodes; ignore.
     }
     const rect = ta.getBoundingClientRect()
+    const menuPoint = point ?? { clientX: rect.left + 10, clientY: rect.top + 10 }
     const dispatch = () => {
       valueSetter?.call(ta, text)
       ta.dispatchEvent(new Event('input', { bubbles: true }))
@@ -166,8 +172,8 @@ export async function testPromptEditorContextMenu(ctx: AutotestContext): Promise
         bubbles: true,
         cancelable: true,
         button: 2,
-        clientX: rect.left + 10,
-        clientY: rect.top + 10
+        clientX: menuPoint.clientX,
+        clientY: menuPoint.clientY
       }))
     }
     dispatch()
@@ -182,6 +188,12 @@ export async function testPromptEditorContextMenu(ctx: AutotestContext): Promise
 
   const closeMenu = async () => {
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    document.body.dispatchEvent(new MouseEvent('mousedown', {
+      bubbles: true,
+      cancelable: true,
+      clientX: 1,
+      clientY: 1
+    }))
     await waitFor('pecm-menu-closed', () => findMenu() === null, 1000, 40)
     // Give React a settle tick so any pending re-render from the previous
     // submenu/menu unmount + debounced parent notify completes before the
@@ -204,6 +216,67 @@ export async function testPromptEditorContextMenu(ctx: AutotestContext): Promise
     if (!root) return false
     const el = root.querySelector(`[data-testid="${testId}"]`) as HTMLButtonElement | null
     return Boolean(el && el.disabled)
+  }
+
+  const openSubmenuByTestId = async (triggerId: string, submenuId: string): Promise<HTMLElement | null> => {
+    const root = findMenu()
+    const trigger = root?.querySelector(`[data-testid="${triggerId}"]`) as HTMLElement | null
+    if (!trigger) return null
+    trigger.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true, cancelable: true }))
+    trigger.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+    const ready = await waitFor(`pecm-${submenuId}`, () => {
+      return document.querySelector(`[data-testid="${submenuId}"]`) !== null
+    }, 1500, 40)
+    if (!ready) return null
+    await sleep(80)
+    return document.querySelector(`[data-testid="${submenuId}"]`) as HTMLElement | null
+  }
+
+  const rectDetail = (el: HTMLElement | null) => {
+    const rect = el?.getBoundingClientRect()
+    return rect
+      ? {
+          left: Math.round(rect.left),
+          top: Math.round(rect.top),
+          right: Math.round(rect.right),
+          bottom: Math.round(rect.bottom),
+          width: Math.round(rect.width),
+          height: Math.round(rect.height),
+          viewportWidth: window.innerWidth,
+          viewportHeight: window.innerHeight
+        }
+      : null
+  }
+
+  const rectWithinViewport = (el: HTMLElement | null, margin = 8): boolean => {
+    const rect = el?.getBoundingClientRect()
+    if (!rect) return false
+    const epsilon = 1
+    return rect.left >= margin - epsilon &&
+      rect.top >= margin - epsilon &&
+      rect.right <= window.innerWidth - margin + epsilon &&
+      rect.bottom <= window.innerHeight - margin + epsilon
+  }
+
+  const installSubmenuBoundaryStressStyle = () => {
+    const style = document.createElement('style')
+    style.dataset.testid = 'pecm-submenu-boundary-stress-style'
+    style.textContent = `
+      .prompt-editor-context-submenu[data-testid="pecm-send-to-task-submenu"],
+      .prompt-editor-context-submenu[data-testid="pecm-import-pin-submenu"] {
+        width: calc(100vw + 160px);
+        max-width: none;
+        max-height: none;
+      }
+      .prompt-editor-context-submenu[data-testid="pecm-send-to-task-submenu"]::after,
+      .prompt-editor-context-submenu[data-testid="pecm-import-pin-submenu"]::after {
+        content: "";
+        display: block;
+        height: calc(100vh + 160px);
+      }
+    `
+    document.head.appendChild(style)
+    return () => style.remove()
   }
 
   const clipboardWrite = async (text: string) => {
@@ -260,6 +333,23 @@ export async function testPromptEditorContextMenu(ctx: AutotestContext): Promise
   const waitForMode = async (expected: 'canvas' | 'line') => {
     return waitFor('pecm-mode-applied', () => findModeTrigger()?.dataset.mode === expected, 2000, 40)
   }
+  const waitForPersistedMode = async (expected: 'canvas' | 'line'): Promise<boolean> => {
+    const deadline = performance.now() + 3000
+    while (performance.now() < deadline) {
+      try {
+        const appState = await window.electronAPI.appState.load()
+        if (appState.uiPreferences?.promptInputMode === expected) {
+          return true
+        }
+      } catch {
+        // Keep polling until the timeout; persistence is asynchronous.
+      }
+      await sleep(80)
+    }
+    return false
+  }
+  const findTabItems = () => Array.from(document.querySelectorAll('.tab-item')) as HTMLElement[]
+  const findAddTabButton = () => document.querySelector('.tab-add-btn') as HTMLButtonElement | null
 
   // ─────────── PECM-01: menu opens on contextmenu ───────────
   if (cancelled()) return results
@@ -457,7 +547,55 @@ export async function testPromptEditorContextMenu(ctx: AutotestContext): Promise
   })
   await closeMenu()
 
-  // ─────────── PECM-23..24: per-Tab Canvas/Line mode dropdown default + menu ───────────
+  // ─────────── PECM-35: Send-to-Task submenu clamps to the viewport ───────────
+  // Stress the same failure mode as a tiny app window without resizing the
+  // BrowserWindow: make the submenu wider and taller than the viewport, open
+  // it at the bottom-right click point, and require the visible box to be
+  // shifted/clamped inside the Onward viewport with internal scrolling.
+  const removeStressStyle35 = installSubmenuBoundaryStressStyle()
+  menu = await openMenuWith('PECM boundary payload', 0, 0, {
+    clientX: window.innerWidth - 2,
+    clientY: window.innerHeight - 2
+  })
+  const sendBoundarySubmenu35 = await openSubmenuByTestId('pecm-send-to-task', 'pecm-send-to-task-submenu')
+  const sendStyle35 = sendBoundarySubmenu35 ? getComputedStyle(sendBoundarySubmenu35) : null
+  const sendRect35 = rectDetail(sendBoundarySubmenu35)
+  const sendWithin35 = rectWithinViewport(sendBoundarySubmenu35)
+  const sendScrollable35 = Boolean(sendBoundarySubmenu35 && sendBoundarySubmenu35.scrollHeight > sendBoundarySubmenu35.clientHeight)
+  record('PECM-35-send-to-task-submenu-clamps-to-viewport', Boolean(menu) && sendWithin35 && sendScrollable35, {
+    menuFound: Boolean(menu),
+    rect: sendRect35,
+    maxWidth: sendStyle35?.maxWidth,
+    maxHeight: sendStyle35?.maxHeight,
+    scrollHeight: sendBoundarySubmenu35?.scrollHeight,
+    clientHeight: sendBoundarySubmenu35?.clientHeight
+  })
+  removeStressStyle35()
+  await closeMenu()
+
+  // ─────────── PECM-36: Import Pin submenu uses the same viewport clamp ───────────
+  const removeStressStyle36 = installSubmenuBoundaryStressStyle()
+  menu = await openMenuWith('', 0, 0, {
+    clientX: window.innerWidth - 2,
+    clientY: window.innerHeight - 2
+  })
+  const pinBoundarySubmenu36 = await openSubmenuByTestId('pecm-import-pin', 'pecm-import-pin-submenu')
+  const pinStyle36 = pinBoundarySubmenu36 ? getComputedStyle(pinBoundarySubmenu36) : null
+  const pinRect36 = rectDetail(pinBoundarySubmenu36)
+  const pinWithin36 = rectWithinViewport(pinBoundarySubmenu36)
+  const pinScrollable36 = Boolean(pinBoundarySubmenu36 && pinBoundarySubmenu36.scrollHeight > pinBoundarySubmenu36.clientHeight)
+  record('PECM-36-import-pin-submenu-clamps-to-viewport', Boolean(menu) && pinWithin36 && pinScrollable36, {
+    menuFound: Boolean(menu),
+    rect: pinRect36,
+    maxWidth: pinStyle36?.maxWidth,
+    maxHeight: pinStyle36?.maxHeight,
+    scrollHeight: pinBoundarySubmenu36?.scrollHeight,
+    clientHeight: pinBoundarySubmenu36?.clientHeight
+  })
+  removeStressStyle36()
+  await closeMenu()
+
+  // ─────────── PECM-23..24: global Canvas/Line mode dropdown default + menu ───────────
   // PECM-23: dropdown defaults to Line (default tab value, validateTab fallback)
   if (cancelled()) return results
   const trigger23 = findModeTrigger()
@@ -479,6 +617,7 @@ export async function testPromptEditorContextMenu(ctx: AutotestContext): Promise
   })
   // Close it (Escape) before next assertion to start clean.
   document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+  document.body.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, clientX: 1, clientY: 1 }))
   await waitFor('pecm-24-menu-closed', () => findModeMenu() === null, 1000, 40)
 
   // The next group validates virtual-cursor behavior, so switch into Canvas
@@ -738,7 +877,7 @@ export async function testPromptEditorContextMenu(ctx: AutotestContext): Promise
   })
   await setText('')
 
-  // ─────────── PECM-25..27: per-Tab Canvas/Line mode behavior ───────────
+  // ─────────── PECM-25..27: Canvas/Line mode behavior ───────────
   // PECM-25: switching to Line short-circuits the virtual mousedown handler
   await setText('')
   const switchedToLine = await clickModeOption('line')
@@ -934,6 +1073,38 @@ export async function testPromptEditorContextMenu(ctx: AutotestContext): Promise
     expectedContent: ctxMarker34,
     expectedTerminalId: targetTerminal34,
     tailHasMarker: tail34.includes(ctxMarker34)
+  })
+
+  // ─────────── PECM-37: Canvas/Line mode is global and persisted ───────────
+  const tabCountBefore37 = findTabItems().length
+  const switchedToCanvas37 = await clickModeOption('canvas')
+  await waitForMode('canvas')
+  const persistedCanvas37 = await waitForPersistedMode('canvas')
+  const addTab37 = findAddTabButton()
+  addTab37?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+  const newTabCanvas37 = await waitFor('pecm-37-new-tab-canvas', () => {
+    return findTabItems().length === tabCountBefore37 + 1 && findModeTrigger()?.dataset.mode === 'canvas'
+  }, 3000, 80)
+  const switchedToLine37 = await clickModeOption('line')
+  await waitForMode('line')
+  const persistedLine37 = await waitForPersistedMode('line')
+  const firstTab37 = findTabItems()[0] ?? null
+  firstTab37?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+  const firstTabLine37 = await waitFor('pecm-37-first-tab-line', () => {
+    return findModeTrigger()?.dataset.mode === 'line'
+  }, 3000, 80)
+  record('PECM-37-mode-preference-global-and-persisted', switchedToCanvas37 && persistedCanvas37 && Boolean(addTab37) && newTabCanvas37 && switchedToLine37 && persistedLine37 && Boolean(firstTab37) && firstTabLine37, {
+    tabCountBefore: tabCountBefore37,
+    tabCountAfter: findTabItems().length,
+    addTabFound: Boolean(addTab37),
+    switchedToCanvas: switchedToCanvas37,
+    persistedCanvas: persistedCanvas37,
+    newTabCanvas: newTabCanvas37,
+    switchedToLine: switchedToLine37,
+    persistedLine: persistedLine37,
+    firstTabFound: Boolean(firstTab37),
+    firstTabLine: firstTabLine37,
+    activeMode: findModeTrigger()?.dataset.mode
   })
 
   // Restore the default Line mode and empty editor so subsequent suites start clean.

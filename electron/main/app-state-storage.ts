@@ -135,7 +135,9 @@ interface TabState {
   editorDraft?: EditorDraft
   activeSubpage?: 'diff' | 'editor' | 'history' | null
   subpageTerminalId?: string | null
+  /** Deprecated: prompt input mode now lives in uiPreferences.promptInputMode. */
   promptInputMode?: 'canvas' | 'line'
+  /** Deprecated migration marker for legacy per-Tab prompt input mode. */
   promptInputModePreferenceVersion?: number
 }
 
@@ -143,6 +145,7 @@ interface TabState {
  * Global UI preferences persisted across restarts and upgrades.
  */
 interface UIPreferences {
+  promptInputMode?: 'canvas' | 'line'
   projectEditorFileTreeWidth?: number
   projectEditorModalSize?: { width: number; height: number }
   projectEditorMarkdownPreviewWidth?: number
@@ -337,6 +340,20 @@ function normalizePromptTimestamp<T extends Prompt>(prompt: T): T {
   }
 }
 
+function normalizePromptInputMode(value: unknown): 'canvas' | 'line' {
+  return value === 'canvas' ? 'canvas' : 'line'
+}
+
+function validateUIPreferences(value: unknown): UIPreferences {
+  const prefs = value && typeof value === 'object'
+    ? (value as UIPreferences)
+    : {}
+  return {
+    ...prefs,
+    promptInputMode: normalizePromptInputMode(prefs.promptInputMode)
+  }
+}
+
 /**
  * Create default tab state
  */
@@ -351,9 +368,7 @@ function createDefaultTabState(id: string): TabState {
     promptEditorHeight: DEFAULT_PROMPT_EDITOR_HEIGHT,
     activeTerminalId: null,
     terminals: [],
-    localPrompts: [],
-    promptInputMode: 'line',
-    promptInputModePreferenceVersion: 2
+    localPrompts: []
   }
 }
 
@@ -375,7 +390,7 @@ function createDefaultAppState(): AppState {
     lastFocusedTerminalId: null,
     projectEditorStates: {},
     promptSchedules: [],
-    uiPreferences: {},
+    uiPreferences: { promptInputMode: 'line' },
     customLayoutPresets: [],
     updatedAt: Date.now()
   }
@@ -492,9 +507,7 @@ class AppStateStorage {
       promptEditorHeight: DEFAULT_PROMPT_EDITOR_HEIGHT,
       activeTerminalId: legacyConfig?.activeTerminalId ?? null,
       terminals: migratedTerminals,
-      localPrompts,
-      promptInputMode: 'line',
-      promptInputModePreferenceVersion: 2
+      localPrompts
     }
 
     const newState: AppState = {
@@ -510,7 +523,7 @@ class AppStateStorage {
       lastFocusedTerminalId: null,
       projectEditorStates: {},
       promptSchedules: [],
-      uiPreferences: {},
+      uiPreferences: { promptInputMode: 'line' },
       customLayoutPresets: [],
       updatedAt: Date.now()
     }
@@ -675,11 +688,7 @@ class AppStateStorage {
       (state as AppState & { promptSchedules?: unknown }).promptSchedules
     )
 
-    // Preserve uiPreferences as-is (all fields are optional)
-    const uiPreferences: UIPreferences =
-      state.uiPreferences && typeof state.uiPreferences === 'object'
-        ? (state.uiPreferences as UIPreferences)
-        : {}
+    const uiPreferences = validateUIPreferences(state.uiPreferences)
 
     const customLayoutPresets = validateCustomLayoutPresets(
       (state as AppState & { customLayoutPresets?: unknown }).customLayoutPresets
@@ -786,11 +795,7 @@ class AppStateStorage {
         : null,
       subpageTerminalId: typeof tab.subpageTerminalId === 'string' && tab.subpageTerminalId
         ? tab.subpageTerminalId
-        : null,
-      promptInputMode: tab.promptInputModePreferenceVersion === 2 && tab.promptInputMode === 'canvas'
-        ? 'canvas'
-        : 'line',
-      promptInputModePreferenceVersion: 2
+        : null
     }
   }
 

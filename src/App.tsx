@@ -337,6 +337,8 @@ const TabPromptNotebook = memo(function TabPromptNotebook({
     updateTabById,
     updateEditorDraftForTab,
     updatePromptEditorHeightForTab,
+    getUIPreferences,
+    updateUIPreferences,
     importPrompts,
     getTerminalRepoRoot,
     getTerminalBranch,
@@ -368,6 +370,7 @@ const TabPromptNotebook = memo(function TabPromptNotebook({
   }, [state.globalPrompts])
 
   const editorDraft = tab.editorDraft ?? null
+  const promptInputMode = getUIPreferences().promptInputMode === 'canvas' ? 'canvas' : 'line'
 
   // The autotest harness ships the default tab with `activePanel === null`
   // and never clicks a panel toggle. PL-11 (run-prompt-list-autotest.sh)
@@ -410,11 +413,12 @@ const TabPromptNotebook = memo(function TabPromptNotebook({
   }, [tab.id, updatePromptEditorHeightForTab])
 
   const handlePromptInputModeChange = useCallback((mode: 'canvas' | 'line') => {
-    updateTabById(tab.id, {
-      promptInputMode: mode,
-      promptInputModePreferenceVersion: 2
+    perfTrace(PERF_TRACE_EVENT.RENDERER_PROMPT_INPUT_MODE_CHANGE, {
+      mode,
+      tabCount: state.tabs.length
     })
-  }, [tab.id, updateTabById])
+    updateUIPreferences({ promptInputMode: mode })
+  }, [state.tabs.length, updateUIPreferences])
 
   const handleExportAllPrompts = useCallback(async () => {
     const exportNow = Date.now()
@@ -496,7 +500,7 @@ const TabPromptNotebook = memo(function TabPromptNotebook({
       onUpdatePromptCleanup={onUpdatePromptCleanup}
       promptEditorHeight={tab.promptEditorHeight}
       onPromptEditorHeightChange={handlePromptEditorHeightChange}
-      promptInputMode={tab.promptInputMode ?? 'line'}
+      promptInputMode={promptInputMode}
       onPromptInputModeChange={handlePromptInputModeChange}
       editorDraft={editorDraft}
       onEditorDraftChange={handleEditorDraftChange}

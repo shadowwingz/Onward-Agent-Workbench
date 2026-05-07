@@ -10,19 +10,24 @@ source "$ROOT_DIR/test/autotest/resolve-dev-app-bin.sh"
 APP_BIN="${1:-$(resolve_dev_app_bin "$ROOT_DIR" || true)}"
 LOG_FILE="${2:-$REPO_ROOT/traces/test-logs/prompt-editor-context-menu-autotest.log}"
 mkdir -p "$(dirname "$LOG_FILE")"
-if [[ -z "$APP_BIN" || ! -x "$APP_BIN" ]]; then
-  echo "ERROR: app binary not found or not executable: ${APP_BIN:-<empty>}" >&2
-  echo "Run a development build first: rm -rf out release && pnpm dist:dev" >&2
-  exit 1
-fi
+RESULTS_DIR="$ROOT_DIR/test/autotest/results"
+mkdir -p "$RESULTS_DIR"
+USER_DATA_DIR="$(mktemp -d "$RESULTS_DIR/prompt-editor-context-menu-user-data.XXXXXX")"
 
 # Sweep any leftover __autotest_* fixtures in the repo root before starting.
 # Defence-in-depth — orchestrator does the same, runner-level trap is the
 # authoritative cleanup contract per CLAUDE.md autotest rules.
 cleanup_autotest_fixtures() {
   find "$ROOT_DIR" -maxdepth 1 -name '__autotest_*' -exec rm -rf {} + 2>/dev/null || true
+  rm -rf "$USER_DATA_DIR" 2>/dev/null || true
 }
 trap cleanup_autotest_fixtures EXIT
+
+if [[ -z "$APP_BIN" || ! -x "$APP_BIN" ]]; then
+  echo "ERROR: app binary not found or not executable: ${APP_BIN:-<empty>}" >&2
+  echo "Run a development build first: rm -rf out release && pnpm dist:dev" >&2
+  exit 1
+fi
 
 rm -f "$LOG_FILE"
 
@@ -37,6 +42,7 @@ ONWARD_AUTOTEST=1 \
 ONWARD_AUTOTEST_SUITE=prompt-editor-context-menu \
 ONWARD_AUTOTEST_CWD="$ROOT_DIR" \
 ONWARD_AUTOTEST_EXIT=1 \
+ONWARD_USER_DATA_DIR="$USER_DATA_DIR" \
 "$APP_BIN" > "$LOG_FILE" 2>&1 || true
 
 echo ""
@@ -53,8 +59,8 @@ if grep -q "\[AutoTest\] FAIL" "$LOG_FILE"; then
 fi
 
 # Final sentinel assertion id — if we never see it, the suite did not run end-to-end.
-if ! grep -q "PECM-34-context-send-to-task-transform" "$LOG_FILE"; then
-  echo "Missing PECM-34 result; the test may not have executed correctly" >&2
+if ! grep -q "PECM-37-mode-preference-global-and-persisted" "$LOG_FILE"; then
+  echo "Missing PECM-37 result; the test may not have executed correctly" >&2
   tail -n 80 "$LOG_FILE" >&2
   exit 1
 fi

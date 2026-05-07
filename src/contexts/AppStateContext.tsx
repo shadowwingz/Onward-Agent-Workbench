@@ -227,6 +227,17 @@ function normalizePersistedTerminalCwd(value: string | null | undefined): string
   return trimmed || null
 }
 
+function normalizePromptInputMode(value: unknown): 'canvas' | 'line' {
+  return value === 'canvas' ? 'canvas' : 'line'
+}
+
+function normalizeUIPreferences(value: UIPreferences | null | undefined): UIPreferences {
+  return {
+    ...(value ?? {}),
+    promptInputMode: normalizePromptInputMode(value?.promptInputMode)
+  }
+}
+
 /**
  * Create default tab state
  */
@@ -241,9 +252,7 @@ function createDefaultTabState(id: string): TabState {
     promptEditorHeight: DEFAULT_PROMPT_EDITOR_HEIGHT,
     activeTerminalId: null,
     terminals: [],
-    localPrompts: [],
-    promptInputMode: 'line',
-    promptInputModePreferenceVersion: 2
+    localPrompts: []
   }
 }
 
@@ -260,7 +269,7 @@ function createDefaultAppState(): AppState {
     lastFocusedTerminalId: null,
     projectEditorStates: {},
     promptSchedules: [],
-    uiPreferences: {},
+    uiPreferences: { promptInputMode: 'line' },
     customLayoutPresets: [],
     updatedAt: Date.now()
   }
@@ -492,32 +501,35 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
           ...loadedState,
           globalPrompts: (loadedState.globalPrompts || []).map(prompt => normalizePromptTimestamp(prompt)),
           promptCleanup: normalizePromptCleanup(loadedState.promptCleanup),
-          tabs: loadedState.tabs.map(tab => ({
-            ...tab,
-            layoutMode: migrateLayoutMode((tab as { layoutMode?: unknown }).layoutMode),
-            promptPanelWidth: Math.max(tab.promptPanelWidth || 0, DEFAULT_PROMPT_PANEL_WIDTH),
-            promptEditorHeight: normalizePromptEditorHeight(
-              tab.promptEditorHeight ?? tab.editorDraft?.height ?? DEFAULT_PROMPT_EDITOR_HEIGHT
-            ),
-            promptInputMode: tab.promptInputModePreferenceVersion === 2 && tab.promptInputMode === 'canvas'
-              ? 'canvas'
-              : 'line',
-            promptInputModePreferenceVersion: 2,
-            terminals: (tab.terminals ?? []).map((terminal) => ({
-              ...terminal,
-              customName: terminal.customName ?? null,
-              manualNameRepoRoot: typeof (terminal as PersistedTerminalState).manualNameRepoRoot === 'string'
-                ? (terminal as PersistedTerminalState).manualNameRepoRoot
-                : null,
-              lastCwd: normalizePersistedTerminalCwd(terminal.lastCwd)
-            })),
-            localPrompts: (tab.localPrompts || []).map(prompt => normalizePromptTimestamp(prompt))
-          })),
+          tabs: loadedState.tabs.map(tab => {
+            const {
+              promptInputMode: _legacyPromptInputMode,
+              promptInputModePreferenceVersion: _legacyPromptInputModePreferenceVersion,
+              ...restTab
+            } = tab
+            return {
+              ...restTab,
+              layoutMode: migrateLayoutMode((tab as { layoutMode?: unknown }).layoutMode),
+              promptPanelWidth: Math.max(tab.promptPanelWidth || 0, DEFAULT_PROMPT_PANEL_WIDTH),
+              promptEditorHeight: normalizePromptEditorHeight(
+                tab.promptEditorHeight ?? tab.editorDraft?.height ?? DEFAULT_PROMPT_EDITOR_HEIGHT
+              ),
+              terminals: (tab.terminals ?? []).map((terminal) => ({
+                ...terminal,
+                customName: terminal.customName ?? null,
+                manualNameRepoRoot: typeof (terminal as PersistedTerminalState).manualNameRepoRoot === 'string'
+                  ? (terminal as PersistedTerminalState).manualNameRepoRoot
+                  : null,
+                lastCwd: normalizePersistedTerminalCwd(terminal.lastCwd)
+              })),
+              localPrompts: (tab.localPrompts || []).map(prompt => normalizePromptTimestamp(prompt))
+            }
+          }),
           projectEditorStates: Object.fromEntries(
             Object.entries(loadedState.projectEditorStates ?? {}).map(([key, value]) => [key, normalizeProjectEditorState(value)])
           ),
           promptSchedules: Array.isArray(loadedState.promptSchedules) ? loadedState.promptSchedules : [],
-          uiPreferences: loadedState.uiPreferences ?? {},
+          uiPreferences: normalizeUIPreferences(loadedState.uiPreferences),
           customLayoutPresets: normalizeCustomLayoutPresets(
             (loadedState as { customLayoutPresets?: unknown }).customLayoutPresets
           )
@@ -530,8 +542,10 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
           return !original
             || tab.promptPanelWidth !== original.promptPanelWidth
             || tab.promptEditorHeight !== original.promptEditorHeight
+            || original.promptInputMode !== undefined
+            || original.promptInputModePreferenceVersion !== undefined
             || tab.terminals.some((terminal, terminalIndex) => terminal.lastCwd !== original.terminals?.[terminalIndex]?.lastCwd)
-        })
+        }) || normalizedState.uiPreferences.promptInputMode !== loadedState.uiPreferences?.promptInputMode
         if (shouldSave) {
           await window.electronAPI.appState.save(normalizedState)
           lastPersistedStateRef.current = normalizedState

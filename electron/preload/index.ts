@@ -331,7 +331,9 @@ export interface TabState {
   terminals: PersistedTerminalState[]
   localPrompts: LocalPrompt[]
   editorDraft?: EditorDraft
+  /** Deprecated: prompt input mode now lives in AppState.uiPreferences.promptInputMode. */
   promptInputMode?: 'canvas' | 'line'
+  /** Deprecated migration marker for legacy per-Tab prompt input mode. */
   promptInputModePreferenceVersion?: number
 }
 

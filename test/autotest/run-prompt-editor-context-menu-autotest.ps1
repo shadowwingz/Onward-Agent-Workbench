@@ -24,8 +24,14 @@ if (-not $LogFile) {
   New-Item -ItemType Directory -Force (Split-Path -Parent $LogFile) | Out-Null
 }
 
+$ResultsDir = Join-Path $RootDir "test/autotest/results"
+New-Item -ItemType Directory -Force $ResultsDir | Out-Null
+$UserDataDir = Join-Path $ResultsDir ("prompt-editor-context-menu-user-data-" + [guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Force $UserDataDir | Out-Null
+
 if (-not (Test-Path $AppBin)) {
   Write-Error "App binary not found: $AppBin"
+  Remove-Item -Path $UserDataDir -Recurse -Force -ErrorAction SilentlyContinue
   exit 1
 }
 
@@ -39,8 +45,10 @@ if (Test-Path $LogFile) {
 function Invoke-AutotestFixtureSweep {
   Get-ChildItem -Path $RootDir -Filter '__autotest_*' -Force -ErrorAction SilentlyContinue |
     ForEach-Object { Remove-Item -Path $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+  Remove-Item -Path $UserDataDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 Invoke-AutotestFixtureSweep
+New-Item -ItemType Directory -Force $UserDataDir | Out-Null
 
 Write-Host "Starting prompt editor context-menu autotest..."
 
@@ -49,6 +57,7 @@ $env:ONWARD_AUTOTEST = "1"
 $env:ONWARD_AUTOTEST_SUITE = "prompt-editor-context-menu"
 $env:ONWARD_AUTOTEST_CWD = $RootDir
 $env:ONWARD_AUTOTEST_EXIT = "1"
+$env:ONWARD_USER_DATA_DIR = $UserDataDir
 
 try {
   & $AppBin *> $LogFile
@@ -56,6 +65,7 @@ try {
 }
 
 Invoke-AutotestFixtureSweep
+Remove-Item Env:\ONWARD_USER_DATA_DIR -ErrorAction SilentlyContinue
 
 $logContent = Get-Content $LogFile -Raw -ErrorAction SilentlyContinue
 
@@ -65,7 +75,7 @@ if ($logContent -match "\[AutoTest\] FAIL") {
   exit 1
 }
 
-if ($logContent -notmatch "PECM-34-context-send-to-task-transform") {
+if ($logContent -notmatch "PECM-37-mode-preference-global-and-persisted") {
   Write-Error "Prompt editor context-menu autotest did not complete. Log: $LogFile"
   Get-Content $LogFile -Tail 200
   exit 1

@@ -215,9 +215,9 @@ export interface TabState {
   activeSubpage?: 'diff' | 'editor' | 'history' | null
   /** Terminal that owns the active subpage (used for correct CWD on restore) */
   subpageTerminalId?: string | null
-  /** Prompt input mode: 'canvas' = click-anywhere virtual cursor, 'line' = native line-by-line. Defaults to 'line'. */
+  /** Deprecated: prompt input mode now lives in uiPreferences.promptInputMode. */
   promptInputMode?: 'canvas' | 'line'
-  /** Version marker so old persisted default-canvas values can migrate to the new default line mode. */
+  /** Deprecated migration marker for legacy per-Tab prompt input mode. */
   promptInputModePreferenceVersion?: number
 }
 
@@ -226,6 +226,8 @@ export interface TabState {
  * Migrated from localStorage to ensure reliable state recovery.
  */
 export interface UIPreferences {
+  /** Global Prompt input mode shared by every Tab. Defaults to 'line'. */
+  promptInputMode?: 'canvas' | 'line'
   // Project Editor
   projectEditorFileTreeWidth?: number
   projectEditorModalSize?: { width: number; height: number }

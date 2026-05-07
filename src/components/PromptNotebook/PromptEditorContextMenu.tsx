@@ -13,8 +13,26 @@ import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
 import './PromptEditorContextMenu.css'
 
 const PINNED_PRIMARY_LIMIT = 10
+const MENU_VIEWPORT_MARGIN = 8
+const SUBMENU_GAP = 2
+const SUBMENU_VERTICAL_OFFSET = 6
+const SUBMENU_LAYOUT_SAFETY_INSET = 4
 
 type SubmenuKey = 'pinPrimary' | 'task' | null
+
+type SubmenuLayout = {
+  left: number
+  top: number
+  width: number
+  minWidth: number
+  maxWidth: number
+  maxHeight: number
+}
+
+function clamp(value: number, min: number, max: number): number {
+  if (max < min) return min
+  return Math.min(Math.max(value, min), max)
+}
 
 export interface ContextMenuSnapshot {
   value: string
@@ -85,7 +103,8 @@ export function PromptEditorContextMenu({
   // useLayoutEffect runs synchronously between commit and paint, so the
   // browser only sees the final, on-screen position — no flicker.
   const [effectivePosition, setEffectivePosition] = useState<{ x: number; y: number }>(position)
-  const [submenuFlip, setSubmenuFlip] = useState<{ horizontal: boolean; vertical: boolean }>({ horizontal: false, vertical: false })
+  const [submenuLayout, setSubmenuLayout] = useState<SubmenuLayout | null>(null)
+  const [viewportVersion, setViewportVersion] = useState(0)
 
   // Snapshot is captured atomically by the parent's onContextMenu handler
   // and passed in as a prop, so React reconciliation cannot revert the
@@ -118,7 +137,7 @@ export function PromptEditorContextMenu({
     const rect = el.getBoundingClientRect()
     const vw = window.innerWidth
     const vh = window.innerHeight
-    const margin = 8
+    const margin = MENU_VIEWPORT_MARGIN
     let nx = position.x
     let ny = position.y
     if (nx + rect.width > vw - margin) {
@@ -130,27 +149,92 @@ export function PromptEditorContextMenu({
       ny = flipped >= margin ? flipped : Math.max(margin, vh - rect.height - margin)
     }
     setEffectivePosition(prev => (prev.x === nx && prev.y === ny ? prev : { x: nx, y: ny }))
-  }, [position.x, position.y])
+  }, [position.x, position.y, viewportVersion])
 
-  // Submenus default to opening on the right (left:100%). When the open
-  // submenu's right edge would punch through the viewport, fall back to
-  // left:auto / right:100%; same idea for vertical when the bottom would
-  // overflow. Re-measured on every submenu change.
+  // Submenus stay nested in the menu DOM for outside-click containment, but
+  // their coordinates are derived from the Onward viewport. Measure their
+  // full natural size first, choose the side with more room, clamp to the
+  // viewport, then convert that viewport coordinate back to wrapper-local
+  // absolute offsets. This avoids `position: fixed` being captured by the
+  // parent menu's transform animation.
   useLayoutEffect(() => {
     if (!submenu) {
-      setSubmenuFlip(prev => (prev.horizontal || prev.vertical ? { horizontal: false, vertical: false } : prev))
+      setSubmenuLayout(prev => (prev === null ? prev : null))
       return
     }
     const el = submenuRef.current
-    if (!el) return
-    const rect = el.getBoundingClientRect()
+    const anchorEl = el?.parentElement
+    if (!el || !anchorEl) return
+    const startedAt = performance.now()
+    const anchorRect = anchorEl.getBoundingClientRect()
+    const submenuRect = el.getBoundingClientRect()
     const vw = window.innerWidth
     const vh = window.innerHeight
-    const margin = 8
-    const horizontal = rect.right > vw - margin
-    const vertical = rect.bottom > vh - margin
-    setSubmenuFlip(prev => (prev.horizontal === horizontal && prev.vertical === vertical ? prev : { horizontal, vertical }))
-  }, [submenu, showAllPinned])
+    const margin = MENU_VIEWPORT_MARGIN + SUBMENU_LAYOUT_SAFETY_INSET
+    const availableWidth = Math.max(80, vw - margin * 2)
+    const availableHeight = Math.max(80, vh - margin * 2)
+    const computedStyle = window.getComputedStyle(el)
+    const computedWidth = Number.parseFloat(computedStyle.width) || 0
+    const computedHeight = Number.parseFloat(computedStyle.height) || 0
+    const naturalWidth = Math.ceil(Math.max(submenuRect.width, el.scrollWidth, computedWidth))
+    const naturalHeight = Math.ceil(Math.max(submenuRect.height, el.scrollHeight, computedHeight))
+    const width = Math.min(naturalWidth, availableWidth)
+    const height = Math.min(naturalHeight, availableHeight)
+    const spaceRight = vw - margin - anchorRect.right - SUBMENU_GAP
+    const spaceLeft = anchorRect.left - margin - SUBMENU_GAP
+    const openRight = spaceRight >= width || spaceRight >= spaceLeft
+    const preferredLeft = openRight
+      ? anchorRect.right + SUBMENU_GAP
+      : anchorRect.left - SUBMENU_GAP - width
+    const preferredTop = anchorRect.top - SUBMENU_VERTICAL_OFFSET
+    const viewportLeft = clamp(preferredLeft, margin, vw - margin - width)
+    const viewportTop = clamp(preferredTop, margin, vh - margin - height)
+    const clampedX = Math.abs(viewportLeft - preferredLeft) > 0.5
+    const clampedY = Math.abs(viewportTop - preferredTop) > 0.5
+    const nextLayout: SubmenuLayout = {
+      left: Math.round(viewportLeft - anchorRect.left),
+      top: Math.round(viewportTop - anchorRect.top),
+      width: Math.round(width),
+      minWidth: Math.round(Math.min(220, availableWidth)),
+      maxWidth: Math.round(availableWidth),
+      maxHeight: Math.round(availableHeight)
+    }
+    perfTrace(PERF_TRACE_EVENT.RENDERER_PROMPT_EDITOR_CTX_SUBMENU_LAYOUT, {
+      submenu,
+      openRight,
+      clampedX,
+      clampedY,
+      naturalWidth,
+      naturalHeight,
+      width,
+      height,
+      viewportWidth: vw,
+      viewportHeight: vh,
+      durationMs: +(performance.now() - startedAt).toFixed(2)
+    })
+    setSubmenuLayout(prev => (
+      prev &&
+      prev.left === nextLayout.left &&
+      prev.top === nextLayout.top &&
+      prev.width === nextLayout.width &&
+      prev.minWidth === nextLayout.minWidth &&
+      prev.maxWidth === nextLayout.maxWidth &&
+      prev.maxHeight === nextLayout.maxHeight
+        ? prev
+        : nextLayout
+    ))
+  }, [submenu, showAllPinned, viewportVersion, submenuLayout])
+
+  useLayoutEffect(() => {
+    if (!submenu) return
+    const el = submenuRef.current
+    if (!el) return
+    const observer = new ResizeObserver(() => {
+      setViewportVersion(v => v + 1)
+    })
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [submenu])
 
   useEffect(() => {
     const handleMouseDown = (e: MouseEvent) => {
@@ -164,18 +248,24 @@ export function PromptEditorContextMenu({
         onClose()
       }
     }
-    const handleScrollOrResize = () => {
+    const handleScroll = (e: Event) => {
+      if (menuRef.current && menuRef.current.contains(e.target as Node)) {
+        return
+      }
       onClose()
+    }
+    const handleResize = () => {
+      setViewportVersion(v => v + 1)
     }
     document.addEventListener('mousedown', handleMouseDown)
     document.addEventListener('keydown', handleKey)
-    window.addEventListener('scroll', handleScrollOrResize, true)
-    window.addEventListener('resize', handleScrollOrResize)
+    window.addEventListener('scroll', handleScroll, true)
+    window.addEventListener('resize', handleResize)
     return () => {
       document.removeEventListener('mousedown', handleMouseDown)
       document.removeEventListener('keydown', handleKey)
-      window.removeEventListener('scroll', handleScrollOrResize, true)
-      window.removeEventListener('resize', handleScrollOrResize)
+      window.removeEventListener('scroll', handleScroll, true)
+      window.removeEventListener('resize', handleResize)
       if (submenuTimerRef.current !== null) {
         window.clearTimeout(submenuTimerRef.current)
         submenuTimerRef.current = null
@@ -272,7 +362,12 @@ export function PromptEditorContextMenu({
       window.clearTimeout(submenuTimerRef.current)
       submenuTimerRef.current = null
     }
-    setSubmenu(key)
+    setSubmenu(prev => {
+      if (prev !== key) {
+        setSubmenuLayout(null)
+      }
+      return key
+    })
   }, [])
 
   const scheduleCloseSubmenu = useCallback(() => {
@@ -281,6 +376,7 @@ export function PromptEditorContextMenu({
     }
     submenuTimerRef.current = window.setTimeout(() => {
       setSubmenu(null)
+      setSubmenuLayout(null)
       submenuTimerRef.current = null
     }, 150)
   }, [])
@@ -365,6 +461,25 @@ export function PromptEditorContextMenu({
     </button>
   ))
 
+  const submenuStyle = submenuLayout
+    ? {
+        position: 'absolute' as const,
+        left: submenuLayout.left,
+        top: submenuLayout.top,
+        width: submenuLayout.width,
+        minWidth: submenuLayout.minWidth,
+        maxWidth: submenuLayout.maxWidth,
+        maxHeight: submenuLayout.maxHeight,
+        marginLeft: 0,
+        marginRight: 0
+      }
+    : {
+        position: 'absolute' as const,
+        left: 0,
+        top: 0,
+        visibility: 'hidden' as const
+      }
+
   return createPortal(
     <div
       ref={menuRef}
@@ -397,7 +512,8 @@ export function PromptEditorContextMenu({
         {submenu === 'task' && hasContent && terminals.length > 0 && (
           <div
             ref={submenuRef}
-            className={`prompt-editor-context-submenu ${submenuFlip.horizontal ? 'flip-h' : ''} ${submenuFlip.vertical ? 'flip-v' : ''}`}
+            className="prompt-editor-context-submenu"
+            style={submenuStyle}
             role="menu"
             onMouseEnter={() => openSubmenu('task')}
             onMouseLeave={scheduleCloseSubmenu}
@@ -501,7 +617,8 @@ export function PromptEditorContextMenu({
         {submenu === 'pinPrimary' && (
           <div
             ref={submenuRef}
-            className={`prompt-editor-context-submenu ${submenuFlip.horizontal ? 'flip-h' : ''} ${submenuFlip.vertical ? 'flip-v' : ''}`}
+            className="prompt-editor-context-submenu"
+            style={submenuStyle}
             role="menu"
             onMouseEnter={() => openSubmenu('pinPrimary')}
             onMouseLeave={scheduleCloseSubmenu}
