@@ -236,6 +236,21 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     })
     return ok
   }
+  const awaitLastHunkAction = async (label: string, timeoutMs = 5000): Promise<boolean | null> => {
+    const promise = window.__onwardGitDiffDebug?.waitForLastHunkActionForTest?.()
+    if (!promise) return null
+    const startedAt = performance.now()
+    logTiming('hunk-action:start', { actionLabel: label, timeoutMs })
+    const timeout = baseSleep(timeoutMs).then(() => 'timeout' as const)
+    const result = await Promise.race([promise, timeout])
+    logTiming('hunk-action:end', {
+      actionLabel: label,
+      result,
+      elapsedMs: elapsed(startedAt),
+      timeoutMs
+    })
+    return result === 'timeout' ? null : result
+  }
   const record = (name: string, ok: boolean, detail?: Record<string, unknown>) => {
     const now = performance.now()
     logTiming('record', {
@@ -809,10 +824,13 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     const indexContent = 'parent source line\nGDS-21 index version\n'
     const worktreeContent = 'parent source line\nGDS-21 working tree version\n'
     const untrackedFile = `gds-21-untracked-${Date.now()}.txt`
+    const hunkSwitchFile = 'README.md'
+    const hunkSwitchContent = '# Clean parent\n\nGDS-29 hunk switch file\n'
 
     await window.electronAPI.git.saveFileContent(cleanRoot, parentFile, indexContent)
     const staged = await window.electronAPI.git.stageFile(cleanRoot, parentFile)
     await window.electronAPI.git.saveFileContent(cleanRoot, parentFile, worktreeContent)
+    await window.electronAPI.git.saveFileContent(cleanRoot, hunkSwitchFile, hunkSwitchContent)
     const created = await window.electronAPI.project.createFile(cleanRoot, untrackedFile, 'GDS-21 untracked body\n')
     await sleep(280)
 
@@ -1004,6 +1022,15 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     const refreshButtonVisible = Boolean(document.querySelector('.git-diff-refresh-changes'))
     const refreshResult = await window.__onwardGitDiffDebug?.refreshChanges?.()
     await waitFor('GDS-28-refresh-ready', () => Boolean(window.__onwardGitDiffDebug?.isSelectedReady()), 6000)
+    const refreshLoad = window.__onwardGitDiffDebug?.getLastFileContentLoad?.() ?? null
+    const refreshForcedFullBodyMiss = Boolean(
+      refreshLoad?.reason === 'refresh' &&
+      refreshLoad.force === true &&
+      refreshLoad.result === 'success' &&
+      refreshLoad.cacheInfo?.state === 'miss' &&
+      refreshLoad.cacheInfo?.source === 'worker-rebuild' &&
+      refreshLoad.cacheInfo?.missReason === 'invalidated-refresh'
+    )
     const termsButtonVisible = Boolean(document.querySelector('.git-diff-terms-button'))
     const termsToggle = window.__onwardGitDiffDebug?.toggleTermsPopover?.() === true
     await waitFor('GDS-28-terms-popover', () => window.__onwardGitDiffDebug?.getTermsPopoverOpen?.() === true, 2000, 50)
@@ -1013,6 +1040,7 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     record('GDS-28-refresh-and-terms-help', Boolean(
       refreshButtonVisible &&
       refreshResult &&
+      refreshForcedFullBodyMiss &&
       termsButtonVisible &&
       termsToggle &&
       termsText.includes('Staged Changes') &&
@@ -1022,36 +1050,140 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     ), {
       refreshButtonVisible,
       refreshResult,
+      refreshLoad,
+      refreshForcedFullBodyMiss,
       termsButtonVisible,
       termsToggle,
       termsText,
       groupTitles
     })
 
-    const firstHunkReady = await waitFor('GDS-29-first-hunk-ready', () => {
-      return (window.__onwardGitDiffDebug?.getDiffNavigationState?.().changeCount ?? 0) > 0
-    }, 2500, 50)
-    const hunkHoverInitialState = window.__onwardGitDiffDebug?.getHunkActionDebugState?.() ?? null
-    const hunkActionsHiddenByDefault = Boolean(
-      hunkHoverInitialState &&
-      hunkHoverInitialState.visibleWidgetDomCount === 0
-    )
-    const hunkHoverRevealResult = window.__onwardGitDiffDebug?.revealFirstHunkActionForTest?.() === true
-    const hunkHoverRevealed = await waitFor('GDS-29-hunk-actions-hover-reveal', () => {
-      return (window.__onwardGitDiffDebug?.getHunkActionDebugState?.().visibleWidgetDomCount ?? 0) > 0
-    }, 1000, 50)
-    record('GDS-29-inline-hunk-actions-hover-reveal', Boolean(
-      firstHunkReady &&
-      hunkActionsHiddenByDefault &&
-      hunkHoverRevealResult &&
-      hunkHoverRevealed
-    ), {
-      hunkHoverInitialState,
-      hunkHoverRevealResult,
-      hunkHoverFinalState: window.__onwardGitDiffDebug?.getHunkActionDebugState?.() ?? null
-    })
-    const hunkStageResult = firstHunkReady
-      ? await window.__onwardGitDiffDebug?.triggerFirstHunkAction?.('stage')
+	    const firstHunkReady = await waitFor('GDS-29-first-hunk-ready', () => {
+	      return (window.__onwardGitDiffDebug?.getDiffNavigationState?.().changeCount ?? 0) > 0
+	    }, 2500, 50)
+	    const hunkActionsHiddenInitially = (window.__onwardGitDiffDebug?.getHunkActionDebugState?.().visibleWidgetDomCount ?? 0) === 0
+	    const hunkActionsRevealedInitially = await waitFor('GDS-29-hunk-actions-hover-revealed-initially', () => {
+        window.__onwardGitDiffDebug?.revealFirstHunkActionForTest?.()
+	      return (window.__onwardGitDiffDebug?.getHunkActionDebugState?.().visibleWidgetDomCount ?? 0) > 0
+	    }, 2500, 50)
+	    record('GDS-29-inline-hunk-actions-hover-revealed', Boolean(
+	      firstHunkReady &&
+        hunkActionsHiddenInitially &&
+	      hunkActionsRevealedInitially
+	    ), {
+        hunkActionsHiddenInitially,
+	      hunkActionState: window.__onwardGitDiffDebug?.getHunkActionDebugState?.() ?? null
+	    })
+
+	    const hunkFilesBeforeSwitch = window.__onwardGitDiffDebug?.getFileList() ?? []
+	    const stagedHunkIndex = findDiffFileIndex(hunkFilesBeforeSwitch, parentFile, 'staged')
+	    const unstagedHunkIndex = findDiffFileIndex(hunkFilesBeforeSwitch, parentFile, 'unstaged')
+	    const hunkSwitchIndex = findDiffFileIndex(hunkFilesBeforeSwitch, hunkSwitchFile, 'unstaged')
+	    const switchedToStagedForHunks = stagedHunkIndex >= 0 &&
+	      window.__onwardGitDiffDebug?.selectFileByIndex(stagedHunkIndex) === true
+	    const stagedHunkWidgetsVisible = await waitFor('GDS-29-staged-hunk-actions-visible-after-switch', () => {
+	      const selected = window.__onwardGitDiffDebug?.getSelectedFile?.()
+        window.__onwardGitDiffDebug?.revealFirstHunkActionForTest?.()
+	      const debugState = window.__onwardGitDiffDebug?.getHunkActionDebugState?.()
+	      return selected?.filename === parentFile &&
+	        selected.changeType === 'staged' &&
+	        (debugState?.lineChanges ?? 0) > 0 &&
+	        (debugState?.visibleWidgetDomCount ?? 0) > 0
+	    }, 3500, 50)
+	    const switchedBackToUnstagedForHunks = unstagedHunkIndex >= 0 &&
+	      window.__onwardGitDiffDebug?.selectFileByIndex(unstagedHunkIndex) === true
+	    const unstagedHunkWidgetsVisibleAfterReturn = await waitFor('GDS-29-unstaged-hunk-actions-visible-after-return', () => {
+	      const selected = window.__onwardGitDiffDebug?.getSelectedFile?.()
+        window.__onwardGitDiffDebug?.revealFirstHunkActionForTest?.()
+	      const debugState = window.__onwardGitDiffDebug?.getHunkActionDebugState?.()
+	      return selected?.filename === parentFile &&
+	        selected.changeType === 'unstaged' &&
+	        (debugState?.lineChanges ?? 0) > 0 &&
+	        (debugState?.visibleWidgetDomCount ?? 0) > 0
+	    }, 3500, 50)
+	    record('GDS-29-inline-hunk-actions-survive-file-switch', Boolean(
+	      firstHunkReady &&
+	      switchedToStagedForHunks &&
+	      stagedHunkWidgetsVisible &&
+	      switchedBackToUnstagedForHunks &&
+	      unstagedHunkWidgetsVisibleAfterReturn
+	    ), {
+	      stagedHunkIndex,
+	      unstagedHunkIndex,
+	      switchedToStagedForHunks,
+	      stagedHunkWidgetsVisible,
+	      switchedBackToUnstagedForHunks,
+	      unstagedHunkWidgetsVisibleAfterReturn,
+	      hunkActionState: window.__onwardGitDiffDebug?.getHunkActionDebugState?.() ?? null
+	    })
+	    const switchedToOtherFileForHunks = hunkSwitchIndex >= 0 &&
+	      window.__onwardGitDiffDebug?.selectFileByIndex(hunkSwitchIndex) === true
+	    const otherFileHunkWidgetsVisible = await waitFor('GDS-29-other-file-hunk-actions-visible', () => {
+	      const selected = window.__onwardGitDiffDebug?.getSelectedFile?.()
+        window.__onwardGitDiffDebug?.revealFirstHunkActionForTest?.()
+	      const debugState = window.__onwardGitDiffDebug?.getHunkActionDebugState?.()
+	      return selected?.filename === hunkSwitchFile &&
+	        selected.changeType === 'unstaged' &&
+	        (debugState?.lineChanges ?? 0) > 0 &&
+	        (debugState?.visibleWidgetDomCount ?? 0) > 0
+      }, 3500, 50)
+      const hunkRevertButton = document.querySelector<HTMLButtonElement>('.git-diff-hunk-actions.is-visible .git-diff-hunk-action-button.danger')
+      hunkRevertButton?.click()
+      const hunkRevertClickResult = hunkRevertButton
+        ? await awaitLastHunkAction('GDS-29-hunk-revert-click')
+        : null
+      const hunkRevertApplied = hunkRevertClickResult === true && await waitFor('GDS-29-hunk-revert-applied', () => {
+        const latestFiles = window.__onwardGitDiffDebug?.getFileList() ?? []
+        return latestFiles.length > 0 &&
+          findDiffFileIndex(latestFiles, hunkSwitchFile, 'unstaged') < 0 &&
+          findDiffFileIndex(latestFiles, parentFile, 'unstaged') >= 0
+      }, 4000, 80)
+      record('GDS-29-inline-hunk-revert-action-ui-smoke', Boolean(
+        switchedToOtherFileForHunks &&
+        otherFileHunkWidgetsVisible &&
+        hunkRevertButton &&
+        hunkRevertClickResult === true &&
+        hunkRevertApplied
+      ), {
+        hunkRevertButtonVisible: Boolean(hunkRevertButton),
+        hunkRevertClickResult,
+        hunkRevertApplied,
+        latestFiles: window.__onwardGitDiffDebug?.getFileList().map((file) => ({
+          filename: file.filename,
+          changeType: file.changeType
+        })) ?? []
+      })
+      const parentIndexAfterHunkRevert = findDiffFileIndex(window.__onwardGitDiffDebug?.getFileList() ?? [], parentFile, 'unstaged')
+	    const switchedBackToParentAfterOtherFile = parentIndexAfterHunkRevert >= 0 &&
+	      window.__onwardGitDiffDebug?.selectFileByIndex(parentIndexAfterHunkRevert) === true
+	    const parentWidgetsVisibleAfterAba = await waitFor('GDS-29-parent-hunk-actions-visible-after-A-B-A', () => {
+	      const selected = window.__onwardGitDiffDebug?.getSelectedFile?.()
+        window.__onwardGitDiffDebug?.revealFirstHunkActionForTest?.()
+	      const debugState = window.__onwardGitDiffDebug?.getHunkActionDebugState?.()
+	      return selected?.filename === parentFile &&
+	        selected.changeType === 'unstaged' &&
+	        (debugState?.lineChanges ?? 0) > 0 &&
+	        (debugState?.visibleWidgetDomCount ?? 0) > 0
+	    }, 3500, 50)
+	    record('GDS-29-inline-hunk-actions-survive-A-B-A-file-switch', Boolean(
+	      switchedToOtherFileForHunks &&
+	      otherFileHunkWidgetsVisible &&
+        hunkRevertApplied &&
+	      switchedBackToParentAfterOtherFile &&
+	      parentWidgetsVisibleAfterAba
+	    ), {
+	      unstagedHunkIndex,
+	      hunkSwitchIndex,
+        parentIndexAfterHunkRevert,
+	      switchedToOtherFileForHunks,
+	      otherFileHunkWidgetsVisible,
+        hunkRevertApplied,
+	      switchedBackToParentAfterOtherFile,
+	      parentWidgetsVisibleAfterAba,
+	      hunkActionState: window.__onwardGitDiffDebug?.getHunkActionDebugState?.() ?? null
+	    })
+	    const hunkStageResult = firstHunkReady
+	      ? await window.__onwardGitDiffDebug?.triggerFirstHunkAction?.('stage')
       : false
     const hunkActionApplied = await waitFor('GDS-29-hunk-stage-applied', () => {
       const latestFiles = window.__onwardGitDiffDebug?.getFileList() ?? []
@@ -1080,6 +1212,7 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     })
     await window.electronAPI.git.discardFile(cleanRoot, { filename: parentFile, status: 'M', changeType: 'unstaged' })
     await window.electronAPI.git.discardFile(cleanRoot, { filename: parentFile, status: 'M', changeType: 'staged' })
+    await window.electronAPI.git.discardFile(cleanRoot, { filename: hunkSwitchFile, status: 'M', changeType: 'unstaged' })
     await window.electronAPI.git.discardFile(cleanRoot, { filename: untrackedFile, status: '?', changeType: 'untracked' })
   }
 

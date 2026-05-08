@@ -165,7 +165,8 @@ export function Settings({ terminals, onClose, width, onWidthChange }: SettingsP
     updateShortcut,
     updateTerminalStyle,
     getTerminalStyle,
-    applyStyleGlobally
+    applyStyleGlobally,
+    updatePerformanceDiagnosticsEnabled
   } = useSettings()
   const { t, locale, locales, updateLanguage } = useI18n()
   const isAutotest = window.electronAPI.debug.autotest
@@ -548,6 +549,10 @@ export function Settings({ terminals, onClose, width, onWidthChange }: SettingsP
     window.electronAPI.telemetry.setConsent(newValue)
   }, [telemetryEnabled])
 
+  const handlePerformanceDiagnosticsToggle = useCallback(() => {
+    updatePerformanceDiagnosticsEnabled(!(settings?.performanceDiagnosticsEnabled === true))
+  }, [settings?.performanceDiagnosticsEnabled, updatePerformanceDiagnosticsEnabled])
+
   useEffect(() => {
     if (debugUpdaterStatus || updaterStatus?.phase === 'downloaded') return
     if (!actionError) return
@@ -765,6 +770,31 @@ export function Settings({ terminals, onClose, width, onWidthChange }: SettingsP
               <div className="settings-placeholder-note">
                 <div className="settings-placeholder-title">{t('settings.update.placeholderTitle')}</div>
                 <div className="settings-placeholder-text">{t('settings.update.placeholderBody')}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Diagnostics Section */}
+        <div className="settings-section">
+          <div className="settings-section-title">{t('settings.section.diagnostics')}</div>
+          <div className="settings-section-content">
+            <div className="settings-group">
+              <div className="settings-row">
+                <div className="settings-diagnostics-info">
+                  <label className="settings-diagnostics-toggle">
+                    <input
+                      type="checkbox"
+                      checked={settings?.performanceDiagnosticsEnabled === true}
+                      onChange={handlePerformanceDiagnosticsToggle}
+                      data-testid="settings-performance-diagnostics-toggle"
+                    />
+                    <span>{t('settings.diagnostics.performanceToggle')}</span>
+                  </label>
+                  <p className="settings-diagnostics-description">
+                    {t('settings.diagnostics.performanceDescription')}
+                  </p>
+                </div>
               </div>
             </div>
           </div>

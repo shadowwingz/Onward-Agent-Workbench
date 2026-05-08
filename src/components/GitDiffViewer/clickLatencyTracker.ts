@@ -10,7 +10,8 @@
 // to specific phases. The phases mirror the JadeTree diagnosis we sketched
 // for the diff viewer:
 //
-//   click → ipc → state → editor mount → diff computed → paint
+//   click → ipc → state → model bind → editor mount → diff computed
+//     → DOM commit → paint → tokenize settle
 //
 // Each measurement is keyed by the file's stable cache key so concurrent
 // clicks (the user impatiently clicks A then B before A completes) are
@@ -18,31 +19,62 @@
 // multiple files in flight — the renderer only renders one selection at a
 // time, so a single in-flight measurement is enough.
 
+import type {
+  GitDiffContentCacheMissReason,
+  GitDiffContentCacheSource
+} from '../../types/electron'
+
 export type ClickLatencyPhase =
   | 'clickAt'
   | 'ipcStartAt'
   | 'ipcEndAt'
   | 'stateSetAt'
+  | 'modelBoundAt'
   | 'editorReadyAt'
   | 'diffComputedAt'
+  | 'domCommittedAt'
   | 'paintReadyAt'
+  | 'tokenizeSettleAt'
+
+export type ClickLatencySettleReason =
+  | 'tokens-quiet'
+  | 'dom-quiet'
+  | 'timeout'
+  | 'no-editor'
+  | 'non-text'
+  | 'test'
+  | 'unknown'
 
 export interface ClickLatencyMeasurement {
   fileKey: string
   filename: string
   cacheState: 'hit' | 'miss' | 'unknown'
+  cacheSource: GitDiffContentCacheSource | null
+  cacheMissReason: GitDiffContentCacheMissReason | null
   /** All phase timestamps in ms, monotonic clock (performance.now). */
   clickAt: number
   ipcStartAt: number | null
   ipcEndAt: number | null
   stateSetAt: number | null
+  modelBoundAt: number | null
   editorReadyAt: number | null
   diffComputedAt: number | null
+  domCommittedAt: number | null
   paintReadyAt: number | null
-  /** Total click → first paint latency in ms. Filled after paintReadyAt. */
+  tokenizeSettleAt: number | null
+  /** First paint latency in ms. Filled after paintReadyAt. */
+  firstPaintMs: number | null
+  /** Total click → settled latency in ms. Filled after tokenizeSettleAt. */
   totalMs: number | null
+  settleReason: ClickLatencySettleReason | null
+  coldMountMs: number | null
   /** Indicates the measurement was cancelled (user clicked another file). */
   cancelled: boolean
+}
+
+export interface ClickLatencyCacheInfo {
+  source?: GitDiffContentCacheSource | null
+  missReason?: GitDiffContentCacheMissReason | null
 }
 
 interface ActiveMeasurement extends ClickLatencyMeasurement {
@@ -72,14 +104,22 @@ export class GitDiffClickLatencyTracker {
       fileKey,
       filename,
       cacheState: 'unknown',
+      cacheSource: null,
+      cacheMissReason: null,
       clickAt: this.now(),
       ipcStartAt: null,
       ipcEndAt: null,
       stateSetAt: null,
+      modelBoundAt: null,
       editorReadyAt: null,
       diffComputedAt: null,
+      domCommittedAt: null,
       paintReadyAt: null,
+      tokenizeSettleAt: null,
+      firstPaintMs: null,
       totalMs: null,
+      settleReason: null,
+      coldMountMs: null,
       cancelled: false
     }
   }
@@ -90,10 +130,16 @@ export class GitDiffClickLatencyTracker {
     }
   }
 
-  markIpcEnd(fileKey: string, cacheState: 'hit' | 'miss' | 'unknown' = 'unknown'): void {
+  markIpcEnd(
+    fileKey: string,
+    cacheState: 'hit' | 'miss' | 'unknown' = 'unknown',
+    cacheInfo: ClickLatencyCacheInfo = {}
+  ): void {
     if (this.active && this.active.fileKey === fileKey && this.active.ipcEndAt === null) {
       this.active.ipcEndAt = this.now()
       this.active.cacheState = cacheState
+      this.active.cacheSource = cacheInfo.source ?? null
+      this.active.cacheMissReason = cacheInfo.missReason ?? null
     }
   }
 
@@ -103,10 +149,22 @@ export class GitDiffClickLatencyTracker {
     }
   }
 
+  markModelBound(fileKey: string): void {
+    if (this.active && this.active.fileKey === fileKey && this.active.modelBoundAt === null) {
+      this.active.modelBoundAt = this.now()
+    }
+  }
+
   markEditorReady(fileKey: string): void {
     if (this.active && this.active.fileKey === fileKey && this.active.editorReadyAt === null) {
       this.active.editorReadyAt = this.now()
     }
+  }
+
+  markColdMount(fileKey: string, durationMs: number): void {
+    if (!this.active || this.active.fileKey !== fileKey || this.active.coldMountMs !== null) return
+    if (!Number.isFinite(durationMs) || durationMs < 0) return
+    this.active.coldMountMs = +durationMs.toFixed(2)
   }
 
   markDiffComputed(fileKey: string): void {
@@ -127,21 +185,39 @@ export class GitDiffClickLatencyTracker {
       sealed = true
       if (this.active === target && target.paintReadyAt === null) {
         target.paintReadyAt = this.now()
-        target.totalMs = +(target.paintReadyAt - target.clickAt).toFixed(2)
-        this.history.push({ ...target })
-        this.trim()
-        for (const listener of this.listeners) {
-          try {
-            listener({ ...target })
-          } catch {
-            /* listener errors must not break tracking */
-          }
-        }
-        this.active = null
+        target.firstPaintMs = +(target.paintReadyAt - target.clickAt).toFixed(2)
       }
     }
     requestAnimationFrame(seal)
     setTimeout(seal, 80)
+  }
+
+  markDomCommitted(fileKey: string): void {
+    if (this.active && this.active.fileKey === fileKey && this.active.domCommittedAt === null) {
+      this.active.domCommittedAt = this.now()
+    }
+  }
+
+  markTokenizeSettled(fileKey: string, reason: ClickLatencySettleReason = 'unknown'): void {
+    if (!this.active || this.active.fileKey !== fileKey) return
+    if (this.active.tokenizeSettleAt !== null) return
+    this.active.tokenizeSettleAt = this.now()
+    this.active.settleReason = reason
+    if (this.active.paintReadyAt === null) {
+      this.active.paintReadyAt = this.active.tokenizeSettleAt
+      this.active.firstPaintMs = +(this.active.paintReadyAt - this.active.clickAt).toFixed(2)
+    }
+    this.active.totalMs = +(this.active.tokenizeSettleAt - this.active.clickAt).toFixed(2)
+    this.history.push({ ...this.active })
+    this.trim()
+    for (const listener of this.listeners) {
+      try {
+        listener({ ...this.active })
+      } catch {
+        /* listener errors must not break tracking */
+      }
+    }
+    this.active = null
   }
 
   cancelActive(): void {

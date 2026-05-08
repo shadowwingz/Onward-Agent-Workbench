@@ -81,6 +81,8 @@ interface SettingsState {
   telemetryConsent: boolean | null
   /** Anonymous instance ID for telemetry (random UUID, regenerated on re-opt-in) */
   telemetryInstanceId: string | null
+  /** Global switch for opt-in performance diagnostics panels. */
+  performanceDiagnosticsEnabled: boolean
   updatedAt: number
 }
 
@@ -106,7 +108,7 @@ const MIGRATION_THEME: ThemeSettings = {
 }
 
 // Current version number
-const CURRENT_VERSION = 5
+const CURRENT_VERSION = 6
 
 /** Settings panel default width */
 const DEFAULT_SETTINGS_PANEL_WIDTH = 400
@@ -168,6 +170,7 @@ function createDefaultSettingsState(): SettingsState {
     theme: DEFAULT_THEME,
     telemetryConsent: null,
     telemetryInstanceId: null,
+    performanceDiagnosticsEnabled: false,
     updatedAt: Date.now()
   }
 }
@@ -273,6 +276,7 @@ class SettingsStorage {
     const telemetryInstanceId = typeof state.telemetryInstanceId === 'string' && state.telemetryInstanceId.length > 0
       ? state.telemetryInstanceId
       : null
+    const performanceDiagnosticsEnabled = state.performanceDiagnosticsEnabled === true
 
     return {
       version: CURRENT_VERSION,
@@ -285,6 +289,7 @@ class SettingsStorage {
       theme,
       telemetryConsent,
       telemetryInstanceId,
+      performanceDiagnosticsEnabled,
       updatedAt: state.updatedAt ?? Date.now()
     }
   }
@@ -470,6 +475,9 @@ class SettingsStorage {
       }
       if (partial.theme) {
         this.state.theme = this.validateTheme(partial.theme, false)
+      }
+      if (typeof partial.performanceDiagnosticsEnabled === 'boolean') {
+        this.state.performanceDiagnosticsEnabled = partial.performanceDiagnosticsEnabled
       }
       this.state.updatedAt = Date.now()
       this.persist()

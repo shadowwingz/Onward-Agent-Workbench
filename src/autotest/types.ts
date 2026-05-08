@@ -17,14 +17,34 @@ export interface ClickLatencyMeasurementForAutotest {
   fileKey: string
   filename: string
   cacheState: 'hit' | 'miss' | 'unknown'
+  cacheSource: 'renderer-memory' | 'main-content-cache' | 'worker-rebuild' | null
+  cacheMissReason:
+    | 'first-load'
+    | 'invalidated-mutation'
+    | 'invalidated-watch'
+    | 'invalidated-mirror'
+    | 'invalidated-refresh'
+    | 'renderer-force-refresh'
+    | 'project-queue-evicted'
+    | 'single-file-too-large'
+    | 'precompute-pending'
+    | 'entry-not-warmed'
+    | 'worker-error'
+    | null
   clickAt: number
   ipcStartAt: number | null
   ipcEndAt: number | null
   stateSetAt: number | null
+  modelBoundAt: number | null
   editorReadyAt: number | null
   diffComputedAt: number | null
+  domCommittedAt: number | null
   paintReadyAt: number | null
+  tokenizeSettleAt: number | null
+  firstPaintMs: number | null
   totalMs: number | null
+  settleReason: 'tokens-quiet' | 'dom-quiet' | 'timeout' | 'no-editor' | 'non-text' | 'test' | 'unknown' | null
+  coldMountMs: number | null
   cancelled: boolean
 }
 
@@ -69,6 +89,23 @@ export interface GitDiffDebugApi {
     lastReason: string
     lastDurationMs: number | null
   }
+  getLastFileContentLoad?: () => {
+    fileKey: string
+    filename: string
+    reason: 'select' | 'prefetch' | 'refresh' | 'auto-refresh' | 'debug'
+    force: boolean
+    result: 'success' | 'error' | 'exception'
+    cacheInfo: {
+      state: 'hit' | 'miss' | 'unknown'
+      source: 'renderer-memory' | 'main-content-cache' | 'worker-rebuild'
+      missReason?: ClickLatencyMeasurementForAutotest['cacheMissReason']
+      project?: string
+      key?: string
+      stored?: boolean
+      bytes?: number
+    } | null
+    durationMs: number
+  } | null
   getLastClickLatency?: () => ClickLatencyMeasurementForAutotest | null
   getLastClickLatencyForFile?: (fileKey: string) => ClickLatencyMeasurementForAutotest | null
   getClickLatencyHistory?: () => ClickLatencyMeasurementForAutotest[]
@@ -138,10 +175,12 @@ export interface GitDiffDebugApi {
     widgetDomCount: number
     visibleWidgetDomCount: number
     widgetDisposableCount: number
+    installRetryPending?: boolean
   }
   revealFirstHunkActionForTest?: () => boolean
   hideHunkActionsForTest?: () => void
   triggerFirstHunkAction?: (action: 'stage' | 'revert' | 'unstage') => Promise<boolean>
+  waitForLastHunkActionForTest?: () => Promise<boolean | null>
   setSelectedLineRangeForTest?: (start: number, end: number, side?: 'additions' | 'deletions') => boolean
   triggerLineAction?: (action: 'keep' | 'deny') => Promise<boolean>
   getImagePreviewState?: () => {

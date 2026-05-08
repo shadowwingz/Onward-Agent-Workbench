@@ -93,6 +93,7 @@ function createDefaultSettings(): SettingsState {
     theme: DEFAULT_THEME_SETTINGS,
     telemetryConsent: null,
     telemetryInstanceId: null,
+    performanceDiagnosticsEnabled: false,
     updatedAt: Date.now()
   }
 }
@@ -126,6 +127,7 @@ interface SettingsContextValue {
   // theme
   updateTheme: (theme: ThemeSettings) => void
   updateLanguage: (language: AppLocale) => void
+  updatePerformanceDiagnosticsEnabled: (enabled: boolean) => void
 }
 
 const SettingsContext = createContext<SettingsContextValue | null>(null)
@@ -336,6 +338,13 @@ export function SettingsProvider({ children, onShortcutAction }: SettingsProvide
     }))
   }, [updateSettings])
 
+  const updatePerformanceDiagnosticsEnabled = useCallback((enabled: boolean) => {
+    updateSettings(prev => ({
+      ...prev,
+      performanceDiagnosticsEnabled: enabled
+    }))
+  }, [updateSettings])
+
   const value: SettingsContextValue = {
     settings,
     isLoaded,
@@ -351,7 +360,8 @@ export function SettingsProvider({ children, onShortcutAction }: SettingsProvide
     updateGitDiffFontSize,
     getGitDiffFontSize,
     updateTheme,
-    updateLanguage
+    updateLanguage,
+    updatePerformanceDiagnosticsEnabled
   }
 
   return (

@@ -359,6 +359,39 @@ export interface GitHistoryFileContentOptions {
 
 export type TerminalGitStatus = 'clean' | 'modified' | 'added' | 'unknown'
 
+export type GitDiffContentCacheMissReason =
+  | 'first-load'
+  | 'invalidated-mutation'
+  | 'invalidated-watch'
+  | 'invalidated-mirror'
+  | 'invalidated-refresh'
+  | 'renderer-force-refresh'
+  | 'project-queue-evicted'
+  | 'single-file-too-large'
+  | 'precompute-pending'
+  | 'entry-not-warmed'
+  | 'worker-error'
+
+export type GitDiffContentCacheSource =
+  | 'renderer-memory'
+  | 'main-content-cache'
+  | 'worker-rebuild'
+
+export interface GitDiffContentCacheInfo {
+  state: 'hit' | 'miss' | 'unknown'
+  source: GitDiffContentCacheSource
+  missReason?: GitDiffContentCacheMissReason
+  project?: string
+  key?: string
+  stored?: boolean
+  bytes?: number
+}
+
+export interface GitFileContentRequestOptions {
+  force?: boolean
+  missReason?: GitDiffContentCacheMissReason
+}
+
 export interface TerminalGitInfo {
   cwd: string | null
   repoRoot: string | null
@@ -413,6 +446,7 @@ export interface GitFileContentResult {
   modifiedPreviewData?: string
   originalPreviewSize?: number
   modifiedPreviewSize?: number
+  cacheInfo?: GitDiffContentCacheInfo
   error?: string
 }
 
@@ -603,7 +637,7 @@ export interface GitAPI {
   getHistory: (cwd: string, options?: { limit?: number; skip?: number }) => Promise<GitHistoryResult>
   getHistoryDiff: (cwd: string, options: GitHistoryDiffOptions) => Promise<GitHistoryDiffResult>
   getHistoryFileContent: (cwd: string, options: GitHistoryFileContentOptions) => Promise<GitHistoryFileContentResult>
-  getFileContent: (cwd: string, file: Pick<GitFileStatus, 'filename' | 'status' | 'originalFilename' | 'changeType' | 'isSubmoduleEntry'>, repoRoot?: string) => Promise<GitFileContentResult>
+  getFileContent: (cwd: string, file: Pick<GitFileStatus, 'filename' | 'status' | 'originalFilename' | 'changeType' | 'isSubmoduleEntry'>, repoRoot?: string, options?: GitFileContentRequestOptions) => Promise<GitFileContentResult>
   saveFileContent: (cwd: string, filename: string, content: string) => Promise<GitFileSaveResult>
   stageFile: (cwd: string, filename: string, repoRoot?: string) => Promise<GitFileActionResult>
   unstageFile: (cwd: string, filename: string, repoRoot?: string) => Promise<GitFileActionResult>
@@ -620,7 +654,7 @@ export interface GitAPI {
   notifyTerminalGitUpdate: (terminalId: string) => Promise<{ success: true }>
   warmDiffCache: (cwd: string) => Promise<{ success: boolean }>
   onTerminalInfo: (callback: (terminalId: string, info: TerminalGitInfo) => void) => () => void
-  onDiffCacheInvalidated: (callback: (cwd: string, reason: 'watcher' | 'force' | 'lru' | 'manual' | 'mirror') => void) => () => void
+  onDiffCacheInvalidated: (callback: (cwd: string, reason: 'watcher' | 'watcher-error' | 'force' | 'lru' | 'manual' | 'mirror') => void) => () => void
 
   // GitStateMirror surface — single-source-of-truth subscriptions wired
   // through the worker-thread mirror. See `src/hooks/useGitStateMirror.ts`
@@ -837,7 +871,10 @@ export interface GitDiffDebugStats {
       project: string
       bytes: number
       entries: number
-      lastTouchedAt: number
+      entryDetails: Array<{
+        key: string
+        bytes: number
+      }>
     }>
     totalBytes: number
     totalEntries: number
@@ -861,12 +898,36 @@ export interface GitDiffDebugStats {
     forces: number
     ttlMs: number
     maxEntries: number
+    lastEvent: {
+      kind: 'hit' | 'miss' | 'force' | null
+      key: string | null
+      at: number | null
+      ageMs: number | null
+      entriesCleared: number | null
+    }
+  }
+  watcher: {
+    backend: 'parcel'
+    active: number
+    maxProjects: number
+    projects: Array<{
+      cwd: string
+      status: 'starting' | 'watching' | 'error' | 'disposed'
+      eventCount: number
+      resyncCount: number
+      lastEventAt: number | null
+      lastError: string | null
+      pending: boolean
+    }>
   }
 }
 
 export interface DebugAPI {
   enabled: boolean
   perfTraceEnabled: boolean
+  featureFlags: {
+    gitDiffPerformanceDiagnostics: boolean
+  }
   profile: boolean
   profileCwd: string | null
   autotest: boolean

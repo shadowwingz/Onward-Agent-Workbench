@@ -86,6 +86,54 @@ export function createHunkActionRange(change: HunkActionLineChange, index: numbe
   }
 }
 
+function normalizeLine(value: number): number | null {
+  if (!Number.isFinite(value)) return null
+  return Math.floor(value)
+}
+
+function normalizeLineSide(
+  startValue: number,
+  endValue: number,
+  maxLineCount?: number
+): { start: number; end: number } | null {
+  let start = normalizeLine(startValue)
+  let end = normalizeLine(endValue)
+  if (start === null || end === null) return null
+  const max = maxLineCount !== undefined ? Math.max(1, Math.floor(maxLineCount)) : null
+
+  if (end === 0) {
+    if (start <= 0) return null
+    if (max !== null) start = Math.max(1, Math.min(start, max))
+    return { start, end: 0 }
+  }
+  if (start <= 0 && end <= 0) return null
+  if (start <= 0) start = end
+  if (end <= 0) end = start
+  if (start > end) return null
+  if (max !== null) {
+    if (start > max + 1 && end > max + 1) return null
+    start = Math.max(1, Math.min(start, max))
+    end = Math.max(1, Math.min(end, max))
+  }
+  if (start > end) return null
+  return { start, end }
+}
+
+export function normalizeHunkActionLineChange(
+  change: HunkActionLineChange,
+  lineCount: number
+): HunkActionLineChange | null {
+  const original = normalizeLineSide(change.originalStartLineNumber, change.originalEndLineNumber)
+  const modified = normalizeLineSide(change.modifiedStartLineNumber, change.modifiedEndLineNumber, lineCount)
+  if (!original || !modified) return null
+  return {
+    originalStartLineNumber: original.start,
+    originalEndLineNumber: original.end,
+    modifiedStartLineNumber: modified.start,
+    modifiedEndLineNumber: modified.end
+  }
+}
+
 export function buildHunkActionWidgetPlan(params: {
   file: Pick<GitFileStatus, 'isSubmoduleEntry' | 'changeType' | 'status'> | null
   state: HunkActionContentState | null
@@ -97,27 +145,30 @@ export function buildHunkActionWidgetPlan(params: {
   eligibility: HunkActionWidgetEligibility
   widgets: HunkActionWidgetPlanItem[]
 } {
+  const lineCount = Math.max(1, params.lineCount)
+  const normalizedChanges = params.changes
+    .map((change, originalIndex) => ({ change: normalizeHunkActionLineChange(change, lineCount), originalIndex }))
+    .filter((entry): entry is { change: HunkActionLineChange; originalIndex: number } => entry.change !== null)
   const eligibility = getHunkActionWidgetEligibility({
     file: params.file,
     state: params.state,
     isDraftDirty: params.isDraftDirty,
-    changeCount: params.changes.length
+    changeCount: normalizedChanges.length
   })
   if (eligibility.result !== 'installed' || !params.file) {
     return { eligibility, widgets: [] }
   }
 
-  const lineCount = Math.max(1, params.lineCount)
   const isStagedFile = params.file.changeType === 'staged'
   const maxWidgets = Math.max(0, Math.floor(params.maxWidgets ?? 100))
-  const widgets = params.changes.slice(0, maxWidgets).map((change, index) => {
+  const widgets = normalizedChanges.slice(0, maxWidgets).map(({ change, originalIndex }) => {
     const anchorLine = Math.max(1, Math.min(
       change.modifiedStartLineNumber || change.modifiedEndLineNumber || change.originalStartLineNumber || 1,
       lineCount
     ))
     return {
       anchorLine,
-      range: createHunkActionRange(change, index),
+      range: createHunkActionRange(change, originalIndex),
       primaryAction: isStagedFile ? 'unstage' as const : 'stage' as const,
       showRevert: !isStagedFile
     }
@@ -167,11 +218,42 @@ export function buildContentWithChangeRange(
 ): string {
   const oldLines = diff.oldLines ?? oldContent.split(SPLIT_WITH_NEWLINES)
   const newLines = diff.newLines ?? newContent.split(SPLIT_WITH_NEWLINES)
+  const hasLineRangeMatch = (() => {
+    let oldIndex = 1
+    let newIndex = 1
+    for (const hunk of diff.hunks) {
+      while (oldIndex < hunk.deletionStart && newIndex < hunk.additionStart) {
+        oldIndex += 1
+        newIndex += 1
+      }
+      for (const content of hunk.hunkContent) {
+        if (content.type === 'context') {
+          oldIndex += content.lines.length
+          newIndex += content.lines.length
+          continue
+        }
+        const deletionStart = oldIndex
+        const deletionEnd = oldIndex + content.deletions.length - 1
+        const additionStart = newIndex
+        const additionEnd = newIndex + content.additions.length - 1
+        if (
+          lineRangesIntersect(deletionStart, deletionEnd, range.originalStartLineNumber, range.originalEndLineNumber) ||
+          lineRangesIntersect(additionStart, additionEnd, range.modifiedStartLineNumber, range.modifiedEndLineNumber)
+        ) {
+          return true
+        }
+        oldIndex += content.deletions.length
+        newIndex += content.additions.length
+      }
+    }
+    return false
+  })()
   const output: string[] = []
   let oldIndex = 1
   let newIndex = 1
 
-  for (const hunk of diff.hunks) {
+  for (let hunkIndex = 0; hunkIndex < diff.hunks.length; hunkIndex += 1) {
+    const hunk = diff.hunks[hunkIndex]
     while (oldIndex < hunk.deletionStart && newIndex < hunk.additionStart) {
       output.push(oldLines[oldIndex - 1] ?? '')
       oldIndex += 1
@@ -193,6 +275,7 @@ export function buildContentWithChangeRange(
       const additionStart = newIndex
       const additionEnd = newIndex + content.additions.length - 1
       const selected =
+        (!hasLineRangeMatch && hunkIndex === range.index) ||
         lineRangesIntersect(deletionStart, deletionEnd, range.originalStartLineNumber, range.originalEndLineNumber) ||
         lineRangesIntersect(additionStart, additionEnd, range.modifiedStartLineNumber, range.modifiedEndLineNumber)
       const shouldApply = applySelected ? selected : !selected

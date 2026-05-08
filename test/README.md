@@ -16,6 +16,12 @@ test/autotest/run-full-regression.py
 python3 test/autotest/run-full-regression.py
 ```
 
+Unit-only checks can be run without launching Electron:
+
+```bash
+pnpm test:unit
+```
+
 Output lands in `test/full-regression-results/<local-timestamp>/`
 (directory name is the host's local time, format `YYYYMMDDTHHMMSS`):
 

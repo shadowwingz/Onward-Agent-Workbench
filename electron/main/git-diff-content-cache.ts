@@ -20,9 +20,10 @@
 //   1. Per-project byte budget (default 100 MB). Smallest entries evict
 //      first — large files dominate first-click latency, so we bias the
 //      cache toward keeping them resident.
-//   2. Per-instance project budget (default 8 projects). When the 9th
-//      project pushes a put, the LRU project (by `lastTouchedAt`) gets
-//      its whole bucket dropped.
+//   2. Per-instance project budget (default 8 projects). Project buckets
+//      are kept in a recent-access queue. Any get/put moves that project
+//      to the front; when the 9th project appears, the tail bucket is
+//      dropped.
 //   3. HEAD-change / project-wide invalidation: callers that detect a
 //      commit / checkout / external mutation invoke
 //      `invalidateProject(project)` to wipe the bucket.
@@ -34,15 +35,13 @@ export interface GitDiffContentCacheOptions {
   maxProjects?: number
   /** Single-file hard cap. Entries larger than this are not stored. Default 10 MB. */
   singleFileByteLimit?: number
-  /** Pluggable clock for deterministic tests. */
-  now?: () => number
 }
 
 export interface GitDiffContentCacheEntry<T> {
   value: T
   bytes: number
-  /** Wall-clock millis of last hit / put — used for tie-breaking eviction. */
-  touchedAt: number
+  /** Monotonic access order, used only as a deterministic tie-breaker. */
+  touchOrder: number
 }
 
 export interface GitDiffContentCacheStats {
@@ -50,7 +49,10 @@ export interface GitDiffContentCacheStats {
     project: string
     bytes: number
     entries: number
-    lastTouchedAt: number
+    entryDetails: Array<{
+      key: string
+      bytes: number
+    }>
   }>
   totalBytes: number
   totalEntries: number
@@ -63,7 +65,6 @@ interface ProjectBucket<T> {
   project: string
   entries: Map<string, GitDiffContentCacheEntry<T>>
   bytes: number
-  lastTouchedAt: number
 }
 
 const DEFAULT_PROJECT_BYTE_LIMIT = 100 * 1024 * 1024
@@ -72,16 +73,17 @@ const DEFAULT_SINGLE_FILE_BYTE_LIMIT = 10 * 1024 * 1024
 
 export class GitDiffContentCache<T> {
   private readonly projects = new Map<string, ProjectBucket<T>>()
+  private readonly projectQueue: string[] = []
   private readonly projectByteLimit: number
   private readonly maxProjects: number
   private readonly singleFileByteLimit: number
-  private readonly now: () => number
+  private readonly recentProjectQueueEvictions = new Map<string, number>()
+  private touchCounter = 0
 
   constructor(options: GitDiffContentCacheOptions = {}) {
     this.projectByteLimit = options.projectByteLimit ?? DEFAULT_PROJECT_BYTE_LIMIT
     this.maxProjects = options.maxProjects ?? DEFAULT_MAX_PROJECTS
     this.singleFileByteLimit = options.singleFileByteLimit ?? DEFAULT_SINGLE_FILE_BYTE_LIMIT
-    this.now = options.now ?? (() => Date.now())
   }
 
   get(project: string, key: string): T | null {
@@ -89,9 +91,8 @@ export class GitDiffContentCache<T> {
     if (!bucket) return null
     const entry = bucket.entries.get(key)
     if (!entry) return null
-    const stamp = this.now()
-    entry.touchedAt = stamp
-    bucket.lastTouchedAt = stamp
+    entry.touchOrder = this.nextTouchOrder()
+    this.moveProjectToFront(project)
     return entry.value
   }
 
@@ -106,21 +107,20 @@ export class GitDiffContentCache<T> {
     if (bytes > this.singleFileByteLimit) return false
     if (bytes > this.projectByteLimit) return false
 
-    const stamp = this.now()
     let bucket = this.projects.get(project)
     if (!bucket) {
-      this.evictProjectsIfOverLimit()
-      bucket = { project, entries: new Map(), bytes: 0, lastTouchedAt: stamp }
+      bucket = { project, entries: new Map(), bytes: 0 }
       this.projects.set(project, bucket)
     }
+    this.moveProjectToFront(project)
 
     const previous = bucket.entries.get(key)
     if (previous) bucket.bytes -= previous.bytes
-    bucket.entries.set(key, { value, bytes, touchedAt: stamp })
+    bucket.entries.set(key, { value, bytes, touchOrder: this.nextTouchOrder() })
     bucket.bytes += bytes
-    bucket.lastTouchedAt = stamp
 
     this.evictWithinProjectIfOverLimit(bucket)
+    this.evictProjectsIfOverLimit()
     return true
   }
 
@@ -132,7 +132,7 @@ export class GitDiffContentCache<T> {
     if (!entry) return false
     bucket.entries.delete(key)
     bucket.bytes -= entry.bytes
-    if (bucket.entries.size === 0) this.projects.delete(project)
+    if (bucket.entries.size === 0) this.deleteProject(project)
     return true
   }
 
@@ -141,7 +141,7 @@ export class GitDiffContentCache<T> {
     const bucket = this.projects.get(project)
     if (!bucket) return 0
     const dropped = bucket.entries.size
-    this.projects.delete(project)
+    this.deleteProject(project)
     return dropped
   }
 
@@ -150,6 +150,7 @@ export class GitDiffContentCache<T> {
     let dropped = 0
     for (const bucket of this.projects.values()) dropped += bucket.entries.size
     this.projects.clear()
+    this.projectQueue.length = 0
     return dropped
   }
 
@@ -157,12 +158,16 @@ export class GitDiffContentCache<T> {
     const projects: GitDiffContentCacheStats['projects'] = []
     let totalBytes = 0
     let totalEntries = 0
-    for (const bucket of this.projects.values()) {
+    for (const project of this.projectQueue) {
+      const bucket = this.projects.get(project)
+      if (!bucket) continue
       projects.push({
         project: bucket.project,
         bytes: bucket.bytes,
         entries: bucket.entries.size,
-        lastTouchedAt: bucket.lastTouchedAt
+        entryDetails: [...bucket.entries.entries()]
+          .map(([key, entry]) => ({ key, bytes: entry.bytes }))
+          .sort((a, b) => b.bytes - a.bytes)
       })
       totalBytes += bucket.bytes
       totalEntries += bucket.entries.size
@@ -181,6 +186,13 @@ export class GitDiffContentCache<T> {
     return this.projects.has(project)
   }
 
+  consumeRecentProjectQueueEviction(project: string, maxAgeMs = 5 * 60 * 1000): boolean {
+    const evictedAt = this.recentProjectQueueEvictions.get(project)
+    if (typeof evictedAt !== 'number') return false
+    this.recentProjectQueueEvictions.delete(project)
+    return Date.now() - evictedAt <= maxAgeMs
+  }
+
   // --- private ---
 
   private evictWithinProjectIfOverLimit(bucket: ProjectBucket<T>): void {
@@ -188,28 +200,44 @@ export class GitDiffContentCache<T> {
     // Smallest-first eviction: drop tiny entries before large ones, on the
     // theory that re-fetching a 1 KB file is fast enough to absorb a cache
     // miss, while re-fetching a 5 MB file is what the user actually feels.
-    // Tie-break by oldest touchedAt so two entries of equal size evict the
-    // less recently used one first.
+    // Tie-break by oldest access order so two entries of equal size evict
+    // the less recently used one first.
     const sorted = [...bucket.entries.entries()].sort((a, b) => {
       const sizeDelta = a[1].bytes - b[1].bytes
       if (sizeDelta !== 0) return sizeDelta
-      return a[1].touchedAt - b[1].touchedAt
+      return a[1].touchOrder - b[1].touchOrder
     })
     for (const [key, entry] of sorted) {
       if (bucket.bytes <= this.projectByteLimit) break
       bucket.entries.delete(key)
       bucket.bytes -= entry.bytes
     }
-    if (bucket.entries.size === 0) this.projects.delete(bucket.project)
+    if (bucket.entries.size === 0) this.deleteProject(bucket.project)
   }
 
   private evictProjectsIfOverLimit(): void {
-    if (this.projects.size < this.maxProjects) return
-    // LRU project: the bucket whose `lastTouchedAt` is the oldest goes.
-    let victim: ProjectBucket<T> | null = null
-    for (const bucket of this.projects.values()) {
-      if (!victim || bucket.lastTouchedAt < victim.lastTouchedAt) victim = bucket
+    while (this.projectQueue.length > this.maxProjects) {
+      const victim = this.projectQueue.pop()
+      if (!victim) return
+      this.projects.delete(victim)
+      this.recentProjectQueueEvictions.set(victim, Date.now())
     }
-    if (victim) this.projects.delete(victim.project)
+  }
+
+  private moveProjectToFront(project: string): void {
+    const existingIndex = this.projectQueue.indexOf(project)
+    if (existingIndex >= 0) this.projectQueue.splice(existingIndex, 1)
+    this.projectQueue.unshift(project)
+  }
+
+  private deleteProject(project: string): void {
+    this.projects.delete(project)
+    const existingIndex = this.projectQueue.indexOf(project)
+    if (existingIndex >= 0) this.projectQueue.splice(existingIndex, 1)
+  }
+
+  private nextTouchOrder(): number {
+    this.touchCounter += 1
+    return this.touchCounter
   }
 }

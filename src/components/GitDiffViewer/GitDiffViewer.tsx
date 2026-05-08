@@ -8,7 +8,14 @@ import { DiffEditor } from '@monaco-editor/react'
 import { parseDiffFromFile, SPLIT_WITH_NEWLINES } from '@pierre/diffs'
 import type { FileDiffMetadata, SelectedLineRange, SelectionSide } from '@pierre/diffs'
 import type * as monacoTypes from 'monaco-editor'
-import type { GitDiffResult, GitFileStatus, GitFileContentResult, GitFileActionResult, GitRepoContext } from '../../types/electron'
+import type {
+  GitDiffContentCacheMissReason,
+  GitDiffResult,
+  GitFileStatus,
+  GitFileContentResult,
+  GitFileActionResult,
+  GitRepoContext
+} from '../../types/electron'
 import { useSettings } from '../../contexts/SettingsContext'
 import { DEFAULT_GIT_DIFF_FONT_SIZE } from '../../constants/gitDiff'
 import { useSubpageEscape } from '../../hooks/useSubpageEscape'
@@ -33,12 +40,17 @@ import { useGitDiffFileWatch } from './useGitDiffFileWatch'
 import {
   buildContentWithChangeRange,
   buildHunkActionWidgetPlan,
+  findHunkContainingLine,
   type DiffHunkAction,
   type DiffHunkActionRange,
   type HunkActionWidgetInstallResult
 } from './gitDiffHunkActions'
 import { resolveMonacoLanguageId } from './monacoLanguageMap'
-import { GitDiffClickLatencyTracker, type ClickLatencyMeasurement } from './clickLatencyTracker'
+import {
+  GitDiffClickLatencyTracker,
+  type ClickLatencyMeasurement,
+  type ClickLatencySettleReason
+} from './clickLatencyTracker'
 import { buildClickPhaseTraceRecords } from './clickLatencyTraceEmitter'
 import { GitDiffDebugPanel } from './GitDiffDebugPanel'
 import { createThemedSetiFileIconResolver, sanitizeSetiSvgOnce } from '../ProjectEditor/setiFileIconTheme'
@@ -60,6 +72,26 @@ function debugLog(...args: unknown[]) {
   }
 }
 
+function clampEditorLine(
+  editor: monacoTypes.editor.IStandaloneCodeEditor,
+  rawLine: number | null | undefined
+): number | null {
+  if (typeof rawLine !== 'number' || !Number.isFinite(rawLine)) return null
+  const lineCount = editor.getModel()?.getLineCount() ?? 0
+  if (lineCount <= 0) return null
+  return Math.max(1, Math.min(Math.trunc(rawLine), lineCount))
+}
+
+function revealLineNearTopSafe(
+  editor: monacoTypes.editor.IStandaloneCodeEditor,
+  rawLine: number | null | undefined
+): boolean {
+  const line = clampEditorLine(editor, rawLine)
+  if (line === null) return false
+  editor.revealLineNearTop(line)
+  return true
+}
+
 // local storage key name
 const STORAGE_KEY_FILE_LIST_WIDTH = 'git-diff-file-list-width'
 const STORAGE_KEY_FILE_LIST_VIEW_MODE = 'git-diff-file-list-view-mode'
@@ -78,6 +110,12 @@ const MIN_DIFF_SPLIT_RATIO = 0.1
 const MAX_DIFF_SPLIT_RATIO = 0.9
 const DIFF_SPLIT_RATIO_EPSILON = 0.002
 const DIFF_INLINE_BREAKPOINT = 900
+const DIFF_REVEAL_TIMEOUT_MS = 2000
+const TOKENIZE_SETTLE_QUIET_MS = 100
+const TOKENIZE_SETTLE_CAP_MS = 5000
+const HUNK_ACTION_INSTALL_RETRY_DELAY_MS = 60
+const HUNK_ACTION_INSTALL_RETRY_LIMIT = 12
+const HUNK_ACTION_HOVER_HIDE_DELAY_MS = 140
 
 // Monaco theme aligned with @pierre/diffs' pierre-dark palette so Git Diff
 // reads as the same visual family as the Git History viewer.
@@ -298,6 +336,26 @@ type DiffSplitState = {
 
 type FileContentLoadReason = 'select' | 'prefetch' | 'refresh' | 'auto-refresh' | 'debug'
 
+type LastFileContentLoadInfo = {
+  fileKey: string
+  filename: string
+  reason: FileContentLoadReason
+  force: boolean
+  result: 'success' | 'error' | 'exception'
+  cacheInfo: GitFileContentResult['cacheInfo'] | null
+  durationMs: number
+}
+
+function cacheMissReasonForLoad(
+  force: boolean,
+  reason: FileContentLoadReason
+): GitDiffContentCacheMissReason | undefined {
+  if (!force) return undefined
+  if (reason === 'refresh') return 'invalidated-refresh'
+  if (reason === 'auto-refresh') return 'invalidated-watch'
+  return 'renderer-force-refresh'
+}
+
 type DiffNavigationSelectionTarget = {
   filePath: string
   repoRoot: string | null
@@ -347,6 +405,7 @@ const statusColors: Record<GitFileStatus['status'], string> = {
 
 interface FileContentState {
   loading: boolean
+  refreshing?: boolean
   originalContent: string
   modifiedContent: string
   draftContent?: string
@@ -616,6 +675,7 @@ type GitDiffDebugApi = {
     error: string | null
   } | null
   getPrefetchState: () => BodyPrefetchSnapshot
+  getLastFileContentLoad: () => LastFileContentLoadInfo | null
   getLastClickLatency: () => ClickLatencyMeasurement | null
   getLastClickLatencyForFile: (fileKey: string) => ClickLatencyMeasurement | null
   getClickLatencyHistory: () => ClickLatencyMeasurement[]
@@ -680,10 +740,12 @@ type GitDiffDebugApi = {
     widgetDomCount: number
     visibleWidgetDomCount: number
     widgetDisposableCount: number
+    installRetryPending: boolean
   }
   revealFirstHunkActionForTest: () => boolean
   hideHunkActionsForTest: () => void
   triggerFirstHunkAction: (action: DiffHunkAction) => Promise<boolean>
+  waitForLastHunkActionForTest: () => Promise<boolean | null>
   setSelectedLineRangeForTest: (start: number, end: number, side?: SelectionSide) => boolean
   triggerLineAction: (action: 'keep' | 'deny') => Promise<boolean>
   getImagePreviewState: () => {
@@ -970,6 +1032,19 @@ function buildDiffSignature(original: string, modified: string): string {
   return `${buildTextSignature(original)}|${buildTextSignature(modified)}`
 }
 
+function buildGitDiffModelPath(
+  file: GitFileStatus,
+  repoRoot: string | null | undefined,
+  side: 'original' | 'modified'
+): string {
+  const repoSegment = hashString(file.repoRoot || repoRoot || 'repo')
+  const path = (side === 'original' ? (file.originalFilename || file.filename) : file.filename)
+    .split('/')
+    .map(encodeURIComponent)
+    .join('/')
+  return `inmemory://model/onward-git-diff/${repoSegment}/${side}/${path}`
+}
+
 function buildContentWithSelection(
   diff: FileDiffMetadata,
   side: SelectionSide,
@@ -1079,6 +1154,7 @@ export function GitDiffViewer({
   const [fileContents, setFileContents] = useState<Record<string, FileContentState>>({})
   const diffResultRef = useRef<GitDiffResult | null>(null)
   const fileContentsRef = useRef<Record<string, FileContentState>>({})
+  const staleFileContentKeysRef = useRef<Set<string>>(new Set())
   const pendingNavigationSelectRef = useRef<DiffNavigationSelectionTarget | null>(null)
   const [pendingNavigationSelectNonce, setPendingNavigationSelectNonce] = useState(0)
   // Ref-bridge so the watcher-driven invalidation listener (registered above
@@ -1093,19 +1169,26 @@ export function GitDiffViewer({
   const lastKnownCwdRef = useRef<string | null>(null)
   const loadDiffRef = useRef<((options?: { reset?: boolean; silent?: boolean; force?: boolean }) => Promise<void>) | null>(null)
   const inFlightRef = useRef<Partial<Record<string, Promise<void>>>>({})
+  const inFlightForceRef = useRef<Partial<Record<string, boolean>>>({})
   // Click → render latency tracker. One per component instance so two
   // GitDiffViewer panels (different terminals) keep independent histories.
   const clickLatencyTrackerRef = useRef<GitDiffClickLatencyTracker>(new GitDiffClickLatencyTracker())
   // Collapse state for the in-app debug panel. Persisted globally because
   // operators want the same setting across projects / terminals.
   const [debugPanelCollapsed, setDebugPanelCollapsed] = useState<boolean>(() => {
-    if (typeof window === 'undefined') return false
+    if (typeof window === 'undefined') return true
     try {
-      return window.localStorage.getItem(STORAGE_KEY_DIFF_DEBUG_PANEL_COLLAPSED) === '1'
+      const saved = window.localStorage.getItem(STORAGE_KEY_DIFF_DEBUG_PANEL_COLLAPSED)
+      if (saved === '0') return false
+      if (saved === '1') return true
+      return true
     } catch {
-      return false
+      return true
     }
   })
+  const gitDiffPerformanceDiagnosticsEnabled =
+    (window.electronAPI?.debug?.featureFlags?.gitDiffPerformanceDiagnostics ?? true) &&
+    settings?.performanceDiagnosticsEnabled === true
   const handleDebugPanelToggle = useCallback((next: boolean) => {
     setDebugPanelCollapsed(next)
     try {
@@ -1168,7 +1251,7 @@ export function GitDiffViewer({
     if (prefs.gitDiffSplitViewRatio !== undefined) return prefs.gitDiffSplitViewRatio
     return readStoredDiffSplitRatio()
   })())
-  const [diffEditorResetNonce] = useState(0)
+  const [diffEditorResetNonce, setDiffEditorResetNonce] = useState(0)
   const [svgViewMode, setSvgViewMode] = useState<SvgViewMode>('visual')
   const [pdfViewerUrl, setPdfViewerUrl] = useState<string | null>(null)
 
@@ -1195,6 +1278,9 @@ export function GitDiffViewer({
   const diffSplitMeasureFrameRef = useRef<number | null>(null)
   const diffNavigationIndexRef = useRef(-1)
   const hunkActionInFlightRef = useRef(false)
+  const hunkActionInstallRetryTimerRef = useRef<number | null>(null)
+  const hunkActionHoverHideTimerRef = useRef<number | null>(null)
+  const lastHunkActionPromiseRef = useRef<Promise<boolean> | null>(null)
   const runDiffHunkActionRef = useRef<((action: DiffHunkAction, range: DiffHunkActionRange) => Promise<boolean>) | null>(null)
   const installDiffHunkActionWidgetsRef = useRef<null | ((
     editor: monacoTypes.editor.IStandaloneDiffEditor,
@@ -1207,6 +1293,9 @@ export function GitDiffViewer({
   const originalDecorationsRef = useRef<monacoTypes.editor.IEditorDecorationsCollection | null>(null)
   const modifiedDecorationsRef = useRef<monacoTypes.editor.IEditorDecorationsCollection | null>(null)
   const selectedFileRef = useRef<GitFileStatus | null>(null)
+  const lastFileContentLoadRef = useRef<LastFileContentLoadInfo | null>(null)
+  const suppressDraftChangeRef = useRef(false)
+  const applyLiveDraftChangeRef = useRef<(value?: string) => void>(() => {})
   const lastSelectedFileRef = useRef<GitFileStatus | null>(null)
   const visibleFileListRef = useRef<GitFileStatus[]>([])
   const visibleRepoItemsRef = useRef<RepoFilterTreeItem[]>([])
@@ -1215,6 +1304,12 @@ export function GitDiffViewer({
   const [diffRevealPhase, setDiffRevealPhase] = useState<DiffRevealPhase>('idle')
   const diffRevealPhaseRef = useRef<DiffRevealPhase>('idle')
   const diffRevealTimeoutRef = useRef<number | null>(null)
+  const gitDiffOpenAtRef = useRef<number | null>(null)
+  const coldMountRecordedRef = useRef(false)
+  const tokenizeSettleQuietTimerRef = useRef<number | null>(null)
+  const tokenizeSettleCapTimerRef = useRef<number | null>(null)
+  const tokenizeSettleDisposablesRef = useRef<Array<{ dispose: () => void }>>([])
+  const tokenizeSettleRunIdRef = useRef(0)
   const [repoFilter, setRepoFilter] = useState<string | null>(null)
   const repoFilterRef = useRef<string | null>(null)
   const [expandedRepoRoots, setExpandedRepoRoots] = useState<Set<string>>(() => new Set())
@@ -1270,20 +1365,33 @@ export function GitDiffViewer({
       diffRevealTimeoutRef.current = null
     }
   }, [])
+  const requestDiffRevealRestore = useCallback((reason: 'diff-computed' | 'model-bound' | 'timeout') => {
+    if (diffRevealPhaseRef.current !== 'waiting-diff') return
+    if (reason === 'timeout') {
+      const file = selectedFileRef.current
+      const fileKey = file ? getFileKey(file) : null
+      perfTrace(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_CLICK_PHASE_REVEAL_TIMEOUT, {
+        cwd: activeCwd ?? '',
+        terminalId,
+        fileKey,
+        filename: file?.filename,
+        durationMs: DIFF_REVEAL_TIMEOUT_MS
+      })
+    }
+    setDiffRevealPhase('restoring-scroll')
+    diffRevealPhaseRef.current = 'restoring-scroll'
+  }, [activeCwd, getFileKey, terminalId])
   const enterDiffWaiting = useCallback(() => {
     cancelDiffRevealTimeout()
     setDiffRevealPhase('waiting-diff')
     diffRevealPhaseRef.current = 'waiting-diff'
-    // Safety timeout: if onDidUpdateDiff never fires (large file, Monaco stall),
-    // trigger restoring-scroll so the useLayoutEffect still runs scroll restoration
-    // before revealing. 2000ms accommodates large diffs on slower machines.
+    // Safety timeout is telemetry, not the happy path: model binding or
+    // onDidUpdateDiff should reveal first. If neither signal arrives, reveal
+    // anyway and record the abnormal fixed-wait path.
     diffRevealTimeoutRef.current = window.setTimeout(() => {
-      if (diffRevealPhaseRef.current === 'waiting-diff') {
-        setDiffRevealPhase('restoring-scroll')
-        diffRevealPhaseRef.current = 'restoring-scroll'
-      }
-    }, 2000)
-  }, [cancelDiffRevealTimeout])
+      requestDiffRevealRestore('timeout')
+    }, DIFF_REVEAL_TIMEOUT_MS)
+  }, [cancelDiffRevealTimeout, requestDiffRevealRestore])
 
   const isDraftDirty = selectedFileState?.draftContent !== undefined &&
     selectedFileState.draftContent !== selectedFileState.modifiedContent
@@ -1593,7 +1701,7 @@ export function GitDiffViewer({
     if (!changes || changes.length === 0) return
     const firstChange = changes[0]
     const targetLine = firstChange.modifiedStartLineNumber || firstChange.originalStartLineNumber || 1
-    editor.getModifiedEditor().revealLineNearTop(targetLine)
+    revealLineNearTopSafe(editor.getModifiedEditor(), targetLine)
   }, [])
 
   const scrollToTop = useCallback(() => {
@@ -1628,6 +1736,7 @@ export function GitDiffViewer({
     const nextIndex = (currentIndex + delta + changes.length) % changes.length
     const target = changes[nextIndex]
     const lineCount = modifiedEditor.getModel()?.getLineCount() ?? 1
+    if (lineCount <= 0) return false
     const rawLine = target.modifiedStartLineNumber || target.modifiedEndLineNumber || target.originalStartLineNumber || 1
     const line = Math.max(1, Math.min(rawLine, lineCount))
     diffNavigationIndexRef.current = nextIndex
@@ -1648,8 +1757,68 @@ export function GitDiffViewer({
     return true
   }, [activeCwd, terminalId])
 
+  const clearHunkActionInstallRetry = useCallback(() => {
+    if (hunkActionInstallRetryTimerRef.current !== null) {
+      window.clearTimeout(hunkActionInstallRetryTimerRef.current)
+      hunkActionInstallRetryTimerRef.current = null
+    }
+  }, [])
+
+  const clearHunkActionHoverHideTimer = useCallback(() => {
+    if (hunkActionHoverHideTimerRef.current !== null) {
+      window.clearTimeout(hunkActionHoverHideTimerRef.current)
+      hunkActionHoverHideTimerRef.current = null
+    }
+  }, [])
+
+  const setVisibleDiffHunkActionWidget = useCallback((widgetId: string | null) => {
+    clearHunkActionHoverHideTimer()
+    visibleHunkActionWidgetIdRef.current = widgetId
+    for (const handle of diffHunkActionWidgetHandlesRef.current) {
+      const visible = widgetId !== null && handle.id === widgetId
+      handle.node.classList.toggle('is-visible', visible)
+      handle.node.setAttribute('aria-hidden', visible ? 'false' : 'true')
+      for (const button of handle.buttons) {
+        button.tabIndex = visible ? 0 : -1
+      }
+    }
+  }, [clearHunkActionHoverHideTimer])
+
+  const scheduleHideDiffHunkActionWidgets = useCallback((delayMs = HUNK_ACTION_HOVER_HIDE_DELAY_MS) => {
+    clearHunkActionHoverHideTimer()
+    hunkActionHoverHideTimerRef.current = window.setTimeout(() => {
+      hunkActionHoverHideTimerRef.current = null
+      setVisibleDiffHunkActionWidget(null)
+    }, delayMs)
+  }, [clearHunkActionHoverHideTimer, setVisibleDiffHunkActionWidget])
+
+  const revealDiffHunkActionForLine = useCallback((line: number | null | undefined): boolean => {
+    if (typeof line !== 'number' || !Number.isFinite(line)) return false
+    if (diffHunkActionWidgetHandlesRef.current.length === 0) {
+      const editor = diffEditorRef.current
+      const monaco = monacoRef.current
+      if (editor && monaco) {
+        installDiffHunkActionWidgetsRef.current?.(editor, monaco)
+      }
+    }
+    const ranges = diffHunkActionWidgetHandlesRef.current.map((handle) => handle.range)
+    const range = findHunkContainingLine(line, ranges)
+    if (!range) {
+      scheduleHideDiffHunkActionWidgets()
+      return false
+    }
+    const handle = diffHunkActionWidgetHandlesRef.current.find((candidate) => candidate.range.id === range.id)
+    if (!handle) {
+      scheduleHideDiffHunkActionWidgets()
+      return false
+    }
+    setVisibleDiffHunkActionWidget(handle.id)
+    return true
+  }, [scheduleHideDiffHunkActionWidgets, setVisibleDiffHunkActionWidget])
+
   const disposeDiffHunkActionWidgets = useCallback(() => {
     const count = diffHunkActionDisposablesRef.current.length
+    clearHunkActionHoverHideTimer()
     visibleHunkActionWidgetIdRef.current = null
     for (const disposable of diffHunkActionDisposablesRef.current) {
       try {
@@ -1663,25 +1832,63 @@ export function GitDiffViewer({
     if (count > 0) {
       debugLog('editor:hunk-actions:disposed', { count })
     }
-  }, [])
+  }, [clearHunkActionHoverHideTimer])
 
   const installDiffHunkActionWidgets = useCallback((
     editor: monacoTypes.editor.IStandaloneDiffEditor,
     monaco: typeof monacoTypes
   ): HunkActionWidgetInstallResult => {
+    const startedAt = performance.now()
     disposeDiffHunkActionWidgets()
 
     const file = selectedFileRef.current ?? selectedFile
-    if (!file || file.isSubmoduleEntry || file.changeType === 'untracked' || file.status === 'D') return 'skipped'
+    const finish = (
+      result: HunkActionWidgetInstallResult,
+      extra: Record<string, unknown> = {}
+    ): HunkActionWidgetInstallResult => {
+      perfTrace(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_HUNK_WIDGET_INSTALL, {
+        cwd: activeCwd,
+        terminalId,
+        filename: file?.filename,
+        changeType: file?.changeType,
+        result,
+        widgetCount: diffHunkActionDisposablesRef.current.length,
+        durationMs: +(performance.now() - startedAt).toFixed(2),
+        ...extra
+      })
+      return result
+    }
+
+    if (!file || file.isSubmoduleEntry || file.changeType === 'untracked' || file.status === 'D') {
+      return finish('skipped', { reason: !file ? 'no-file' : file.isSubmoduleEntry ? 'submodule' : file.changeType === 'untracked' ? 'untracked' : 'deleted' })
+    }
     const key = getFileKey(file)
     const state = fileContentsRef.current[key] ?? (
       selectedFile && getFileKey(selectedFile) === key ? selectedFileState : null
     )
 
     const changes = editor.getLineChanges() ?? []
+    const originalEditor = editor.getOriginalEditor()
     const modifiedEditor = editor.getModifiedEditor()
     const lineCount = modifiedEditor.getModel()?.getLineCount() ?? 1
     const isStagedFile = file.changeType === 'staged'
+    const liveOriginalContent = originalEditor.getValue()
+    const liveModifiedContent = modifiedEditor.getValue()
+    const expectedModifiedContent = state?.draftContent ?? state?.modifiedContent
+    if (
+      state &&
+      !state.loading &&
+      !state.error &&
+      !state.isBinary &&
+      liveOriginalContent.length === 0 &&
+      liveModifiedContent.length === 0 &&
+      ((state.originalContent ?? '').length > 0 || (expectedModifiedContent ?? '').length > 0)
+    ) {
+      return finish('retry', {
+        reason: 'model-placeholder',
+        lineChangeCount: changes.length
+      })
+    }
     const plan = buildHunkActionWidgetPlan({
       file,
       state,
@@ -1689,33 +1896,39 @@ export function GitDiffViewer({
       changes,
       lineCount
     })
-    if (plan.eligibility.result !== 'installed') return plan.eligibility.result
+    if (plan.eligibility.result !== 'installed') {
+      return finish(plan.eligibility.result, {
+        reason: plan.eligibility.reason,
+        lineChangeCount: changes.length
+      })
+    }
 
     plan.widgets.forEach(({ anchorLine, range, showRevert }) => {
       const widgetId = `onward.gitDiff.hunkAction.${range.id}`
       const node = document.createElement('div')
-      // is-visible class is applied unconditionally — these toolbars are
-      // always-on per-hunk controls, no longer hover-revealed.
-      node.className = 'git-diff-hunk-actions is-visible'
+      node.className = 'git-diff-hunk-actions'
       node.dataset.hunkIndex = String(range.index)
-      node.setAttribute('aria-hidden', 'false')
+      node.setAttribute('aria-hidden', 'true')
 
       const buildIconButton = (
         variant: 'stage' | 'unstage' | 'revert',
         label: string,
         title: string,
-        onClick: () => void
+        onClick: () => Promise<boolean>
       ) => {
         const button = document.createElement('button')
         button.type = 'button'
         button.className = `git-diff-hunk-action-button ${variant === 'revert' ? 'danger' : 'success'}`
         button.title = title
-        button.tabIndex = 0
+        button.tabIndex = -1
         button.innerHTML = `${HUNK_ACTION_ICON_SVG[variant]}<span class="git-diff-hunk-action-label">${escapeHtmlText(label)}</span>`
         button.addEventListener('click', (event) => {
           event.preventDefault()
           event.stopPropagation()
-          onClick()
+          const result = onClick()
+          if (result instanceof Promise) {
+            lastHunkActionPromiseRef.current = result
+          }
         })
         return button
       }
@@ -1726,21 +1939,21 @@ export function GitDiffViewer({
           'unstage',
           t('gitDiff.hunk.unstage'),
           t('gitDiff.hunk.unstageTitle'),
-          () => { void runDiffHunkActionRef.current?.('unstage', range) }
+          () => runDiffHunkActionRef.current?.('unstage', range) ?? Promise.resolve(false)
         ))
       } else {
         buttons.push(buildIconButton(
           'stage',
           t('gitDiff.hunk.stage'),
           t('gitDiff.hunk.stageTitle'),
-          () => { void runDiffHunkActionRef.current?.('stage', range) }
+          () => runDiffHunkActionRef.current?.('stage', range) ?? Promise.resolve(false)
         ))
         if (showRevert) {
           buttons.push(buildIconButton(
             'revert',
             t('gitDiff.hunk.revert'),
             t('gitDiff.hunk.revertTitle'),
-            () => { void runDiffHunkActionRef.current?.('revert', range) }
+            () => runDiffHunkActionRef.current?.('revert', range) ?? Promise.resolve(false)
           ))
         }
       }
@@ -1751,25 +1964,43 @@ export function GitDiffViewer({
         event.stopPropagation()
       }
       node.addEventListener('mousedown', preventEditorFocus)
+      node.addEventListener('mouseenter', () => setVisibleDiffHunkActionWidget(widgetId))
+      node.addEventListener('mouseleave', () => scheduleHideDiffHunkActionWidgets())
+      node.addEventListener('focusin', () => setVisibleDiffHunkActionWidget(widgetId))
+      node.addEventListener('focusout', () => scheduleHideDiffHunkActionWidgets())
 
       const widget: monacoTypes.editor.IContentWidget = {
         allowEditorOverflow: false,
         suppressMouseDown: true,
         getId: () => widgetId,
         getDomNode: () => node,
-        getPosition: () => ({
-          // Float ABOVE the hunk's first line so the toolbar never covers
-          // code. Falls back to BELOW when the hunk sits at the very first
-          // visible line and there is no room above.
-          position: { lineNumber: anchorLine, column: 1 },
-          preference: [
-            monaco.editor.ContentWidgetPositionPreference.ABOVE,
-            monaco.editor.ContentWidgetPositionPreference.BELOW
-          ]
-        })
+        getPosition: () => {
+          const safeAnchorLine = clampEditorLine(modifiedEditor, anchorLine)
+          if (safeAnchorLine === null) return null
+          return {
+            // Float ABOVE the hunk's first line so the toolbar never covers
+            // code. Falls back to BELOW when the hunk sits at the very first
+            // visible line and there is no room above.
+            position: { lineNumber: safeAnchorLine, column: 1 },
+            preference: [
+              monaco.editor.ContentWidgetPositionPreference.ABOVE,
+              monaco.editor.ContentWidgetPositionPreference.BELOW
+            ]
+          }
+        }
       }
 
-      modifiedEditor.addContentWidget(widget)
+      try {
+        modifiedEditor.addContentWidget(widget)
+      } catch (error) {
+        debugLog('editor:hunk-actions:add-widget:error', {
+          error: String(error),
+          anchorLine,
+          range
+        })
+        node.remove()
+        return
+      }
       diffHunkActionWidgetHandlesRef.current.push({
         id: widgetId,
         anchorLine,
@@ -1779,26 +2010,185 @@ export function GitDiffViewer({
       })
       diffHunkActionDisposablesRef.current.push({
         dispose: () => {
-          modifiedEditor.removeContentWidget(widget)
+          try {
+            modifiedEditor.removeContentWidget(widget)
+          } catch (error) {
+            debugLog('editor:hunk-actions:remove-widget:error', {
+              error: String(error),
+              anchorLine,
+              range
+            })
+          }
           node.remove()
         }
       })
     })
-    return diffHunkActionDisposablesRef.current.length > 0 ? 'installed' : 'skipped'
-  }, [disposeDiffHunkActionWidgets, getFileKey, selectedFile, selectedFileState, t])
+    return finish(diffHunkActionDisposablesRef.current.length > 0 ? 'installed' : 'skipped', {
+      lineChangeCount: changes.length
+    })
+  }, [
+    activeCwd,
+    disposeDiffHunkActionWidgets,
+    getFileKey,
+    scheduleHideDiffHunkActionWidgets,
+    selectedFile,
+    selectedFileState,
+    setVisibleDiffHunkActionWidget,
+    t,
+    terminalId
+  ])
 
   useEffect(() => {
     installDiffHunkActionWidgetsRef.current = installDiffHunkActionWidgets
   }, [installDiffHunkActionWidgets])
 
-  // Hover detection deleted intentionally: per-hunk Stage / Revert toolbars
-  // are now installed always-visible by installDiffHunkActionWidgets, so
-  // there is no need for a renderer-side mousemove pipeline reaching into
-  // Monaco's diff DOM. The toolbars are rebuilt whenever the diff updates
-  // (see editor.onDidUpdateDiff in handleEditorDidMount) which is the only
-  // signal the renderer actually needs.
+  const scheduleDiffHunkActionWidgetInstall = useCallback((reason: string, attempt = 0) => {
+    clearHunkActionInstallRetry()
+    hunkActionInstallRetryTimerRef.current = window.setTimeout(() => {
+      hunkActionInstallRetryTimerRef.current = null
+      const editor = diffEditorRef.current
+      const monaco = monacoRef.current
+      if (!isOpen || !editor || !monaco) return
+
+      const result = installDiffHunkActionWidgets(editor, monaco)
+      const file = selectedFileRef.current
+      const key = file ? getFileKey(file) : null
+      const state = key ? fileContentsRef.current[key] : null
+      const liveModifiedContent = state?.draftContent ?? state?.modifiedContent
+      const hasTextDelta = typeof state?.originalContent === 'string' &&
+        typeof liveModifiedContent === 'string' &&
+        state.originalContent !== liveModifiedContent
+      const eligibleFile = Boolean(file) &&
+        !file?.isSubmoduleEntry &&
+        file?.changeType !== 'untracked' &&
+        file?.status !== 'D' &&
+        !isDraftDirtyRef.current &&
+        !state?.loading &&
+        !state?.error &&
+        !state?.isBinary
+      const lineChangeCount = editor.getLineChanges()?.length ?? 0
+      const shouldRetry = attempt < HUNK_ACTION_INSTALL_RETRY_LIMIT && (
+        result === 'retry' ||
+        (result === 'skipped' && eligibleFile && hasTextDelta && lineChangeCount === 0)
+      )
+      if (shouldRetry) {
+        perfTrace(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_HUNK_WIDGET_INSTALL, {
+          cwd: activeCwd,
+          terminalId,
+          filename: file?.filename,
+          changeType: file?.changeType,
+          result: 'retry',
+          reason,
+          attempt,
+          lineChangeCount,
+          durationMs: 0
+        })
+        scheduleDiffHunkActionWidgetInstall(reason, attempt + 1)
+      }
+    }, attempt === 0 ? 0 : HUNK_ACTION_INSTALL_RETRY_DELAY_MS)
+  }, [
+    activeCwd,
+    clearHunkActionInstallRetry,
+    getFileKey,
+    installDiffHunkActionWidgets,
+    isOpen,
+    terminalId
+  ])
+
+  const cancelTokenizeSettleTracking = useCallback(() => {
+    tokenizeSettleRunIdRef.current += 1
+    if (tokenizeSettleQuietTimerRef.current !== null) {
+      window.clearTimeout(tokenizeSettleQuietTimerRef.current)
+      tokenizeSettleQuietTimerRef.current = null
+    }
+    if (tokenizeSettleCapTimerRef.current !== null) {
+      window.clearTimeout(tokenizeSettleCapTimerRef.current)
+      tokenizeSettleCapTimerRef.current = null
+    }
+    for (const disposable of tokenizeSettleDisposablesRef.current) {
+      try {
+        disposable.dispose()
+      } catch (error) {
+        debugLog('tokenize-settle:dispose:error', { error: String(error) })
+      }
+    }
+    tokenizeSettleDisposablesRef.current = []
+  }, [])
+
+  const startTokenizeSettleTracking = useCallback((
+    fileKey: string,
+    editor: monacoTypes.editor.IStandaloneDiffEditor
+  ) => {
+    cancelTokenizeSettleTracking()
+    const active = clickLatencyTrackerRef.current.getActive()
+    if (!active || active.fileKey !== fileKey) return
+
+    const runId = tokenizeSettleRunIdRef.current
+    const isCurrentRun = () => tokenizeSettleRunIdRef.current === runId
+    let settled = false
+    const settle = (reason: ClickLatencySettleReason) => {
+      if (settled || !isCurrentRun()) return
+      settled = true
+      cancelTokenizeSettleTracking()
+      clickLatencyTrackerRef.current.markTokenizeSettled(fileKey, reason)
+    }
+    const scheduleQuietSettle = (reason: ClickLatencySettleReason) => {
+      if (!isCurrentRun()) return
+      if (tokenizeSettleQuietTimerRef.current !== null) {
+        window.clearTimeout(tokenizeSettleQuietTimerRef.current)
+      }
+      tokenizeSettleQuietTimerRef.current = window.setTimeout(() => {
+        tokenizeSettleQuietTimerRef.current = null
+        settle(reason)
+      }, TOKENIZE_SETTLE_QUIET_MS)
+    }
+    const markDomAndSchedule = (reason: ClickLatencySettleReason) => {
+      if (settled || !isCurrentRun()) return
+      clickLatencyTrackerRef.current.markDomCommitted(fileKey)
+      scheduleQuietSettle(reason)
+    }
+
+    const container = editor.getContainerDomNode()
+    if (container) {
+      const observer = new MutationObserver(() => {
+        markDomAndSchedule('dom-quiet')
+      })
+      observer.observe(container, {
+        childList: true,
+        subtree: true,
+        characterData: true,
+        attributes: true
+      })
+      tokenizeSettleDisposablesRef.current.push({ dispose: () => observer.disconnect() })
+    }
+
+    const bindTokenEvents = (innerEditor: monacoTypes.editor.IStandaloneCodeEditor) => {
+      const model = innerEditor.getModel() as (monacoTypes.editor.ITextModel & {
+        onDidChangeTokens?: (listener: () => void) => { dispose: () => void }
+      }) | null
+      if (typeof model?.onDidChangeTokens === 'function') {
+        tokenizeSettleDisposablesRef.current.push(model.onDidChangeTokens(() => {
+          markDomAndSchedule('tokens-quiet')
+        }))
+      }
+      tokenizeSettleDisposablesRef.current.push(innerEditor.onDidChangeModelDecorations(() => {
+        markDomAndSchedule('dom-quiet')
+      }))
+    }
+
+    bindTokenEvents(editor.getOriginalEditor())
+    bindTokenEvents(editor.getModifiedEditor())
+
+    const markInitialDom = () => markDomAndSchedule('dom-quiet')
+    requestAnimationFrame(markInitialDom)
+    window.setTimeout(markInitialDom, 80)
+    tokenizeSettleCapTimerRef.current = window.setTimeout(() => {
+      settle('timeout')
+    }, TOKENIZE_SETTLE_CAP_MS)
+  }, [cancelTokenizeSettleTracking])
 
   const disposeDiffEditorBindings = useCallback(() => {
+    cancelTokenizeSettleTracking()
     if (diffSplitMeasureFrameRef.current !== null) {
       window.cancelAnimationFrame(diffSplitMeasureFrameRef.current)
       diffSplitMeasureFrameRef.current = null
@@ -1807,6 +2197,7 @@ export function GitDiffViewer({
       window.clearTimeout(diffScrollCaptureTimerRef.current)
       diffScrollCaptureTimerRef.current = null
     }
+    clearHunkActionInstallRetry()
     disposeDiffHunkActionWidgets()
     for (const disposable of diffEditorBindingDisposablesRef.current) {
       try {
@@ -1816,7 +2207,7 @@ export function GitDiffViewer({
       }
     }
     diffEditorBindingDisposablesRef.current = []
-  }, [disposeDiffHunkActionWidgets])
+  }, [cancelTokenizeSettleTracking, clearHunkActionInstallRetry, disposeDiffHunkActionWidgets])
 
   const measureDiffSplitState = useCallback((
     editorOverride?: monacoTypes.editor.IStandaloneDiffEditor | null
@@ -2057,6 +2448,7 @@ export function GitDiffViewer({
     clearActiveDiffSelection()
     setFileContents({})
     fileContentsRef.current = {}
+    staleFileContentKeysRef.current.clear()
     repoFilterRef.current = null
     setRepoFilter(null)
     setExpandedRepoRoots(new Set())
@@ -2104,6 +2496,9 @@ export function GitDiffViewer({
       }
       return next
     })
+    staleFileContentKeysRef.current = new Set(
+      [...staleFileContentKeysRef.current].filter((key) => nextKeys.has(key))
+    )
 
     const activeSelection = selectedFileRef.current || previousSelection
     if (result.success && result.files.length > 0 && activeSelection) {
@@ -2133,8 +2528,13 @@ export function GitDiffViewer({
           // invalidation while the panel was closed), the effect will not
           // re-fetch on its own and Monaco renders blank or the prior body.
           // Trigger a fetch directly when the cache slot is empty.
-          if (!fileContentsRef.current[nextKey]) {
-            void ensureFileContentRef.current?.(nextFile)
+          const selectedBodyIsStale = staleFileContentKeysRef.current.has(nextKey)
+          if (!fileContentsRef.current[nextKey] || selectedBodyIsStale) {
+            void ensureFileContentRef.current?.(
+              nextFile,
+              selectedBodyIsStale,
+              selectedBodyIsStale ? 'auto-refresh' : 'select'
+            )
           }
         }
       }
@@ -2495,7 +2895,7 @@ export function GitDiffViewer({
   // the in-component 800 ms diff-list cache cannot serve a pre-mutation
   // file list either.
   useEffect(() => {
-    const dispose = window.electronAPI.git.onDiffCacheInvalidated((invalidatedCwd) => {
+    const dispose = window.electronAPI.git.onDiffCacheInvalidated((invalidatedCwd, reason) => {
       const targetCwd = lastKnownCwdRef.current
       if (!targetCwd) return
       // Match by prefix so a submodule mutation under the current cwd
@@ -2511,15 +2911,35 @@ export function GitDiffViewer({
         normalizedSelf.startsWith(`${normalizedHit}/`) ||
         normalizedSelf.startsWith(`${normalizedHit}\\`)
       if (!matches) return
-      // Drop both renderer-side caches:
-      //   - `fileContents` (per-file diff body, owned by Monaco)
-      //   - `lastDiffRef` (the in-component 800 ms diff-list cache,
-      //     which would otherwise short-circuit `loadDiff` and skip
-      //     `applyLoadedDiffResult` entirely on the next entry)
-      const retainedDrafts = retainDirtyDrafts(fileContentsRef.current)
-      setFileContents(retainedDrafts)
-      fileContentsRef.current = retainedDrafts
+      const currentContents = fileContentsRef.current
+      let staleCount = 0
+      if (isOpenRef.current) {
+        const stale = new Set(staleFileContentKeysRef.current)
+        for (const [key, state] of Object.entries(currentContents)) {
+          if (state.draftContent !== undefined && state.draftContent !== state.modifiedContent) {
+            stale.delete(key)
+            continue
+          }
+          stale.add(key)
+        }
+        staleFileContentKeysRef.current = stale
+        staleCount = stale.size
+      } else {
+        const retainedDrafts = retainDirtyDrafts(currentContents)
+        setFileContents(retainedDrafts)
+        fileContentsRef.current = retainedDrafts
+        staleFileContentKeysRef.current.clear()
+      }
       lastDiffRef.current = null
+      perfTrace(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_CACHE_INVALIDATION, {
+        cwd: targetCwd,
+        terminalId,
+        invalidatedCwd,
+        reason,
+        isOpen: isOpenRef.current,
+        retainedEntries: Object.keys(fileContentsRef.current).length,
+        staleEntries: staleCount
+      })
       if (!isOpenRef.current) return
       void loadDiffRef.current?.({ silent: true, force: true })
       const sel = selectedFileRef.current
@@ -2549,11 +2969,15 @@ export function GitDiffViewer({
 
   useEffect(() => {
     if (isOpen) {
+      gitDiffOpenAtRef.current = performance.now()
+      coldMountRecordedRef.current = false
       diffRestoreCycleRef.current += 1
       diffRestoreAppliedRef.current = { cycle: diffRestoreCycleRef.current, fileKey: null }
       wasOpenRef.current = true
       return
     }
+    gitDiffOpenAtRef.current = null
+    coldMountRecordedRef.current = false
     if (wasOpenRef.current) {
       captureDiffView()
       wasOpenRef.current = false
@@ -2694,53 +3118,109 @@ export function GitDiffViewer({
     if (!activeCwd) return
     const fileKey = getFileKey(file)
     const cached = fileContentsRef.current[fileKey]
-    if (cached && !cached.loading && !force) {
+    const isStale = staleFileContentKeysRef.current.has(fileKey)
+    if (cached && !cached.loading && !force && !isStale) {
       // Cached early-return: the file's content is already in state, so
       // there is no placeholder→real transition. Mark stateSet anyway so
       // the click-latency tracker's `markDiffComputedIfReal` gate accepts
       // the next onDidUpdateDiff (Monaco swaps the DiffEditor's modified
       // model when selectedFile changes, even when content was cached).
+      clickLatencyTrackerRef.current.markIpcStart(fileKey)
+      clickLatencyTrackerRef.current.markIpcEnd(fileKey, 'hit', {
+        source: 'renderer-memory'
+      })
       clickLatencyTrackerRef.current.markStateSet(fileKey)
+      clickLatencyTrackerRef.current.markModelBound(fileKey)
+      lastFileContentLoadRef.current = {
+        fileKey,
+        filename: file.filename,
+        reason,
+        force,
+        result: 'success',
+        cacheInfo: {
+          state: 'hit',
+          source: 'renderer-memory'
+        },
+        durationMs: 0
+      }
+      const editor = diffEditorRef.current
+      if (editor) {
+        window.setTimeout(() => {
+          const active = clickLatencyTrackerRef.current.getActive()
+          if (!active || active.fileKey !== fileKey || active.tokenizeSettleAt !== null) return
+          if (cached.error || cached.isBinary || cached.isSvg || cached.isPdf || cached.isEpub) {
+            clickLatencyTrackerRef.current.markDomCommitted(fileKey)
+            clickLatencyTrackerRef.current.markDiffComputed(fileKey)
+            clickLatencyTrackerRef.current.markTokenizeSettled(fileKey, 'non-text')
+            return
+          }
+          if (active.diffComputedAt === null) {
+            clickLatencyTrackerRef.current.markDiffComputed(fileKey)
+          }
+          startTokenizeSettleTracking(fileKey, editor)
+        }, 0)
+      }
       return
     }
-    if (inFlightRef.current[fileKey]) {
-      return
+    const existingInFlight = inFlightRef.current[fileKey]
+    if (existingInFlight) {
+      if (!force || inFlightForceRef.current[fileKey]) {
+        return
+      }
+      try {
+        await existingInFlight
+      } catch {
+        // The forced refresh below will report its own error state.
+      }
     }
 
     const loadStartedAt = performance.now()
-    setFileContents((prev) => ({
-      ...prev,
-      [fileKey]: {
-        ...(prev[fileKey] || {
-          originalContent: '',
-          modifiedContent: '',
-          isBinary: false
-        }),
-        loading: true,
-        error: undefined
+    setFileContents((prev) => {
+      const previous = prev[fileKey]
+      return {
+        ...prev,
+        [fileKey]: {
+          ...(previous || {
+            originalContent: '',
+            modifiedContent: '',
+            isBinary: false
+          }),
+          loading: true,
+          refreshing: Boolean(previous && !previous.loading),
+          error: undefined
+        }
       }
-    }))
+    })
 
     const task = (async () => {
       try {
         clickLatencyTrackerRef.current.markIpcStart(fileKey)
-        const ipcStartedAt = performance.now()
         const result: GitFileContentResult = await window.electronAPI.git.getFileContent(activeCwd, {
           filename: file.filename,
           status: file.status,
           originalFilename: file.originalFilename,
           changeType: file.changeType,
           isSubmoduleEntry: file.isSubmoduleEntry
-        }, file.repoRoot)
-        const ipcDurationMs = performance.now() - ipcStartedAt
-        // < 8 ms round-trip is dominated by IPC overhead, with no time left
-        // for a worker disk read — that's our cache-hit signal. Above the
-        // threshold we tag as miss so the autotest can attribute slow loads
-        // to the cache layer vs Monaco rendering.
-        const cacheState: 'hit' | 'miss' = ipcDurationMs < 8 ? 'hit' : 'miss'
-        clickLatencyTrackerRef.current.markIpcEnd(fileKey, cacheState)
+        }, file.repoRoot, {
+          force,
+          missReason: cacheMissReasonForLoad(force, reason)
+        })
+        const cacheInfo = result.cacheInfo
+        clickLatencyTrackerRef.current.markIpcEnd(fileKey, cacheInfo?.state ?? 'unknown', {
+          source: cacheInfo?.source ?? null,
+          missReason: cacheInfo?.missReason ?? null
+        })
 
         if (!result.success) {
+          lastFileContentLoadRef.current = {
+            fileKey,
+            filename: file.filename,
+            reason,
+            force,
+            result: 'error',
+            cacheInfo: cacheInfo ?? null,
+            durationMs: +(performance.now() - loadStartedAt).toFixed(1)
+          }
           perfTrace(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_FILE_LOAD, {
             cwd: activeCwd,
             terminalId,
@@ -2748,6 +3228,9 @@ export function GitDiffViewer({
             filename: file.filename,
             changeType: file.changeType,
             reason,
+            cacheState: cacheInfo?.state ?? 'unknown',
+            cacheSource: cacheInfo?.source ?? null,
+            cacheMissReason: cacheInfo?.missReason ?? null,
             result: 'error',
             durationMs: +(performance.now() - loadStartedAt).toFixed(1)
           })
@@ -2760,6 +3243,7 @@ export function GitDiffViewer({
                 isBinary: false
               }),
               loading: false,
+              refreshing: false,
               error: result.error || t('gitDiff.error.readFile'),
               originalContent: '',
               modifiedContent: '',
@@ -2780,10 +3264,12 @@ export function GitDiffViewer({
           const previous = prev[fileKey]
           const draft = previous?.draftContent
           const nextDraft = draft !== undefined && draft !== result.modifiedContent ? draft : undefined
+          staleFileContentKeysRef.current.delete(fileKey)
           return {
             ...prev,
             [fileKey]: {
               loading: false,
+              refreshing: false,
               error: undefined,
               originalContent: result.originalContent,
               modifiedContent: result.modifiedContent,
@@ -2805,6 +3291,15 @@ export function GitDiffViewer({
           }
         })
         clickLatencyTrackerRef.current.markStateSet(fileKey)
+        lastFileContentLoadRef.current = {
+          fileKey,
+          filename: file.filename,
+          reason,
+          force,
+          result: 'success',
+          cacheInfo: cacheInfo ?? null,
+          durationMs: +(performance.now() - loadStartedAt).toFixed(1)
+        }
         perfTrace(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_FILE_LOAD, {
           cwd: activeCwd,
           terminalId,
@@ -2812,6 +3307,9 @@ export function GitDiffViewer({
           filename: file.filename,
           changeType: file.changeType,
           reason,
+          cacheState: cacheInfo?.state ?? 'unknown',
+          cacheSource: cacheInfo?.source ?? null,
+          cacheMissReason: cacheInfo?.missReason ?? null,
           result: 'success',
           originalLen: result.originalContent.length,
           modifiedLen: result.modifiedContent.length,
@@ -2826,9 +3324,25 @@ export function GitDiffViewer({
           originalLen: result.originalContent.length,
           modifiedLen: result.modifiedContent.length,
           reason,
+          cacheState: cacheInfo?.state ?? 'unknown',
+          cacheSource: cacheInfo?.source ?? null,
+          cacheMissReason: cacheInfo?.missReason ?? null,
           force
         })
       } catch (error) {
+        lastFileContentLoadRef.current = {
+          fileKey,
+          filename: file.filename,
+          reason,
+          force,
+          result: 'exception',
+          cacheInfo: {
+            state: 'miss',
+            source: 'worker-rebuild',
+            missReason: 'worker-error'
+          },
+          durationMs: +(performance.now() - loadStartedAt).toFixed(1)
+        }
         perfTrace(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_FILE_LOAD, {
           cwd: activeCwd,
           terminalId,
@@ -2836,6 +3350,9 @@ export function GitDiffViewer({
           filename: file.filename,
           changeType: file.changeType,
           reason,
+          cacheState: 'miss',
+          cacheSource: 'worker-rebuild',
+          cacheMissReason: 'worker-error',
           result: 'exception',
           durationMs: +(performance.now() - loadStartedAt).toFixed(1)
         })
@@ -2848,6 +3365,7 @@ export function GitDiffViewer({
               isBinary: false
             }),
             loading: false,
+            refreshing: false,
             error: t('gitDiff.error.readFailed', { error: String(error) }),
             originalContent: '',
             modifiedContent: '',
@@ -2865,12 +3383,14 @@ export function GitDiffViewer({
     })()
 
     inFlightRef.current[fileKey] = task
+    inFlightForceRef.current[fileKey] = force
     try {
       await task
     } finally {
       delete inFlightRef.current[fileKey]
+      delete inFlightForceRef.current[fileKey]
     }
-  }, [activeCwd, getFileKey, t, terminalId])
+  }, [activeCwd, getFileKey, startTokenizeSettleTracking, t, terminalId])
 
   // Bridge ensureFileContent into the watcher-invalidation listener
   // (registered above, before this callback is defined). The listener
@@ -2883,13 +3403,15 @@ export function GitDiffViewer({
 
   useEffect(() => {
     if (selectedFile) {
-      ensureFileContent(selectedFile)
+      const key = getFileKey(selectedFile)
+      const isStale = staleFileContentKeysRef.current.has(key)
+      ensureFileContent(selectedFile, isStale, isStale ? 'auto-refresh' : 'select')
       setActionMessage(null)
     }
     setSelectedLineRangeValue(null)
     originalDecorationsRef.current?.clear()
     modifiedDecorationsRef.current?.clear()
-  }, [selectedFile, ensureFileContent, setSelectedLineRangeValue])
+  }, [selectedFile, ensureFileContent, getFileKey, setSelectedLineRangeValue])
 
   // Lightweight renderer-side prefetch loop. The HEAVY prefetch lives in
   // the main-process precompute scheduler now; this loop just primes the
@@ -2908,7 +3430,8 @@ export function GitDiffViewer({
       .filter((file) => file.status !== 'D' && file.status !== '!')
       .filter((file) => {
         const key = getFileKey(file)
-        return !fileContentsRef.current[key] && !inFlightRef.current[key]
+        return (!fileContentsRef.current[key] || staleFileContentKeysRef.current.has(key)) &&
+          !inFlightRef.current[key]
       })
       .slice(0, 4)
     if (candidates.length === 0) return
@@ -2934,8 +3457,9 @@ export function GitDiffViewer({
         for (const file of candidates) {
           if (cancelled) return
           const key = getFileKey(file)
-          if (!fileContentsRef.current[key]) {
-            await ensureFileContent(file, false, 'prefetch')
+          const stale = staleFileContentKeysRef.current.has(key)
+          if (!fileContentsRef.current[key] || stale) {
+            await ensureFileContent(file, stale, 'prefetch')
           }
           completed += 1
           rendererPrefetchSnapshotRef.current = {
@@ -3081,10 +3605,19 @@ export function GitDiffViewer({
       const editor = diffEditorRef.current
       if (editor) {
         suppressScrollCaptureRef.current = true
+        suppressDraftChangeRef.current = true
         originalDecorationsRef.current?.clear()
         modifiedDecorationsRef.current?.clear()
+        try {
+          editor.getOriginalEditor().setScrollTop(0)
+          editor.getModifiedEditor().setScrollTop(0)
+        } catch (error) {
+          debugLog('switch-file:reset-scroll:error', { error: String(error) })
+        }
+        setDiffEditorResetNonce((nonce) => nonce + 1)
         window.setTimeout(() => {
           suppressScrollCaptureRef.current = false
+          suppressDraftChangeRef.current = false
         }, 0)
       }
       // Begin render-then-reveal cycle for the new file
@@ -3184,24 +3717,37 @@ export function GitDiffViewer({
     setEditMessage(null)
   }, [selectedFileKey])
 
-  const handleDraftChange = useCallback((value?: string) => {
-    if (!selectedFileKey) return
+  const applyLiveDraftChange = useCallback((value?: string) => {
+    if (suppressDraftChangeRef.current) return
+    const file = selectedFileRef.current
+    const fileKey = file ? getFileKey(file) : null
+    if (!file || !fileKey) return
+    const model = diffEditorRef.current?.getModifiedEditor().getModel()
+    const modelUri = model?.uri.toString()
+    const expectedUri = buildGitDiffModelPath(file, activeCwd, 'modified')
+    if (!modelUri || modelUri !== expectedUri) return
     setFileContents((prev) => {
-      const current = prev[selectedFileKey]
-      if (!current) return prev
+      const current = prev[fileKey]
+      if (!current || current.loading) return prev
       const nextValue = value ?? ''
       const nextDraft = nextValue === current.modifiedContent ? undefined : nextValue
       if (current.draftContent === nextDraft) return prev
-      return {
+      const next = {
         ...prev,
-        [selectedFileKey]: {
+        [fileKey]: {
           ...current,
           draftContent: nextDraft
         }
       }
+      fileContentsRef.current = next
+      return next
     })
     setEditMessage(null)
-  }, [selectedFileKey])
+  }, [activeCwd, getFileKey])
+
+  useEffect(() => {
+    applyLiveDraftChangeRef.current = applyLiveDraftChange
+  }, [applyLiveDraftChange])
 
   const scheduleDiffRestore = useCallback((editor: monacoTypes.editor.IStandaloneDiffEditor) => {
     suppressScrollCaptureRef.current = true
@@ -3279,6 +3825,8 @@ export function GitDiffViewer({
 
       if (entry.scrollTop > 0) {
         const applyScrollTop = (attempt: number) => {
+          const liveFileKey = selectedFileRef.current ? getFileKey(selectedFileRef.current) : null
+          if (liveFileKey !== fileKey || diffRestoreCycleRef.current !== currentCycle) return
           const currentEditor = diffEditorRef.current?.getModifiedEditor()
           if (!currentEditor) return
           currentEditor.setScrollTop(entry.scrollTop)
@@ -3296,7 +3844,7 @@ export function GitDiffViewer({
         window.requestAnimationFrame(() => applyScrollTop(0))
         window.setTimeout(() => applyScrollTop(0), 120)
       } else if (targetLine) {
-        modifiedEditor.revealLineNearTop(targetLine)
+        revealLineNearTopSafe(modifiedEditor, targetLine)
       } else if (entry.scrollTop > 0) {
         modifiedEditor.setScrollTop(entry.scrollTop)
         debugLog('restore:scrollTop', { fileKey, scrollTop: entry.scrollTop })
@@ -3325,7 +3873,21 @@ export function GitDiffViewer({
       // The editor instance is now reachable for the currently selected
       // file, if any. Tracker stays a no-op when no measurement is active.
       const currentFileKey = selectedFileRef.current ? getFileKey(selectedFileRef.current) : null
-      if (currentFileKey) clickLatencyTrackerRef.current.markEditorReady(currentFileKey)
+      if (currentFileKey) {
+        clickLatencyTrackerRef.current.markEditorReady(currentFileKey)
+        if (!coldMountRecordedRef.current && gitDiffOpenAtRef.current !== null) {
+          const coldMountMs = performance.now() - gitDiffOpenAtRef.current
+          coldMountRecordedRef.current = true
+          clickLatencyTrackerRef.current.markColdMount(currentFileKey, coldMountMs)
+          perfTrace(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_CLICK_PHASE_COLD_MOUNT, {
+            cwd: activeCwd ?? '',
+            terminalId,
+            fileKey: currentFileKey,
+            filename: selectedFileRef.current?.filename,
+            durationMs: +coldMountMs.toFixed(2)
+          })
+        }
+      }
 
       // Backup "rendered" signal for the click-latency tracker: Monaco's
       // onDidUpdateDiff is the primary marker for "diff computed and
@@ -3355,7 +3917,11 @@ export function GitDiffViewer({
         const active = clickLatencyTrackerRef.current.getActive()
         if (!active || active.fileKey !== liveFileKey) return
         if (active.stateSetAt === null) return
+        const alreadyComputed = active.diffComputedAt !== null
         clickLatencyTrackerRef.current.markDiffComputed(liveFileKey)
+        if (!alreadyComputed) {
+          startTokenizeSettleTracking(liveFileKey, editor)
+        }
       }
       diffEditorBindingDisposablesRef.current.push(modifiedEditorForTracker.onDidChangeModelContent(() => {
         const liveFileKey = selectedFileRef.current ? getFileKey(selectedFileRef.current) : null
@@ -3364,12 +3930,9 @@ export function GitDiffViewer({
 
       // Transition from waiting-diff to restoring-scroll when Monaco finishes computing changes
       diffEditorBindingDisposablesRef.current.push(editor.onDidUpdateDiff(() => {
-        if (diffRevealPhaseRef.current === 'waiting-diff') {
-          setDiffRevealPhase('restoring-scroll')
-          diffRevealPhaseRef.current = 'restoring-scroll'
-        }
+        requestDiffRevealRestore('diff-computed')
         diffNavigationIndexRef.current = -1
-        installDiffHunkActionWidgets(editor, monaco)
+        scheduleDiffHunkActionWidgetInstall('diff-updated')
         const liveFileKey = selectedFileRef.current ? getFileKey(selectedFileRef.current) : null
         markDiffComputedIfReal(liveFileKey)
       }))
@@ -3381,10 +3944,25 @@ export function GitDiffViewer({
       const originalEditor = editor.getOriginalEditor()
       const modifiedEditor = editor.getModifiedEditor()
 
+      diffEditorBindingDisposablesRef.current.push(modifiedEditor.onMouseMove((event) => {
+        const line = event.target.position?.lineNumber
+        if (typeof line === 'number') {
+          revealDiffHunkActionForLine(line)
+        }
+      }))
+      const modifiedEditorDom = modifiedEditor.getDomNode()
+      if (modifiedEditorDom) {
+        const handleMouseLeave = () => scheduleHideDiffHunkActionWidgets()
+        modifiedEditorDom.addEventListener('mouseleave', handleMouseLeave)
+        diffEditorBindingDisposablesRef.current.push({
+          dispose: () => modifiedEditorDom.removeEventListener('mouseleave', handleMouseLeave)
+        })
+      }
+
       // Monitor content changes in the editor on the right (direct editing, automatic draft maintenance)
       diffEditorBindingDisposablesRef.current.push(modifiedEditor.onDidChangeModelContent(() => {
         const value = modifiedEditor.getValue()
-        handleDraftChange(value)
+        applyLiveDraftChangeRef.current(value)
       }))
 
       // Auxiliary: Convert editor selection to row selection range
@@ -3538,7 +4116,20 @@ export function GitDiffViewer({
       // Scroll restoration is now handled by the DiffRevealPhase useLayoutEffect
       // when onDidUpdateDiff fires → restoring-scroll → synchronous scroll + reveal.
     },
-    [disposeDiffEditorBindings, enterDiffWaiting, handleDraftChange, installDiffHunkActionWidgets, scheduleDiffSplitMeasurement, setSelectedLineRangeValue]
+    [
+      activeCwd,
+      disposeDiffEditorBindings,
+      enterDiffWaiting,
+      getFileKey,
+      revealDiffHunkActionForLine,
+      scheduleDiffHunkActionWidgetInstall,
+      scheduleHideDiffHunkActionWidgets,
+      requestDiffRevealRestore,
+      scheduleDiffSplitMeasurement,
+      setSelectedLineRangeValue,
+      startTokenizeSettleTracking,
+      terminalId
+    ]
   )
 
   // When the selected file changes (not draft edits), enter waiting-diff so the
@@ -3554,15 +4145,62 @@ export function GitDiffViewer({
     }
   }, [isOpen, enterDiffWaiting, selectedFileKey])
 
+  useLayoutEffect(() => {
+    if (!isOpen || !selectedFileKey || !selectedFileState || selectedFileState.loading) return
+    const active = clickLatencyTrackerRef.current.getActive()
+    if (!active || active.fileKey !== selectedFileKey || active.stateSetAt === null) return
+
+    clickLatencyTrackerRef.current.markModelBound(selectedFileKey)
+    if (selectedFileState.error || selectedFileState.isBinary || selectedFileState.isSvg || selectedFileState.isPdf || selectedFileState.isEpub) {
+      clickLatencyTrackerRef.current.markDomCommitted(selectedFileKey)
+      clickLatencyTrackerRef.current.markDiffComputed(selectedFileKey)
+      clickLatencyTrackerRef.current.markTokenizeSettled(selectedFileKey, 'non-text')
+      cancelDiffRevealTimeout()
+      setDiffRevealPhase('idle')
+      diffRevealPhaseRef.current = 'idle'
+      return
+    }
+
+    const editor = diffEditorRef.current
+    if (editor) {
+      requestDiffRevealRestore('model-bound')
+      window.setTimeout(() => {
+        const current = clickLatencyTrackerRef.current.getActive()
+        if (!current || current.fileKey !== selectedFileKey || current.diffComputedAt !== null) return
+        clickLatencyTrackerRef.current.markDiffComputed(selectedFileKey)
+        startTokenizeSettleTracking(selectedFileKey, editor)
+      }, 0)
+    }
+  }, [
+    cancelDiffRevealTimeout,
+    isOpen,
+    requestDiffRevealRestore,
+    selectedFileKey,
+    selectedFileState,
+    selectedFileState?.draftContent,
+    selectedFileState?.modifiedContent,
+    selectedFileState?.originalContent,
+    startTokenizeSettleTracking
+  ])
+
   useEffect(() => {
     const editor = diffEditorRef.current
     const monaco = monacoRef.current
     if (!isOpen || !editor || !monaco) {
+      clearHunkActionInstallRetry()
       disposeDiffHunkActionWidgets()
       return
     }
-    installDiffHunkActionWidgets(editor, monaco)
-  }, [disposeDiffHunkActionWidgets, isOpen, installDiffHunkActionWidgets, isDraftDirty, selectedFileKey, selectedFileState])
+    scheduleDiffHunkActionWidgetInstall('selection-state')
+  }, [
+    clearHunkActionInstallRetry,
+    disposeDiffHunkActionWidgets,
+    isOpen,
+    isDraftDirty,
+    scheduleDiffHunkActionWidgetInstall,
+    selectedFileKey,
+    selectedFileState
+  ])
 
   // Render-then-reveal: restore scroll position synchronously before paint,
   // then transition to idle so CSS fade-in reveals the content.
@@ -3625,14 +4263,17 @@ export function GitDiffViewer({
             scrollApplied = true
           } else if (entry.anchor?.line) {
             const modifiedEditor = editor.getModifiedEditor()
-            const lineCount = modifiedEditor.getModel()?.getLineCount() ?? 0
-            const targetLine = Math.max(1, Math.min(entry.anchor.line, lineCount || 1))
-            modifiedEditor.revealLineNearTop(targetLine)
-            restoredAnchorRef.current[fileKey] = {
-              line: targetLine,
-              scrollTop: 0
+            const targetLine = clampEditorLine(modifiedEditor, entry.anchor.line)
+            if (targetLine !== null) {
+              modifiedEditor.revealLineNearTop(targetLine)
+              restoredAnchorRef.current[fileKey] = {
+                line: targetLine,
+                scrollTop: 0
+              }
+              scrollApplied = true
+            } else {
+              diffRestoreAppliedRef.current = { cycle: diffRestoreCycleRef.current, fileKey }
             }
-            scrollApplied = true
           }
 
           diffRestoreAppliedRef.current = { cycle: diffRestoreCycleRef.current, fileKey }
@@ -3647,7 +4288,7 @@ export function GitDiffViewer({
       if (changes && changes.length > 0) {
         const firstChange = changes[0]
         const targetLine = firstChange.modifiedStartLineNumber || firstChange.originalStartLineNumber || 1
-        editor.getModifiedEditor().revealLineNearTop(targetLine)
+        revealLineNearTopSafe(editor.getModifiedEditor(), targetLine)
       }
     }
 
@@ -4084,39 +4725,59 @@ export function GitDiffViewer({
 
   const runDiffHunkAction = useCallback(async (action: DiffHunkAction, range: DiffHunkActionRange): Promise<boolean> => {
     if (hunkActionInFlightRef.current) return false
-    if (!selectedFile || !activeCwd || !selectedFileState) return false
-    if (selectedFile.changeType === 'untracked' || selectedFile.status === 'D' || selectedFileState.isBinary) return false
+    const file = selectedFileRef.current
+    if (!file || !activeCwd) return false
+    const fileKey = getFileKey(file)
+    const state = fileContentsRef.current[fileKey]
+    if (!state) return false
+    if (file.changeType === 'untracked' || file.status === 'D' || state.isBinary) return false
     if (isDraftDirtyRef.current) return false
     const startedAt = performance.now()
-    const fileKey = getFileKey(selectedFile)
     hunkActionInFlightRef.current = true
     setLineMessage(null)
     try {
-      const baseContent = selectedFileState.originalContent
-      const newContent = selectedFileState.modifiedContent
+      const editor = diffEditorRef.current
+      const liveOriginalContent = editor?.getOriginalEditor().getValue()
+      const liveModifiedContent = editor?.getModifiedEditor().getValue()
+      let baseContent = liveOriginalContent ?? state.originalContent
+      let newContent = liveModifiedContent ?? state.draftContent ?? state.modifiedContent
+      const freshContent = await window.electronAPI.git.getFileContent(activeCwd, {
+        filename: file.filename,
+        status: file.status,
+        originalFilename: file.originalFilename,
+        changeType: file.changeType,
+        isSubmoduleEntry: file.isSubmoduleEntry
+      }, file.repoRoot, {
+        force: true,
+        missReason: 'renderer-force-refresh'
+      })
+      if (freshContent.success && !freshContent.isBinary) {
+        baseContent = freshContent.originalContent
+        newContent = freshContent.modifiedContent
+      }
       let diff: FileDiffMetadata
       try {
         diff = parseDiffFromFile(
-          { name: selectedFile.originalFilename || selectedFile.filename, contents: baseContent },
-          { name: selectedFile.filename, contents: newContent }
+          { name: file.originalFilename || file.filename, contents: baseContent },
+          { name: file.filename, contents: newContent }
         )
       } catch (error) {
         setLineMessage({ type: 'error', text: t('gitDiff.line.error.parseFailed', { error: String(error) }) })
         return false
       }
 
-      if (selectedFile.changeType === 'unstaged' && action === 'revert') {
+      if (file.changeType === 'unstaged' && action === 'revert') {
         const nextContent = buildContentWithChangeRange(diff, range, false, baseContent, newContent)
-        const saveResult = await window.electronAPI.git.saveFileContent(activeCwd, selectedFile.filename, nextContent)
+        const saveResult = await window.electronAPI.git.saveFileContent(activeCwd, file.filename, nextContent)
         if (!saveResult.success) {
           setLineMessage({ type: 'error', text: saveResult.error || t('gitDiff.line.error.discardSelectionFailed') })
           return false
         }
         setLineMessage({ type: 'success', text: t('gitDiff.hunk.action.reverted') })
       } else {
-        const applySelected = selectedFile.changeType === 'staged' || action === 'unstage' ? false : true
+        const applySelected = file.changeType === 'staged' || action === 'unstage' ? false : true
         const nextContent = buildContentWithChangeRange(diff, range, applySelected, baseContent, newContent)
-        const updateResult = await window.electronAPI.git.updateIndexContent(activeCwd, selectedFile.filename, nextContent)
+        const updateResult = await window.electronAPI.git.updateIndexContent(activeCwd, file.filename, nextContent)
         if (!updateResult.success) {
           setLineMessage({ type: 'error', text: updateResult.error || t('gitDiff.line.error.updateIndexFailed') })
           return false
@@ -4131,8 +4792,8 @@ export function GitDiffViewer({
         cwd: activeCwd,
         terminalId,
         fileKey,
-        filename: selectedFile.filename,
-        changeType: selectedFile.changeType,
+        filename: file.filename,
+        changeType: file.changeType,
         action,
         hunkIndex: range.index,
         result: 'success',
@@ -4146,8 +4807,8 @@ export function GitDiffViewer({
         cwd: activeCwd,
         terminalId,
         fileKey,
-        filename: selectedFile.filename,
-        changeType: selectedFile.changeType,
+        filename: file.filename,
+        changeType: file.changeType,
         action,
         hunkIndex: range.index,
         result: 'exception',
@@ -4158,7 +4819,7 @@ export function GitDiffViewer({
     } finally {
       hunkActionInFlightRef.current = false
     }
-  }, [activeCwd, getFileKey, loadDiff, selectedFile, selectedFileState, t, terminalId])
+  }, [activeCwd, getFileKey, loadDiff, t, terminalId])
 
   useEffect(() => {
     runDiffHunkActionRef.current = runDiffHunkAction
@@ -4367,6 +5028,9 @@ export function GitDiffViewer({
       // selector returns its progress so the staleness autotest's
       // GDS-32 (first-selection-uses-prefetched-body-cache) check passes.
       getPrefetchState: () => ({ ...rendererPrefetchSnapshotRef.current }),
+      getLastFileContentLoad: () => lastFileContentLoadRef.current
+        ? { ...lastFileContentLoadRef.current }
+        : null,
       getLastClickLatency: () => clickLatencyTrackerRef.current.getLast(),
       getLastClickLatencyForFile: (fileKey: string) =>
         clickLatencyTrackerRef.current.getLastForFile(fileKey),
@@ -4426,7 +5090,7 @@ export function GitDiffViewer({
       scrollToLine: (line: number) => {
         const editor = diffEditorRef.current
         if (!editor) return false
-        editor.getModifiedEditor().revealLineNearTop(line)
+        if (!revealLineNearTopSafe(editor.getModifiedEditor(), line)) return false
         window.requestAnimationFrame(() => {
           if (!isDraftDirtyRef.current) {
             captureDiffView()
@@ -4539,15 +5203,14 @@ export function GitDiffViewer({
           error: state?.error ?? null,
           isBinary: state ? Boolean(state.isBinary) : null,
           isDraftDirty: isDraftDirtyRef.current,
-          lineChanges: editor?.getLineChanges()?.length ?? 0,
-          widgetDomCount: document.querySelectorAll('.git-diff-hunk-actions').length,
-          visibleWidgetDomCount: document.querySelectorAll('.git-diff-hunk-actions.is-visible').length,
-          widgetDisposableCount: diffHunkActionDisposablesRef.current.length
-        }
+	          lineChanges: editor?.getLineChanges()?.length ?? 0,
+	          widgetDomCount: document.querySelectorAll('.git-diff-hunk-actions').length,
+	          visibleWidgetDomCount: document.querySelectorAll('.git-diff-hunk-actions.is-visible').length,
+	          widgetDisposableCount: diffHunkActionDisposablesRef.current.length,
+	          installRetryPending: hunkActionInstallRetryTimerRef.current !== null
+	        }
       },
       revealFirstHunkActionForTest: () => {
-        // Toolbars are always visible now; this helper just ensures the
-        // install ran and the first widget exists.
         let first = diffHunkActionWidgetHandlesRef.current[0]
         if (!first) {
           const editor = diffEditorRef.current
@@ -4557,18 +5220,20 @@ export function GitDiffViewer({
             first = diffHunkActionWidgetHandlesRef.current[0]
           }
         }
+        if (first) {
+          setVisibleDiffHunkActionWidget(first.id)
+        }
         return Boolean(first)
       },
       hideHunkActionsForTest: () => {
-        // No-op — toolbars are no longer hover-revealed. Kept for autotest
-        // backwards compatibility; intentionally does nothing.
+        setVisibleDiffHunkActionWidget(null)
       },
       triggerFirstHunkAction: async (action: DiffHunkAction) => {
         const editor = diffEditorRef.current
         const changes = editor?.getLineChanges() ?? []
         const first = changes[0]
         if (!first) return false
-        return await runDiffHunkAction(action, {
+        const promise = runDiffHunkAction(action, {
           id: `debug:0:${first.originalStartLineNumber}-${first.originalEndLineNumber}:${first.modifiedStartLineNumber}-${first.modifiedEndLineNumber}`,
           index: 0,
           originalStartLineNumber: first.originalStartLineNumber,
@@ -4576,6 +5241,13 @@ export function GitDiffViewer({
           modifiedStartLineNumber: first.modifiedStartLineNumber,
           modifiedEndLineNumber: first.modifiedEndLineNumber
         })
+        lastHunkActionPromiseRef.current = promise
+        return await promise
+      },
+      waitForLastHunkActionForTest: async () => {
+        const promise = lastHunkActionPromiseRef.current
+        if (!promise) return null
+        return await promise
       },
       setSelectedLineRangeForTest: (start: number, end: number, side: SelectionSide = 'additions') => {
         if (!Number.isFinite(start) || !Number.isFinite(end)) return false
@@ -4698,6 +5370,7 @@ export function GitDiffViewer({
     refreshChanges,
     runDiffHunkAction,
     runLineAction,
+    setVisibleDiffHunkActionWidget,
     setFileListViewMode,
     setRepoExpanded,
     selectedFile,
@@ -4735,22 +5408,12 @@ export function GitDiffViewer({
 
   const originalModelPath = useMemo(() => {
     if (!selectedFile) return undefined
-    const repoSegment = hashString(selectedFile.repoRoot || activeCwd || 'repo')
-    const originalPath = (selectedFile.originalFilename || selectedFile.filename)
-      .split('/')
-      .map(encodeURIComponent)
-      .join('/')
-    return `inmemory://model/onward-git-diff/${repoSegment}/original/${originalPath}`
+    return buildGitDiffModelPath(selectedFile, activeCwd, 'original')
   }, [activeCwd, selectedFile])
 
   const modifiedModelPath = useMemo(() => {
     if (!selectedFile) return undefined
-    const repoSegment = hashString(selectedFile.repoRoot || activeCwd || 'repo')
-    const filePath = selectedFile.filename
-      .split('/')
-      .map(encodeURIComponent)
-      .join('/')
-    return `inmemory://model/onward-git-diff/${repoSegment}/modified/${filePath}`
+    return buildGitDiffModelPath(selectedFile, activeCwd, 'modified')
   }, [activeCwd, selectedFile])
 
   const diffView = useMemo(() => {
@@ -4761,6 +5424,7 @@ export function GitDiffViewer({
     if (selectedFileState.error || selectedFileState.isBinary || selectedFileState.isSvg) return null
     return (
       <DiffEditor
+        key={`text-${selectedFileKey || 'empty'}::${diffEditorResetNonce}`}
         original={selectedFileState.originalContent}
         modified={effectiveModifiedContent}
         language={language}
@@ -4776,7 +5440,7 @@ export function GitDiffViewer({
         height="100%"
       />
     )
-  }, [selectedFile, selectedFileState, language, diffEditorOptions, effectiveModifiedContent, handleEditorDidMount, modifiedModelPath, originalModelPath])
+  }, [selectedFile, selectedFileKey, selectedFileState, language, diffEditorOptions, diffEditorResetNonce, effectiveModifiedContent, handleEditorDidMount, modifiedModelPath, originalModelPath])
 
   const fileGroups = useMemo(() => {
     const groups: Record<GitFileStatus['changeType'], GitFileStatus[]> = {
@@ -5047,6 +5711,8 @@ export function GitDiffViewer({
     }
 
     const fileState = selectedFileState
+    const canShowRefreshingState = Boolean(fileState?.loading && fileState.refreshing)
+    const fileReadyForPreview = Boolean(fileState && !fileState.error && (!fileState.loading || canShowRefreshingState))
     const headerTitle = selectedFile.originalFilename && (selectedFile.status === 'R' || selectedFile.status === 'C')
       ? `${selectedFile.originalFilename} → ${selectedFile.filename}`
       : selectedFile.filename
@@ -5231,7 +5897,7 @@ export function GitDiffViewer({
           )}
         </div>
         <div className={`git-diff-detail-content${diffRevealPhase !== 'idle' ? ` diff-phase-${diffRevealPhase}` : ''}`}>
-          {(!fileState || fileState.loading) && (
+          {(!fileState || (fileState.loading && !canShowRefreshingState)) && (
             <div className="git-diff-loading">
               <div className="git-diff-loading-dots" aria-hidden="true"><span /><span /><span /></div>
               <span>{t('gitDiff.loadingFile')}</span>
@@ -5242,10 +5908,10 @@ export function GitDiffViewer({
               {fileState.error}
             </div>
           )}
-          {fileState && !fileState.loading && !fileState.error && fileState.isImage && (fileState.isBinary || fileState.isSvg) && (
+          {fileReadyForPreview && fileState?.isImage && (fileState.isBinary || fileState.isSvg) && (
             renderImagePreview(fileState, selectedFile)
           )}
-          {fileState && !fileState.loading && !fileState.error && fileState.isPdf && (
+          {fileReadyForPreview && fileState?.isPdf && (
             <GitPdfCompare
               status={
                 (selectedFile?.status === 'A' || selectedFile?.status === '?') ? 'added'
@@ -5270,7 +5936,7 @@ export function GitDiffViewer({
               }}
             />
           )}
-          {fileState && !fileState.loading && !fileState.error && fileState.isEpub && (
+          {fileReadyForPreview && fileState?.isEpub && (
             <GitEpubCompare
               status={
                 (selectedFile?.status === 'A' || selectedFile?.status === '?') ? 'added'
@@ -5305,12 +5971,12 @@ export function GitDiffViewer({
               }}
             />
           )}
-          {fileState && !fileState.loading && !fileState.error && fileState.isBinary && !fileState.isImage && !fileState.isPdf && !fileState.isEpub && (
+          {fileReadyForPreview && fileState?.isBinary && !fileState.isImage && !fileState.isPdf && !fileState.isEpub && (
             <div className="git-diff-no-content">
               {t('gitDiff.binaryUnsupported')}
             </div>
           )}
-          {fileState && !fileState.loading && !fileState.error && !fileState.isBinary && !fileState.isSvg && (
+          {fileReadyForPreview && fileState && !fileState.isBinary && !fileState.isSvg && (
             <div className="git-diff-editor-container">
               {diffView}
             </div>
@@ -5848,15 +6514,14 @@ export function GitDiffViewer({
         )}
 
         {(() => {
-          const debugPanel = (
+          const debugPanel = gitDiffPerformanceDiagnosticsEnabled ? (
             <GitDiffDebugPanel
               tracker={clickLatencyTrackerRef.current}
               cwd={activeCwd ?? ''}
-              terminalId={terminalId}
               collapsed={debugPanelCollapsed}
               onToggleCollapsed={handleDebugPanelToggle}
             />
-          )
+          ) : null
           return useSharedPanelHeader ? (
             <SubpagePanelShell
               current="diff"
@@ -5920,7 +6585,7 @@ export function GitDiffViewer({
               </div>
             </div>
 
-            {/* Performance diagnostics panel (always visible) */}
+            {/* Performance diagnostics panel (global opt-in setting) */}
             {debugPanel}
 
             {/* Body */}

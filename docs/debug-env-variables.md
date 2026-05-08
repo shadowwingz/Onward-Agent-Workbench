@@ -80,6 +80,14 @@ set ONWARD_TELEMETRY_RESET_CONSENT=1
 | `ONWARD_GIT_MAX_PER_REPO` | integer (default: `3`) | Per-repository cap on concurrent in-flight Git operations. Read in `git-runtime-manager.ts`. Numeric tunable, not a `0`/`1` toggle. |
 | `ONWARD_AUTOTEST_KEEP_TMP` | `1` | Preserve a test's scratch directory on exit instead of deleting it, for failure debugging. Honored by the converted runners that build a tmp dir and register cleanup: the 5 `.sh` runners (`run-feedback-autotest.sh`, `run-feedback-persistence-autotest.sh`, `run-pdf-epub-{preview,full,diff}-autotest.sh`), the 2 `.ps1` runners (`run-feedback-autotest.ps1`, `run-feedback-persistence-autotest.ps1`), and the `mkTempDir` helper in `test/unittest/project-tree-watch-manager.test.mts`. Other legacy runners that unconditionally `rm -rf` their tmp roots (for example `test/autotest/run-git-diff-recursive-submodules-autotest.sh`) still ignore the variable. CI must not set this. |
 
+## Feature Flags
+
+Feature flags use the `ONWARD_FEATURE_*` namespace. They control product surfaces rather than developer-only diagnostics, and may default to enabled while a feature is being validated before release hardening. They are still read once at startup.
+
+| Variable | Default | Disable value | Effect |
+|----------|---------|---------------|--------|
+| `ONWARD_FEATURE_GIT_DIFF_PERFORMANCE_DIAGNOSTICS` | enabled | `0` | Hard-gates the Git Diff Performance Diagnostics surface. The panel is still hidden by default and must be enabled in Settings → Diagnostics → Performance Diagnostics; this flag only removes the feature from the build when set to `0`. |
+
 ## Adding a New Debug Variable
 
 When implementing a new debug switch:

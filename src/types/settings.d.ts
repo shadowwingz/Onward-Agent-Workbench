@@ -76,6 +76,8 @@ export interface SettingsState {
   telemetryConsent: boolean | null
   /** Anonymous instance ID for telemetry (random UUID, regenerated on re-opt-in) */
   telemetryInstanceId: string | null
+  /** Global switch for opt-in performance diagnostics panels. */
+  performanceDiagnosticsEnabled: boolean
   updatedAt: number
 }
 

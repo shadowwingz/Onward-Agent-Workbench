@@ -13,14 +13,22 @@ const make = (overrides: Partial<ClickLatencyMeasurement>): ClickLatencyMeasurem
   fileKey: 'k',
   filename: 'a.ts',
   cacheState: 'hit',
+  cacheSource: 'main-content-cache',
+  cacheMissReason: null,
   clickAt: 0,
   ipcStartAt: 1,
   ipcEndAt: 5,
   stateSetAt: 6,
+  modelBoundAt: 8,
   editorReadyAt: 12,
   diffComputedAt: 16,
+  domCommittedAt: 18,
   paintReadyAt: 20,
-  totalMs: 20,
+  tokenizeSettleAt: 24,
+  firstPaintMs: 20,
+  totalMs: 24,
+  settleReason: 'tokens-quiet',
+  coldMountMs: null,
   cancelled: false,
   ...overrides
 })
@@ -41,13 +49,17 @@ test('computePhaseMs – returns deltas, null for missing endpoints', () => {
   const phases = computePhaseMs(make({}))
   assert.equal(phases.ipcMs, 4)
   assert.equal(phases.stateSetMs, 1)
-  assert.equal(phases.mountMs, 6)
+  assert.equal(phases.modelBindMs, 2)
+  assert.equal(phases.mountMs, 4)
   assert.equal(phases.diffComputeMs, 4)
-  assert.equal(phases.paintMs, 4)
+  assert.equal(phases.domCommitMs, 2)
+  assert.equal(phases.paintMs, 2)
+  assert.equal(phases.tokenizeSettleMs, 4)
 
   const partial = computePhaseMs(make({ stateSetAt: null }))
   assert.equal(partial.stateSetMs, null)
-  assert.equal(partial.mountMs, null)
+  assert.equal(partial.modelBindMs, null)
+  assert.equal(computePhaseMs(make({ stateSetAt: null, modelBoundAt: null })).mountMs, null)
 })
 
 test('aggregate – empty history yields total=0 with null totalMs', () => {
@@ -60,9 +72,9 @@ test('aggregate – empty history yields total=0 with null totalMs', () => {
 
 test('aggregate – cancelled entries excluded from latency, counted separately', () => {
   const history = [
-    make({ totalMs: 10, paintReadyAt: 10 }),
-    make({ totalMs: 20, paintReadyAt: 20 }),
-    make({ cancelled: true, paintReadyAt: null, totalMs: null })
+    make({ totalMs: 10, tokenizeSettleAt: 10 }),
+    make({ totalMs: 20, tokenizeSettleAt: 20 }),
+    make({ cancelled: true, paintReadyAt: null, tokenizeSettleAt: null, totalMs: null })
   ]
   const stats = aggregateClickHistory(history)
   assert.equal(stats.total, 3)
@@ -73,11 +85,11 @@ test('aggregate – cancelled entries excluded from latency, counted separately'
 
 test('aggregate – hit rate over (hit + miss), unknowns excluded', () => {
   const history = [
-    make({ cacheState: 'hit', totalMs: 5, paintReadyAt: 5 }),
-    make({ cacheState: 'hit', totalMs: 6, paintReadyAt: 6 }),
-    make({ cacheState: 'hit', totalMs: 7, paintReadyAt: 7 }),
-    make({ cacheState: 'miss', totalMs: 30, paintReadyAt: 30 }),
-    make({ cacheState: 'unknown', totalMs: 8, paintReadyAt: 8 })
+    make({ cacheState: 'hit', totalMs: 5, tokenizeSettleAt: 5 }),
+    make({ cacheState: 'hit', totalMs: 6, tokenizeSettleAt: 6 }),
+    make({ cacheState: 'hit', totalMs: 7, tokenizeSettleAt: 7 }),
+    make({ cacheState: 'miss', totalMs: 30, tokenizeSettleAt: 30 }),
+    make({ cacheState: 'unknown', totalMs: 8, tokenizeSettleAt: 8 })
   ]
   const stats = aggregateClickHistory(history)
   assert.equal(stats.hitCount, 3)
@@ -89,7 +101,7 @@ test('aggregate – hit rate over (hit + miss), unknowns excluded', () => {
 test('aggregate – window slices to the last N entries only', () => {
   const history: ClickLatencyMeasurement[] = []
   for (let i = 0; i < 50; i += 1) {
-    history.push(make({ totalMs: i + 1, paintReadyAt: i + 1 }))
+    history.push(make({ totalMs: i + 1, tokenizeSettleAt: i + 1 }))
   }
   const stats = aggregateClickHistory(history, 10)
   assert.equal(stats.total, 10)
@@ -100,7 +112,7 @@ test('aggregate – window slices to the last N entries only', () => {
 
 test('aggregate – per-phase mean averages only the entries that contributed', () => {
   const history = [
-    make({}), // ipcMs=4, mountMs=6
+    make({}), // ipcMs=4, mountMs=4
     make({ ipcStartAt: 1, ipcEndAt: 11 }), // ipcMs=10
     make({ stateSetAt: null, editorReadyAt: null, diffComputedAt: null }) // only ipc + paint phases skipped where null
   ]
@@ -114,7 +126,7 @@ test('aggregate – per-phase mean averages only the entries that contributed', 
 test('aggregate – p95 is the second-largest in a 20-sample window', () => {
   const history: ClickLatencyMeasurement[] = []
   for (let i = 1; i <= 20; i += 1) {
-    history.push(make({ totalMs: i, paintReadyAt: i }))
+    history.push(make({ totalMs: i, tokenizeSettleAt: i }))
   }
   const stats = aggregateClickHistory(history)
   // Nearest-rank p95 of 1..20 is 19 (ceil(0.95 * 20) - 1 = 18 → sorted[18] = 19)

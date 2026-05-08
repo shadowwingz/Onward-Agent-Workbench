@@ -16,28 +16,39 @@ const baseMeasurement = (overrides: Partial<ClickLatencyMeasurement> = {}): Clic
   fileKey: 'k',
   filename: 'a.ts',
   cacheState: 'hit',
+  cacheSource: 'main-content-cache',
+  cacheMissReason: null,
   clickAt: 0,
   ipcStartAt: 1,
   ipcEndAt: 5,
   stateSetAt: 6,
+  modelBoundAt: 8,
   editorReadyAt: 12,
   diffComputedAt: 16,
+  domCommittedAt: 17,
   paintReadyAt: 18,
-  totalMs: 18,
+  tokenizeSettleAt: 24,
+  firstPaintMs: 18,
+  totalMs: 24,
+  settleReason: 'tokens-quiet',
+  coldMountMs: null,
   cancelled: false,
   ...overrides
 })
 
-test('emits 5 phase spans + total when measurement is complete', () => {
+test('emits settled phase spans + total when measurement is complete', () => {
   const records = buildClickPhaseTraceRecords(baseMeasurement(), CTX)
-  assert.equal(records.length, 6)
+  assert.equal(records.length, 9)
   const events = records.map((r) => r.event)
   assert.deepEqual(events, [
     CLICK_PHASE_EVENT_NAMES.IPC,
     CLICK_PHASE_EVENT_NAMES.STATE_SET,
+    CLICK_PHASE_EVENT_NAMES.MODEL_BIND,
     CLICK_PHASE_EVENT_NAMES.MOUNT,
     CLICK_PHASE_EVENT_NAMES.DIFF_COMPUTE,
+    CLICK_PHASE_EVENT_NAMES.DOM_COMMIT,
     CLICK_PHASE_EVENT_NAMES.PAINT,
+    CLICK_PHASE_EVENT_NAMES.TOKENIZE_SETTLE,
     CLICK_PHASE_EVENT_NAMES.TOTAL
   ])
 })
@@ -46,8 +57,10 @@ test('phase durationMs uses end - start with two-decimal rounding', () => {
   const records = buildClickPhaseTraceRecords(baseMeasurement(), CTX)
   const ipc = records.find((r) => r.event === CLICK_PHASE_EVENT_NAMES.IPC)
   const mount = records.find((r) => r.event === CLICK_PHASE_EVENT_NAMES.MOUNT)
+  const settle = records.find((r) => r.event === CLICK_PHASE_EVENT_NAMES.TOKENIZE_SETTLE)
   assert.equal((ipc!.payload as Record<string, unknown>).durationMs, 4)
-  assert.equal((mount!.payload as Record<string, unknown>).durationMs, 6)
+  assert.equal((mount!.payload as Record<string, unknown>).durationMs, 4)
+  assert.equal((settle!.payload as Record<string, unknown>).durationMs, 6)
 })
 
 test('returns [] when measurement is cancelled', () => {
@@ -55,9 +68,9 @@ test('returns [] when measurement is cancelled', () => {
   assert.deepEqual(records, [])
 })
 
-test('returns [] when paint never fired', () => {
+test('returns [] when settle never fired', () => {
   const records = buildClickPhaseTraceRecords(
-    baseMeasurement({ paintReadyAt: null, totalMs: null }),
+    baseMeasurement({ tokenizeSettleAt: null, totalMs: null }),
     CTX
   )
   assert.deepEqual(records, [])
@@ -73,14 +86,20 @@ test('skips intermediate phases that are missing endpoints', () => {
   const events = records.map((r) => r.event)
   assert.ok(events.includes(CLICK_PHASE_EVENT_NAMES.IPC))
   assert.ok(!events.includes(CLICK_PHASE_EVENT_NAMES.STATE_SET))
-  assert.ok(!events.includes(CLICK_PHASE_EVENT_NAMES.MOUNT))
+  assert.ok(!events.includes(CLICK_PHASE_EVENT_NAMES.MODEL_BIND))
   // Total is still emitted.
   assert.ok(events.includes(CLICK_PHASE_EVENT_NAMES.TOTAL))
 })
 
-test('payload carries cwd / terminalId / fileKey / filename / cacheState / totalMs', () => {
+test('payload carries cwd / terminalId / fileKey / filename / cacheState / cache reason / totalMs', () => {
   const records = buildClickPhaseTraceRecords(
-    baseMeasurement({ filename: 'x/y/z.ts', cacheState: 'miss', totalMs: 23 }),
+    baseMeasurement({
+      filename: 'x/y/z.ts',
+      cacheState: 'miss',
+      cacheSource: 'worker-rebuild',
+      cacheMissReason: 'invalidated-refresh',
+      totalMs: 23
+    }),
     { cwd: '/abs/repo', terminalId: 'task-42' }
   )
   for (const r of records) {
@@ -90,7 +109,18 @@ test('payload carries cwd / terminalId / fileKey / filename / cacheState / total
     assert.equal(p.fileKey, 'k')
     assert.equal(p.filename, 'x/y/z.ts')
     assert.equal(p.cacheState, 'miss')
+    assert.equal(p.cacheSource, 'worker-rebuild')
+    assert.equal(p.cacheMissReason, 'invalidated-refresh')
     assert.equal(p.totalMs, 23)
+    assert.equal(p.firstPaintMs, 18)
+    assert.equal(p.settleReason, 'tokens-quiet')
     assert.ok(typeof p.durationMs === 'number')
   }
+})
+
+test('emits cold mount span when present', () => {
+  const records = buildClickPhaseTraceRecords(baseMeasurement({ coldMountMs: 123.456 }), CTX)
+  const coldMount = records.find((r) => r.event === CLICK_PHASE_EVENT_NAMES.COLD_MOUNT)
+  assert.ok(coldMount)
+  assert.equal((coldMount.payload as Record<string, unknown>).durationMs, 123.46)
 })

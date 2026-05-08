@@ -14,7 +14,8 @@ import {
   buildHunkActionWidgetPlan,
   createHunkActionRange,
   findHunkContainingLine,
-  getHunkActionWidgetEligibility
+  getHunkActionWidgetEligibility,
+  normalizeHunkActionLineChange
 } from '../../src/components/GitDiffViewer/gitDiffHunkActions.ts'
 import { translate } from '../../src/i18n/core.ts'
 
@@ -55,7 +56,11 @@ test('hunk widgets install for a normal worktree file and clamp anchor lines', (
   assert.equal(plan.widgets[0].anchorLine, 1)
   assert.equal(plan.widgets[0].primaryAction, 'stage')
   assert.equal(plan.widgets[0].showRevert, true)
-  assert.deepEqual(plan.widgets[0].range, createHunkActionRange(firstChange, 0))
+  assert.deepEqual(plan.widgets[0].range, createHunkActionRange({
+    ...firstChange,
+    modifiedStartLineNumber: 1,
+    modifiedEndLineNumber: 1
+  }, 0))
 })
 
 test('staged files expose unstage without a revert widget action', () => {
@@ -147,6 +152,49 @@ test('hunk widget plan caps rendered widgets to avoid DOM overload', () => {
 
   assert.equal(plan.eligibility.result, 'installed')
   assert.equal(plan.widgets.length, 100)
+})
+
+test('hunk widget plan drops invalid Monaco line changes before widget creation', () => {
+  const plan = buildHunkActionWidgetPlan({
+    file: file(),
+    state: {},
+    isDraftDirty: false,
+    lineCount: 20,
+    changes: [
+      {
+        originalStartLineNumber: 10,
+        originalEndLineNumber: 12,
+        modifiedStartLineNumber: 30,
+        modifiedEndLineNumber: 40
+      },
+      firstChange
+    ]
+  })
+
+  assert.equal(plan.eligibility.result, 'installed')
+  assert.equal(plan.widgets.length, 1)
+  assert.deepEqual(plan.widgets[0].range, createHunkActionRange(firstChange, 1))
+})
+
+test('normalizeHunkActionLineChange rejects reversed ranges but preserves pure deletions', () => {
+  assert.equal(normalizeHunkActionLineChange({
+    originalStartLineNumber: 8,
+    originalEndLineNumber: 3,
+    modifiedStartLineNumber: 5,
+    modifiedEndLineNumber: 6
+  }, 10), null)
+
+  assert.deepEqual(normalizeHunkActionLineChange({
+    originalStartLineNumber: 10,
+    originalEndLineNumber: 12,
+    modifiedStartLineNumber: 99,
+    modifiedEndLineNumber: 0
+  }, 20), {
+    originalStartLineNumber: 10,
+    originalEndLineNumber: 12,
+    modifiedStartLineNumber: 20,
+    modifiedEndLineNumber: 0
+  })
 })
 
 test('hunk action user-facing copy avoids implementation terminology', () => {
@@ -245,5 +293,25 @@ test('buildContentWithChangeRange can apply or exclude a single changed range', 
   assert.equal(
     buildContentWithChangeRange(diff, first, false, oldContent, newContent),
     'one\nold-a\nsame\nnew-b\n'
+  )
+})
+
+test('buildContentWithChangeRange falls back to the hunk index for EOF line drift', () => {
+  const oldContent = '# Clean parent\n\nbaseline parent content\n'
+  const newContent = '# Clean parent\n\nGDS-29 hunk switch file\n'
+  const diff = parseDiffFromFile(
+    { name: 'README.md', contents: oldContent },
+    { name: 'README.md', contents: newContent }
+  )
+  const eofDriftRange = createHunkActionRange({
+    originalStartLineNumber: 4,
+    originalEndLineNumber: 4,
+    modifiedStartLineNumber: 4,
+    modifiedEndLineNumber: 4
+  }, 0)
+
+  assert.equal(
+    buildContentWithChangeRange(diff, eofDriftRange, false, oldContent, newContent),
+    oldContent
   )
 })

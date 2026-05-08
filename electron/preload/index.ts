@@ -457,6 +457,39 @@ export interface TerminalGitInfo {
   status: TerminalGitStatus | null
 }
 
+export type GitDiffContentCacheMissReason =
+  | 'first-load'
+  | 'invalidated-mutation'
+  | 'invalidated-watch'
+  | 'invalidated-mirror'
+  | 'invalidated-refresh'
+  | 'renderer-force-refresh'
+  | 'project-queue-evicted'
+  | 'single-file-too-large'
+  | 'precompute-pending'
+  | 'entry-not-warmed'
+  | 'worker-error'
+
+export type GitDiffContentCacheSource =
+  | 'renderer-memory'
+  | 'main-content-cache'
+  | 'worker-rebuild'
+
+export interface GitDiffContentCacheInfo {
+  state: 'hit' | 'miss' | 'unknown'
+  source: GitDiffContentCacheSource
+  missReason?: GitDiffContentCacheMissReason
+  project?: string
+  key?: string
+  stored?: boolean
+  bytes?: number
+}
+
+export interface GitFileContentRequestOptions {
+  force?: boolean
+  missReason?: GitDiffContentCacheMissReason
+}
+
 export interface GitFileContentResult {
   success: boolean
   cwd: string
@@ -470,6 +503,7 @@ export interface GitFileContentResult {
   modifiedImageUrl?: string
   originalImageSize?: number
   modifiedImageSize?: number
+  cacheInfo?: GitDiffContentCacheInfo
   error?: string
 }
 
@@ -654,7 +688,7 @@ export interface GitAPI {
   getHistory: (cwd: string, options?: { limit?: number; skip?: number }) => Promise<GitHistoryResult>
   getHistoryDiff: (cwd: string, options: GitHistoryDiffOptions) => Promise<GitHistoryDiffResult>
   getHistoryFileContent: (cwd: string, options: GitHistoryFileContentOptions) => Promise<GitHistoryFileContentResult>
-  getFileContent: (cwd: string, file: Pick<GitFileStatus, 'filename' | 'status' | 'originalFilename' | 'changeType' | 'isSubmoduleEntry'>, repoRoot?: string) => Promise<GitFileContentResult>
+  getFileContent: (cwd: string, file: Pick<GitFileStatus, 'filename' | 'status' | 'originalFilename' | 'changeType' | 'isSubmoduleEntry'>, repoRoot?: string, options?: GitFileContentRequestOptions) => Promise<GitFileContentResult>
   saveFileContent: (cwd: string, filename: string, content: string) => Promise<GitFileSaveResult>
   stageFile: (cwd: string, filename: string, repoRoot?: string) => Promise<GitFileActionResult>
   unstageFile: (cwd: string, filename: string, repoRoot?: string) => Promise<GitFileActionResult>
@@ -675,7 +709,7 @@ export interface GitAPI {
   // under a watched cwd debounces (180 ms window), or when a force=true
   // request lands. Use this to refetch an open Git Diff view rather than
   // polling. Returns an unsubscribe function.
-  onDiffCacheInvalidated: (callback: (cwd: string, reason: 'watcher' | 'force' | 'lru' | 'manual' | 'mirror') => void) => () => void
+  onDiffCacheInvalidated: (callback: (cwd: string, reason: 'watcher' | 'watcher-error' | 'force' | 'lru' | 'manual' | 'mirror') => void) => () => void
 
   // ─── GitStateMirror (worker-thread mirror, pub/sub) ──────────────────
   // Renderer code typically goes through `useGitStateMirror(cwd)` (commit 6)
@@ -794,6 +828,7 @@ export interface SettingsState {
   gitDiffFontSize: number | null
   settingsPanelWidth: number
   language: 'en' | 'zh-CN'
+  performanceDiagnosticsEnabled: boolean
   updatedAt: number
 }
 
@@ -973,7 +1008,10 @@ export interface GitDiffDebugStats {
       project: string
       bytes: number
       entries: number
-      lastTouchedAt: number
+      entryDetails: Array<{
+        key: string
+        bytes: number
+      }>
     }>
     totalBytes: number
     totalEntries: number
@@ -997,12 +1035,36 @@ export interface GitDiffDebugStats {
     forces: number
     ttlMs: number
     maxEntries: number
+    lastEvent: {
+      kind: 'hit' | 'miss' | 'force' | null
+      key: string | null
+      at: number | null
+      ageMs: number | null
+      entriesCleared: number | null
+    }
+  }
+  watcher: {
+    backend: 'parcel'
+    active: number
+    maxProjects: number
+    projects: Array<{
+      cwd: string
+      status: 'starting' | 'watching' | 'error' | 'disposed'
+      eventCount: number
+      resyncCount: number
+      lastEventAt: number | null
+      lastError: string | null
+      pending: boolean
+    }>
   }
 }
 
 export interface DebugAPI {
   enabled: boolean
   perfTraceEnabled: boolean
+  featureFlags: {
+    gitDiffPerformanceDiagnostics: boolean
+  }
   profile: boolean
   profileCwd: string | null
   autotest: boolean
@@ -1375,8 +1437,8 @@ const gitAPI: GitAPI = {
     return ipcRenderer.invoke(IPC.GIT_GET_HISTORY_FILE_CONTENT, cwd, options)
   },
 
-  getFileContent: (cwd: string, file: Pick<GitFileStatus, 'filename' | 'status' | 'originalFilename' | 'changeType' | 'isSubmoduleEntry'>, repoRoot?: string) => {
-    return ipcRenderer.invoke(IPC.GIT_GET_FILE_CONTENT, cwd, file, repoRoot)
+  getFileContent: (cwd: string, file: Pick<GitFileStatus, 'filename' | 'status' | 'originalFilename' | 'changeType' | 'isSubmoduleEntry'>, repoRoot?: string, options?: GitFileContentRequestOptions) => {
+    return ipcRenderer.invoke(IPC.GIT_GET_FILE_CONTENT, cwd, file, repoRoot, options)
   },
 
   saveFileContent: (cwd: string, filename: string, content: string) => {
@@ -1449,8 +1511,8 @@ const gitAPI: GitAPI = {
     }
   },
 
-  onDiffCacheInvalidated: (callback: (cwd: string, reason: 'watcher' | 'force' | 'lru' | 'manual' | 'mirror') => void) => {
-    const listener = (_: Electron.IpcRendererEvent, cwd: string, reason: 'watcher' | 'force' | 'lru' | 'manual' | 'mirror') => {
+  onDiffCacheInvalidated: (callback: (cwd: string, reason: 'watcher' | 'watcher-error' | 'force' | 'lru' | 'manual' | 'mirror') => void) => {
+    const listener = (_: Electron.IpcRendererEvent, cwd: string, reason: 'watcher' | 'watcher-error' | 'force' | 'lru' | 'manual' | 'mirror') => {
       callback(cwd, reason)
     }
     ipcRenderer.on(IPC.GIT_DIFF_CACHE_INVALIDATED, listener)
@@ -1768,10 +1830,19 @@ const debugAutotestSuite = process.env.ONWARD_AUTOTEST_SUITE || null
 const debugAutotestExit = process.env.ONWARD_AUTOTEST_EXIT === '1'
 const debugAutotestFixtureExtra = process.env.ONWARD_AUTOTEST_FIXTURE_EXTRA || null
 const perfTraceCaptureContent = process.env.ONWARD_PERF_TRACE_CAPTURE_CONTENT === '1'
+const gitDiffPerformanceDiagnosticsEnabled =
+  process.env.ONWARD_FEATURE_GIT_DIFF_PERFORMANCE_DIAGNOSTICS !== '0'
+
+if (!gitDiffPerformanceDiagnosticsEnabled) {
+  console.log('[FeatureFlags] Git Diff performance diagnostics disabled (ONWARD_FEATURE_GIT_DIFF_PERFORMANCE_DIAGNOSTICS=0)')
+}
 
 const debugAPI: DebugAPI = {
   enabled: debugEnabled,
   perfTraceEnabled,
+  featureFlags: {
+    gitDiffPerformanceDiagnostics: gitDiffPerformanceDiagnosticsEnabled
+  },
   profile: debugProfileEnabled,
   profileCwd: debugProfileCwd,
   autotest: debugAutotestEnabled,

@@ -307,6 +307,39 @@ export interface TerminalGitInfo {
 
 export type TerminalGitStatus = 'clean' | 'modified' | 'added' | 'unknown'
 
+export type GitDiffContentCacheMissReason =
+  | 'first-load'
+  | 'invalidated-mutation'
+  | 'invalidated-watch'
+  | 'invalidated-mirror'
+  | 'invalidated-refresh'
+  | 'renderer-force-refresh'
+  | 'project-queue-evicted'
+  | 'single-file-too-large'
+  | 'precompute-pending'
+  | 'entry-not-warmed'
+  | 'worker-error'
+
+export type GitDiffContentCacheSource =
+  | 'renderer-memory'
+  | 'main-content-cache'
+  | 'worker-rebuild'
+
+export interface GitDiffContentCacheInfo {
+  state: 'hit' | 'miss' | 'unknown'
+  source: GitDiffContentCacheSource
+  missReason?: GitDiffContentCacheMissReason
+  project?: string
+  key?: string
+  stored?: boolean
+  bytes?: number
+}
+
+export interface GitFileContentRequestOptions {
+  force?: boolean
+  missReason?: GitDiffContentCacheMissReason
+}
+
 // Git file content results
 export interface GitFileContentResult {
   success: boolean
@@ -321,6 +354,7 @@ export interface GitFileContentResult {
   modifiedImageUrl?: string
   originalImageSize?: number
   modifiedImageSize?: number
+  cacheInfo?: GitDiffContentCacheInfo
   error?: string
 }
 

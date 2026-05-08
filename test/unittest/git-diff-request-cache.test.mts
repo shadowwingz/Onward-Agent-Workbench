@@ -117,3 +117,47 @@ test('cached values are cloned on read and write', async () => {
 
   assert.deepEqual(second, { revision: 'r1', files: ['a.txt'] })
 })
+
+test('inspectStats reports the last list-cache request event', async () => {
+  const nowRef = { value: 4000 }
+  const cache = createController(nowRef)
+  const key = '/repo::full'
+
+  await cache.get(key, {
+    load: async () => ({ revision: 'r1', files: ['a.txt'] })
+  })
+  assert.deepEqual(cache.inspectStats().lastEvent, {
+    kind: 'miss',
+    key,
+    at: 4000,
+    ageMs: null,
+    entriesCleared: null
+  })
+
+  nowRef.value = 4050
+  await cache.get(key, {
+    load: async () => {
+      throw new Error('second request should use cache')
+    }
+  })
+  assert.deepEqual(cache.inspectStats().lastEvent, {
+    kind: 'hit',
+    key,
+    at: 4050,
+    ageMs: 50,
+    entriesCleared: null
+  })
+
+  nowRef.value = 4100
+  await cache.get(key, {
+    force: true,
+    load: async () => ({ revision: 'r2', files: ['b.txt'] })
+  })
+  assert.deepEqual(cache.inspectStats().lastEvent, {
+    kind: 'force',
+    key,
+    at: 4100,
+    ageMs: 100,
+    entriesCleared: 1
+  })
+})

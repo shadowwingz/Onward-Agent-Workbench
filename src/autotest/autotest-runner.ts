@@ -84,6 +84,17 @@ function normalizeRuntimeMessage(value: unknown): string {
   return String(value ?? 'unknown error')
 }
 
+function normalizeRuntimeStack(value: unknown): string | null {
+  if (value instanceof Error && typeof value.stack === 'string') {
+    return value.stack
+  }
+  if (value && typeof value === 'object' && 'stack' in value) {
+    const stack = (value as { stack?: unknown }).stack
+    return typeof stack === 'string' && stack.trim() ? stack : null
+  }
+  return null
+}
+
 function isIgnorableRuntimeIssue(type: 'error' | 'unhandledrejection', message: string): boolean {
   const normalized = message.trim().toLowerCase()
   if (type === 'error' && normalized.includes('resizeobserver loop completed with undelivered notifications')) {
@@ -112,25 +123,35 @@ export async function runAllTests(ctx: AutotestContext): Promise<void> {
   // Accept comma-separated suite names (e.g. "pdf-epub-preview,pdf-epub-diff")
   // so a single autotest run can exercise multiple cooperating suites.
   const suiteAllowList = runSingleSuite
-    ? new Set(suiteFilter.split(',').map(s => s.trim()).filter(Boolean))
+    ? new Set(
+        suiteFilter
+          .split(',')
+          .map(s => s.trim().split(';')[0]?.trim() ?? '')
+          .filter(Boolean)
+      )
     : null
   const shouldRun = (suiteId: string) => !suiteAllowList || suiteAllowList.has(suiteId)
-  const runtimeErrors: Array<{ type: 'error' | 'unhandledrejection'; message: string }> = []
+  const runtimeErrors: Array<{ type: 'error' | 'unhandledrejection'; message: string; stack: string | null }> = []
   const handleWindowError = (event: ErrorEvent) => {
-    const message = normalizeRuntimeMessage(event.error ?? event.message)
+    const issue = event.error ?? event.message
+    const message = normalizeRuntimeMessage(issue)
+    const stack = normalizeRuntimeStack(issue)
     if (isIgnorableRuntimeIssue('error', message)) {
-      log('runtime-issue-ignored', { type: 'error', message })
+      log('runtime-issue-ignored', { type: 'error', message, stack })
       return
     }
-    runtimeErrors.push({ type: 'error', message })
+    log('runtime-issue-captured', { type: 'error', message, stack })
+    runtimeErrors.push({ type: 'error', message, stack })
   }
   const handleUnhandledRejection = (event: PromiseRejectionEvent) => {
     const message = normalizeRuntimeMessage(event.reason)
+    const stack = normalizeRuntimeStack(event.reason)
     if (isIgnorableRuntimeIssue('unhandledrejection', message)) {
-      log('runtime-issue-ignored', { type: 'unhandledrejection', message })
+      log('runtime-issue-ignored', { type: 'unhandledrejection', message, stack })
       return
     }
-    runtimeErrors.push({ type: 'unhandledrejection', message })
+    log('runtime-issue-captured', { type: 'unhandledrejection', message, stack })
+    runtimeErrors.push({ type: 'unhandledrejection', message, stack })
   }
 
   window.addEventListener('error', handleWindowError)

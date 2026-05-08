@@ -3,7 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import type { FocusEvent as ReactFocusEvent, MouseEvent as ReactMouseEvent } from 'react'
 
 import type { GitDiffDebugStats } from '../../types/electron'
 import { useI18n } from '../../i18n/useI18n'
@@ -22,7 +23,6 @@ import './GitDiffDebugPanel.css'
 interface GitDiffDebugPanelProps {
   tracker: GitDiffClickLatencyTracker
   cwd: string
-  terminalId: string
   collapsed: boolean
   onToggleCollapsed: (next: boolean) => void
 }
@@ -35,21 +35,104 @@ interface ClickEnvelope {
 const PHASE_KEYS: Array<keyof PhaseMs> = [
   'ipcMs',
   'stateSetMs',
+  'modelBindMs',
   'mountMs',
   'diffComputeMs',
-  'paintMs'
+  'domCommitMs',
+  'paintMs',
+  'tokenizeSettleMs'
 ]
 
 const PHASE_COLORS: Record<keyof PhaseMs, string> = {
   ipcMs: 'var(--git-diff-debug-ipc, #6366f1)',
   stateSetMs: 'var(--git-diff-debug-state, #8b5cf6)',
+  modelBindMs: 'var(--git-diff-debug-model-bind, #06b6d4)',
   mountMs: 'var(--git-diff-debug-mount, #ec4899)',
   diffComputeMs: 'var(--git-diff-debug-diff-compute, #f59e0b)',
-  paintMs: 'var(--git-diff-debug-paint, #10b981)'
+  domCommitMs: 'var(--git-diff-debug-dom-commit, #84cc16)',
+  paintMs: 'var(--git-diff-debug-paint, #10b981)',
+  tokenizeSettleMs: 'var(--git-diff-debug-tokenize-settle, #14b8a6)'
 }
 
 const HISTOGRAM_WINDOW = 30
 const POLL_INTERVAL_MS = 1000
+const CACHE_TOOLTIP_DELAY_MS = 90
+const CACHE_TOOLTIP_HIDE_DELAY_MS = 80
+const CACHE_TOOLTIP_MAX_ENTRIES = 50
+
+const TERMS_GROUPS = [
+  {
+    title: 'gitDiff.debug.terms.cacheStrategy.title',
+    body: 'gitDiff.debug.terms.cacheStrategy.body'
+  },
+  {
+    title: 'gitDiff.debug.terms.cacheHit.title',
+    body: 'gitDiff.debug.terms.cacheHit.body'
+  },
+  {
+    title: 'gitDiff.debug.terms.cacheMiss.title',
+    body: 'gitDiff.debug.terms.cacheMiss.body'
+  },
+  {
+    title: 'gitDiff.debug.terms.cacheUnknown.title',
+    body: 'gitDiff.debug.terms.cacheUnknown.body'
+  },
+  {
+    title: 'gitDiff.debug.terms.aggregate.title',
+    body: 'gitDiff.debug.terms.aggregate.body'
+  },
+  {
+    title: 'gitDiff.debug.terms.contentCacheUi.title',
+    body: 'gitDiff.debug.terms.contentCacheUi.body'
+  },
+  {
+    title: 'gitDiff.debug.terms.listCache.title',
+    body: 'gitDiff.debug.terms.listCache.body'
+  },
+  {
+    title: 'gitDiff.debug.terms.scheduler.title',
+    body: 'gitDiff.debug.terms.scheduler.body'
+  },
+  {
+    title: 'gitDiff.debug.terms.history.title',
+    body: 'gitDiff.debug.terms.history.body'
+  }
+] as const
+
+const PHASE_TERMS = [
+  {
+    label: 'gitDiff.debug.phase.ipcMs',
+    body: 'gitDiff.debug.terms.phase.ipcMs'
+  },
+  {
+    label: 'gitDiff.debug.phase.stateSetMs',
+    body: 'gitDiff.debug.terms.phase.stateSetMs'
+  },
+  {
+    label: 'gitDiff.debug.phase.modelBindMs',
+    body: 'gitDiff.debug.terms.phase.modelBindMs'
+  },
+  {
+    label: 'gitDiff.debug.phase.mountMs',
+    body: 'gitDiff.debug.terms.phase.mountMs'
+  },
+  {
+    label: 'gitDiff.debug.phase.diffComputeMs',
+    body: 'gitDiff.debug.terms.phase.diffComputeMs'
+  },
+  {
+    label: 'gitDiff.debug.phase.domCommitMs',
+    body: 'gitDiff.debug.terms.phase.domCommitMs'
+  },
+  {
+    label: 'gitDiff.debug.phase.paintMs',
+    body: 'gitDiff.debug.terms.phase.paintMs'
+  },
+  {
+    label: 'gitDiff.debug.phase.tokenizeSettleMs',
+    body: 'gitDiff.debug.terms.phase.tokenizeSettleMs'
+  }
+] as const
 
 const formatBytes = (n: number): string => {
   if (!Number.isFinite(n) || n <= 0) return '0 B'
@@ -65,18 +148,22 @@ const formatMs = (n: number | null | undefined): string => {
   return `${n.toFixed(0)} ms`
 }
 
-const elapsedSince = (ts: number, now: number): string => {
-  const delta = Math.max(0, now - ts)
-  if (delta < 1000) return `${delta.toFixed(0)}ms`
-  if (delta < 60_000) return `${(delta / 1000).toFixed(1)}s`
-  if (delta < 3_600_000) return `${(delta / 60_000).toFixed(1)}m`
-  return `${(delta / 3_600_000).toFixed(1)}h`
-}
-
 interface PhaseBarSegment {
   key: keyof PhaseMs
   ms: number
   color: string
+}
+
+type CacheProjectStats = GitDiffDebugStats['cache']['projects'][number]
+type CacheEntryStats = CacheProjectStats['entryDetails'][number]
+type CacheHoverAnchorEvent = ReactMouseEvent<HTMLElement> | ReactFocusEvent<HTMLElement>
+
+interface CacheHoverCardState {
+  kind: 'path' | 'entries'
+  project: string
+  entries: CacheEntryStats[]
+  left: number
+  top: number
 }
 
 const buildPhaseSegments = (phases: PhaseMs): PhaseBarSegment[] => {
@@ -87,16 +174,43 @@ const buildPhaseSegments = (phases: PhaseMs): PhaseBarSegment[] => {
   })).filter((seg) => seg.ms > 0)
 }
 
+const parseCacheEntryKey = (key: string): { title: string; meta: string } => {
+  const parts = key.split('::')
+  if (parts.length < 4) return { title: key, meta: '' }
+  const [changeType, status, originalFilename, ...filenameParts] = parts
+  const filename = filenameParts.join('::') || key
+  const meta = [changeType, status, originalFilename].filter(Boolean).join(' | ')
+  return { title: filename, meta }
+}
+
+const formatListCacheKey = (key: string | null): string => {
+  if (!key) return '—'
+  const marker = '::'
+  const idx = key.lastIndexOf(marker)
+  if (idx < 0) return key
+  const cwd = key.slice(0, idx)
+  const scope = key.slice(idx + marker.length)
+  return `${scope} · ${cwd}`
+}
+
+const cacheMissReasonKey = (reason: string): CacheMissReasonLabelKey => {
+  return `gitDiff.debug.cacheMissReason.${reason}` as CacheMissReasonLabelKey
+}
+
 export function GitDiffDebugPanel(props: GitDiffDebugPanelProps): JSX.Element {
-  const { tracker, cwd, terminalId, collapsed, onToggleCollapsed } = props
+  const { tracker, cwd, collapsed, onToggleCollapsed } = props
   const { t } = useI18n()
 
   const [envelope, setEnvelope] = useState<ClickEnvelope>({
     measurement: tracker.getLast(),
     history: tracker.getHistory()
   })
+  const panelRef = useRef<HTMLDivElement | null>(null)
+  const cacheHoverTimerRef = useRef<number | null>(null)
   const [stats, setStats] = useState<GitDiffDebugStats | null>(null)
   const [statsError, setStatsError] = useState<string | null>(null)
+  const [termsOpen, setTermsOpen] = useState(false)
+  const [cacheHoverCard, setCacheHoverCard] = useState<CacheHoverCardState | null>(null)
 
   // Subscribe to tracker so each completed click refreshes the panel.
   useEffect(() => {
@@ -152,6 +266,15 @@ export function GitDiffDebugPanel(props: GitDiffDebugPanelProps): JSX.Element {
     }
   }, [collapsed])
 
+  useEffect(() => {
+    return () => {
+      if (cacheHoverTimerRef.current !== null) {
+        window.clearTimeout(cacheHoverTimerRef.current)
+        cacheHoverTimerRef.current = null
+      }
+    }
+  }, [])
+
   const aggregate = useMemo<ClickAggregateStats>(() => {
     return aggregateClickHistory(envelope.history, HISTOGRAM_WINDOW)
   }, [envelope.history])
@@ -190,10 +313,51 @@ export function GitDiffDebugPanel(props: GitDiffDebugPanelProps): JSX.Element {
     setEnvelope({ measurement: null, history: [] })
   }
 
-  const now = Date.now()
+  const clearCacheHoverTimer = () => {
+    if (cacheHoverTimerRef.current !== null) {
+      window.clearTimeout(cacheHoverTimerRef.current)
+      cacheHoverTimerRef.current = null
+    }
+  }
+
+  const scheduleCacheHoverHide = () => {
+    clearCacheHoverTimer()
+    cacheHoverTimerRef.current = window.setTimeout(() => {
+      cacheHoverTimerRef.current = null
+      setCacheHoverCard(null)
+    }, CACHE_TOOLTIP_HIDE_DELAY_MS)
+  }
+
+  const showCacheHoverCard = (
+    event: CacheHoverAnchorEvent,
+    project: string,
+    kind: CacheHoverCardState['kind'],
+    entries: CacheEntryStats[],
+    delayMs: number
+  ) => {
+    clearCacheHoverTimer()
+    const targetRect = event.currentTarget.getBoundingClientRect()
+    const panelRect = panelRef.current?.getBoundingClientRect()
+    if (!panelRect) return
+    const estimatedWidth = kind === 'entries' ? 460 : 560
+    const left = Math.max(8, Math.min(
+      targetRect.left - panelRect.left,
+      Math.max(8, panelRect.width - estimatedWidth - 8)
+    ))
+    const top = Math.max(8, targetRect.bottom - panelRect.top + 6)
+    const next = { kind, project, entries, left, top }
+    if (delayMs <= 0) {
+      setCacheHoverCard(next)
+      return
+    }
+    cacheHoverTimerRef.current = window.setTimeout(() => {
+      cacheHoverTimerRef.current = null
+      setCacheHoverCard(next)
+    }, delayMs)
+  }
 
   return (
-    <div className={`git-diff-debug-panel${collapsed ? ' is-collapsed' : ''}`}>
+    <div ref={panelRef} className={`git-diff-debug-panel${collapsed ? ' is-collapsed' : ''}`}>
       <div className="gddp-header">
         <button
           type="button"
@@ -225,19 +389,63 @@ export function GitDiffDebugPanel(props: GitDiffDebugPanelProps): JSX.Element {
           )}
         </div>
         {!collapsed && (
-          <button
-            type="button"
-            className="gddp-reset"
-            onClick={handleReset}
-            title={t('gitDiff.debug.reset')}
-          >
-            {t('gitDiff.debug.reset')}
-          </button>
+          <div className="gddp-header-actions">
+            <button
+              type="button"
+              className={`gddp-header-button${termsOpen ? ' is-active' : ''}`}
+              onClick={() => setTermsOpen((open) => !open)}
+              title={t('gitDiff.debug.terms')}
+              aria-expanded={termsOpen}
+            >
+              {t('gitDiff.debug.terms')}
+            </button>
+            <button
+              type="button"
+              className="gddp-header-button"
+              onClick={handleReset}
+              title={t('gitDiff.debug.reset')}
+            >
+              {t('gitDiff.debug.reset')}
+            </button>
+          </div>
         )}
       </div>
 
       {!collapsed && (
         <div className="gddp-body">
+          {termsOpen && (
+            <section className="gddp-section gddp-terms" aria-label={t('gitDiff.debug.termsTitle')}>
+              <div className="gddp-terms-header">
+                <h4 className="gddp-section-title">{t('gitDiff.debug.termsTitle')}</h4>
+                <p>{t('gitDiff.debug.termsIntro')}</p>
+              </div>
+              <div className="gddp-terms-grid">
+                <div className="gddp-terms-block">
+                  <h5>{t('gitDiff.debug.terms.lastClickPhases')}</h5>
+                  <dl className="gddp-terms-list">
+                    {PHASE_TERMS.map((term) => (
+                      <div key={term.label} className="gddp-term">
+                        <dt>{t(term.label)}</dt>
+                        <dd>{t(term.body)}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                </div>
+                <div className="gddp-terms-block">
+                  <h5>{t('gitDiff.debug.terms.otherMetrics')}</h5>
+                  <dl className="gddp-terms-list">
+                    {TERMS_GROUPS.map((term) => (
+                      <div key={term.title} className="gddp-term">
+                        <dt>{t(term.title)}</dt>
+                        <dd>{t(term.body)}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                </div>
+              </div>
+            </section>
+          )}
+
           <section className="gddp-section gddp-last-click">
             <h4 className="gddp-section-title">{t('gitDiff.debug.lastClick')}</h4>
             {envelope.measurement ? (
@@ -275,6 +483,40 @@ export function GitDiffDebugPanel(props: GitDiffDebugPanelProps): JSX.Element {
                       </span>
                     </li>
                   ))}
+                </ul>
+                <ul className="gddp-stat-row">
+                  <li>
+                    <span className="gddp-stat-label">{t('gitDiff.debug.firstPaint')}</span>
+                    <span className="gddp-stat-value">{formatMs(envelope.measurement.firstPaintMs)}</span>
+                  </li>
+                  <li>
+                    <span className="gddp-stat-label">{t('gitDiff.debug.settleReason')}</span>
+                    <span className="gddp-stat-value">{envelope.measurement.settleReason ?? '—'}</span>
+                  </li>
+                  {envelope.measurement.cacheState === 'miss' && (
+                    <li>
+                      <span className="gddp-stat-label">{t('gitDiff.debug.cacheMissReason')}</span>
+                      <span className="gddp-stat-value">
+                        {envelope.measurement.cacheMissReason
+                          ? t(cacheMissReasonKey(envelope.measurement.cacheMissReason))
+                          : '—'}
+                      </span>
+                    </li>
+                  )}
+                  {envelope.measurement.cacheSource && (
+                    <li>
+                      <span className="gddp-stat-label">{t('gitDiff.debug.cacheSource')}</span>
+                      <span className="gddp-stat-value">
+                        {t(`gitDiff.debug.cacheSource.${envelope.measurement.cacheSource}` as CacheSourceLabelKey)}
+                      </span>
+                    </li>
+                  )}
+                  {envelope.measurement.coldMountMs !== null && (
+                    <li>
+                      <span className="gddp-stat-label">{t('gitDiff.debug.coldMount')}</span>
+                      <span className="gddp-stat-value">{formatMs(envelope.measurement.coldMountMs)}</span>
+                    </li>
+                  )}
                 </ul>
               </>
             ) : (
@@ -353,8 +595,7 @@ export function GitDiffDebugPanel(props: GitDiffDebugPanelProps): JSX.Element {
                   <p className="gddp-empty">{t('gitDiff.debug.cacheEmpty')}</p>
                 ) : (
                   <ul className="gddp-cache-list">
-                    {[...stats.cache.projects]
-                      .sort((a, b) => b.lastTouchedAt - a.lastTouchedAt)
+                    {stats.cache.projects
                       .map((p, idx) => {
                         const pct = stats.cache.projectByteLimit > 0
                           ? Math.min(100, (p.bytes / stats.cache.projectByteLimit) * 100)
@@ -364,18 +605,30 @@ export function GitDiffDebugPanel(props: GitDiffDebugPanelProps): JSX.Element {
                           <li
                             key={p.project}
                             className={`gddp-cache-row${isCurrent ? ' is-current' : ''}`}
-                            title={p.project}
                           >
                             <span className="gddp-cache-rank">#{idx + 1}</span>
-                            <span className="gddp-cache-path">{p.project}</span>
+                            <span
+                              className="gddp-cache-path"
+                              onMouseEnter={(event) => showCacheHoverCard(event, p.project, 'path', p.entryDetails, 0)}
+                              onMouseLeave={scheduleCacheHoverHide}
+                              onFocus={(event) => showCacheHoverCard(event, p.project, 'path', p.entryDetails, 0)}
+                              onBlur={scheduleCacheHoverHide}
+                              tabIndex={0}
+                            >
+                              {p.project}
+                            </span>
                             <span className="gddp-cache-bar" aria-hidden="true">
                               <span className="gddp-cache-bar-fill" style={{ width: `${pct}%` }} />
                             </span>
-                            <span className="gddp-cache-numbers">
+                            <span
+                              className="gddp-cache-numbers"
+                              onMouseEnter={(event) => showCacheHoverCard(event, p.project, 'entries', p.entryDetails, CACHE_TOOLTIP_DELAY_MS)}
+                              onMouseLeave={scheduleCacheHoverHide}
+                              onFocus={(event) => showCacheHoverCard(event, p.project, 'entries', p.entryDetails, 0)}
+                              onBlur={scheduleCacheHoverHide}
+                              tabIndex={0}
+                            >
                               {formatBytes(p.bytes)} / {p.entries} {t('gitDiff.debug.entries')}
-                            </span>
-                            <span className="gddp-cache-touched">
-                              {elapsedSince(p.lastTouchedAt, now)}
                             </span>
                           </li>
                         )
@@ -399,35 +652,58 @@ export function GitDiffDebugPanel(props: GitDiffDebugPanelProps): JSX.Element {
                 const hitPct = totalLookups > 0
                   ? `${((lc.hits / totalLookups) * 100).toFixed(0)}%`
                   : '—'
+                const lastKind = lc.lastEvent.kind
+                  ? t(`gitDiff.debug.listCacheEvent.${lc.lastEvent.kind}` as ListCacheEventLabelKey)
+                  : t('gitDiff.debug.listCacheEvent.none')
                 return (
-                  <ul className="gddp-stat-row">
-                    <li>
-                      <span className="gddp-stat-label">{t('gitDiff.debug.entries')}</span>
-                      <span className="gddp-stat-value">{lc.entries}</span>
-                      <span className="gddp-stat-suffix">/ {lc.maxEntries}</span>
-                    </li>
-                    <li>
-                      <span className="gddp-stat-label">{t('gitDiff.debug.hitRate')}</span>
-                      <span className="gddp-stat-value">{hitPct}</span>
-                      <span className="gddp-stat-suffix">({lc.hits}/{totalLookups})</span>
-                    </li>
-                    <li>
-                      <span className="gddp-stat-label">{t('gitDiff.debug.misses')}</span>
-                      <span className="gddp-stat-value">{lc.misses}</span>
-                    </li>
-                    <li>
-                      <span className="gddp-stat-label">{t('gitDiff.debug.forces')}</span>
-                      <span className="gddp-stat-value">{lc.forces}</span>
-                    </li>
-                    <li>
-                      <span className="gddp-stat-label">{t('gitDiff.debug.inFlight')}</span>
-                      <span className="gddp-stat-value">{lc.inFlight}</span>
-                    </li>
-                    <li>
-                      <span className="gddp-stat-label">{t('gitDiff.debug.ttl')}</span>
-                      <span className="gddp-stat-value">{lc.ttlMs}ms</span>
-                    </li>
-                  </ul>
+                  <>
+                    <p className="gddp-metric-note">{t('gitDiff.debug.listCacheNote')}</p>
+                    <ul className="gddp-stat-row">
+                      <li>
+                        <span className="gddp-stat-label">{t('gitDiff.debug.listCacheResident')}</span>
+                        <span className="gddp-stat-value">{lc.entries}</span>
+                        <span className="gddp-stat-suffix">/ {lc.maxEntries}</span>
+                      </li>
+                      <li>
+                        <span className="gddp-stat-label">{t('gitDiff.debug.listCacheState')}</span>
+                        <span className="gddp-stat-value">
+                          {lc.inFlight > 0 ? t('gitDiff.debug.inFlight') : t('gitDiff.debug.idle')}
+                        </span>
+                        {lc.inFlight > 0 && <span className="gddp-stat-suffix">{lc.inFlight}</span>}
+                      </li>
+                      <li>
+                        <span className="gddp-stat-label">{t('gitDiff.debug.listCacheLastRequest')}</span>
+                        <span className="gddp-stat-value">{lastKind}</span>
+                      </li>
+                      <li>
+                        <span className="gddp-stat-label">{t('gitDiff.debug.hitRate')}</span>
+                        <span className="gddp-stat-value">{hitPct}</span>
+                        <span className="gddp-stat-suffix">({lc.hits}/{totalLookups})</span>
+                      </li>
+                      <li>
+                        <span className="gddp-stat-label">{t('gitDiff.debug.misses')}</span>
+                        <span className="gddp-stat-value">{lc.misses}</span>
+                        <span className="gddp-stat-suffix">
+                          {t('gitDiff.debug.forces')}: {lc.forces}
+                        </span>
+                      </li>
+                      <li>
+                        <span className="gddp-stat-label">{t('gitDiff.debug.ttl')}</span>
+                        <span className="gddp-stat-value">{lc.ttlMs}ms</span>
+                      </li>
+                    </ul>
+                    <div className="gddp-list-cache-last">
+                      <span className="gddp-stat-label">{t('gitDiff.debug.listCacheKey')}</span>
+                      <span className="gddp-list-cache-key" title={lc.lastEvent.key ?? ''}>
+                        {formatListCacheKey(lc.lastEvent.key)}
+                      </span>
+                      {lc.lastEvent.ageMs !== null && (
+                        <span className="gddp-stat-suffix">
+                          {t('gitDiff.debug.listCacheEntryAgeAtRequest', { age: formatMs(lc.lastEvent.ageMs) })}
+                        </span>
+                      )}
+                    </div>
+                  </>
                 )
               })()
             ) : (
@@ -486,7 +762,10 @@ export function GitDiffDebugPanel(props: GitDiffDebugPanelProps): JSX.Element {
                     : 0
                   const segments = buildPhaseSegments(item.phases)
                   const summed = segments.reduce((a, b) => a + b.ms, 0)
-                  const tooltip = `${item.measurement.filename}\n${formatMs(total)} | ${item.measurement.cacheState}`
+                  const missReason = item.measurement.cacheMissReason
+                    ? ` | ${t(cacheMissReasonKey(item.measurement.cacheMissReason))}`
+                    : ''
+                  const tooltip = `${item.measurement.filename}\n${formatMs(total)} | ${item.measurement.cacheState}${missReason}`
                   return (
                     <div
                       key={`${idx}-${item.measurement.fileKey}`}
@@ -513,14 +792,57 @@ export function GitDiffDebugPanel(props: GitDiffDebugPanelProps): JSX.Element {
               </div>
             )}
           </section>
+
+          {cacheHoverCard && (
+            <div
+              className={`gddp-cache-hover-card is-${cacheHoverCard.kind}`}
+              style={{ left: cacheHoverCard.left, top: cacheHoverCard.top }}
+              role="tooltip"
+              onMouseEnter={clearCacheHoverTimer}
+              onMouseLeave={scheduleCacheHoverHide}
+            >
+              {cacheHoverCard.kind === 'path' ? (
+                <>
+                  <div className="gddp-cache-hover-title">{t('gitDiff.debug.cacheProjectPath')}</div>
+                  <div className="gddp-cache-hover-path">{cacheHoverCard.project}</div>
+                </>
+              ) : (
+                <>
+                  <div className="gddp-cache-hover-title">
+                    {t('gitDiff.debug.cacheEntryDetails', { count: cacheHoverCard.entries.length })}
+                  </div>
+                  <div className="gddp-cache-hover-path">{cacheHoverCard.project}</div>
+                  {cacheHoverCard.entries.length === 0 ? (
+                    <p className="gddp-cache-hover-empty">{t('gitDiff.debug.cacheEntryDetailsEmpty')}</p>
+                  ) : (
+                    <ol className="gddp-cache-entry-list">
+                      {cacheHoverCard.entries.slice(0, CACHE_TOOLTIP_MAX_ENTRIES).map((entry) => {
+                        const parsed = parseCacheEntryKey(entry.key)
+                        return (
+                          <li key={entry.key}>
+                            <span className="gddp-cache-entry-main">{parsed.title}</span>
+                            <span className="gddp-cache-entry-meta">
+                              {parsed.meta ? `${parsed.meta} · ` : ''}{formatBytes(entry.bytes)}
+                            </span>
+                          </li>
+                        )
+                      })}
+                    </ol>
+                  )}
+                  {cacheHoverCard.entries.length > CACHE_TOOLTIP_MAX_ENTRIES && (
+                    <div className="gddp-cache-hover-more">
+                      {t('gitDiff.debug.cacheEntryDetailsMore', {
+                        shown: CACHE_TOOLTIP_MAX_ENTRIES,
+                        total: cacheHoverCard.entries.length
+                      })}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          )}
         </div>
       )}
-      <div className="gddp-context-row">
-        <span className="gddp-context-label">cwd</span>
-        <span className="gddp-context-value" title={cwd}>{cwd || '—'}</span>
-        <span className="gddp-context-label">tid</span>
-        <span className="gddp-context-value">{terminalId || '—'}</span>
-      </div>
     </div>
   )
 }
@@ -528,11 +850,37 @@ export function GitDiffDebugPanel(props: GitDiffDebugPanelProps): JSX.Element {
 type PhaseLabelKey =
   | 'gitDiff.debug.phase.ipcMs'
   | 'gitDiff.debug.phase.stateSetMs'
+  | 'gitDiff.debug.phase.modelBindMs'
   | 'gitDiff.debug.phase.mountMs'
   | 'gitDiff.debug.phase.diffComputeMs'
+  | 'gitDiff.debug.phase.domCommitMs'
   | 'gitDiff.debug.phase.paintMs'
+  | 'gitDiff.debug.phase.tokenizeSettleMs'
 
 type CacheLabelKey =
   | 'gitDiff.debug.cache.hit'
   | 'gitDiff.debug.cache.miss'
   | 'gitDiff.debug.cache.unknown'
+
+type CacheSourceLabelKey =
+  | 'gitDiff.debug.cacheSource.renderer-memory'
+  | 'gitDiff.debug.cacheSource.main-content-cache'
+  | 'gitDiff.debug.cacheSource.worker-rebuild'
+
+type CacheMissReasonLabelKey =
+  | 'gitDiff.debug.cacheMissReason.first-load'
+  | 'gitDiff.debug.cacheMissReason.invalidated-mutation'
+  | 'gitDiff.debug.cacheMissReason.invalidated-watch'
+  | 'gitDiff.debug.cacheMissReason.invalidated-mirror'
+  | 'gitDiff.debug.cacheMissReason.invalidated-refresh'
+  | 'gitDiff.debug.cacheMissReason.renderer-force-refresh'
+  | 'gitDiff.debug.cacheMissReason.project-queue-evicted'
+  | 'gitDiff.debug.cacheMissReason.single-file-too-large'
+  | 'gitDiff.debug.cacheMissReason.precompute-pending'
+  | 'gitDiff.debug.cacheMissReason.entry-not-warmed'
+  | 'gitDiff.debug.cacheMissReason.worker-error'
+
+type ListCacheEventLabelKey =
+  | 'gitDiff.debug.listCacheEvent.hit'
+  | 'gitDiff.debug.listCacheEvent.miss'
+  | 'gitDiff.debug.listCacheEvent.force'

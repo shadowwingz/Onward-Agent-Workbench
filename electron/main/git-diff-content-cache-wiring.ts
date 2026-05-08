@@ -22,7 +22,12 @@
 //   - The scheduler's `loadWorkingSet` re-uses `gitIpcWorkerClient.getDiff`
 //     so it inherits the existing list-level cache and FS-watch invalidation.
 
-import type { GitFileContentResult, GitFileStatus } from './git-utils'
+import type {
+  GitDiffContentCacheMissReason,
+  GitFileContentRequestOptions,
+  GitFileContentResult,
+  GitFileStatus
+} from './git-utils'
 import { getGitDiffRequestCacheStats } from './git-utils'
 import { GitDiffContentCache } from './git-diff-content-cache'
 import { GitDiffPrecomputeScheduler, type DiffFile } from './git-diff-precompute-scheduler'
@@ -42,6 +47,52 @@ const PREFETCH_SKIP_EXTENSIONS = new Set<string>([
   'woff', 'woff2', 'ttf', 'otf', 'eot',
   'wasm'
 ])
+
+type InvalidationReason =
+  | 'watcher'
+  | 'watcher-error'
+  | 'force'
+  | 'lru'
+  | 'manual'
+  | 'mirror'
+
+const RECENT_INVALIDATION_REASON_TTL_MS = 5 * 60 * 1000
+
+const recentProjectMissReasons = new Map<string, {
+  reason: GitDiffContentCacheMissReason
+  at: number
+}>()
+
+function mapInvalidationReason(reason: InvalidationReason | 'mutation'): GitDiffContentCacheMissReason {
+  switch (reason) {
+    case 'watcher':
+    case 'watcher-error':
+      return 'invalidated-watch'
+    case 'mirror':
+      return 'invalidated-mirror'
+    case 'force':
+    case 'manual':
+      return 'invalidated-refresh'
+    case 'lru':
+      return 'project-queue-evicted'
+    case 'mutation':
+      return 'invalidated-mutation'
+  }
+}
+
+function rememberProjectMissReason(project: string, reason: GitDiffContentCacheMissReason): void {
+  recentProjectMissReasons.set(project, { reason, at: Date.now() })
+}
+
+function getRecentProjectMissReason(project: string): GitDiffContentCacheMissReason | null {
+  const entry = recentProjectMissReasons.get(project)
+  if (!entry) return null
+  if (Date.now() - entry.at > RECENT_INVALIDATION_REASON_TTL_MS) {
+    recentProjectMissReasons.delete(project)
+    return null
+  }
+  return entry.reason
+}
 
 export const gitDiffContentCache = new GitDiffContentCache<GitFileContentResult>({
   // Per-project budget as agreed in the design discussion. Smallest entries
@@ -77,6 +128,42 @@ export interface FetchFileContentArgs {
   cwd: string
   file: ContentCacheFile
   repoRoot?: string
+  options?: GitFileContentRequestOptions
+}
+
+function withCacheInfo(
+  result: GitFileContentResult,
+  cacheInfo: NonNullable<GitFileContentResult['cacheInfo']>
+): GitFileContentResult {
+  return {
+    ...result,
+    cacheInfo
+  }
+}
+
+function withoutCacheInfo(result: GitFileContentResult): GitFileContentResult {
+  const rest = { ...result }
+  delete rest.cacheInfo
+  return rest
+}
+
+function resolveMissReason(
+  project: string,
+  hadProjectBeforeLookup: boolean,
+  explicitReason?: GitDiffContentCacheMissReason
+): GitDiffContentCacheMissReason {
+  if (explicitReason) return explicitReason
+  const recentReason = getRecentProjectMissReason(project)
+  if (recentReason) return recentReason
+  if (gitDiffContentCache.consumeRecentProjectQueueEviction(project)) return 'project-queue-evicted'
+  const schedulerStats = gitDiffPrecomputeScheduler.inspectStats()
+  if (
+    schedulerStats.pendingProjects.includes(project) ||
+    schedulerStats.inFlightProjects.includes(project)
+  ) {
+    return 'precompute-pending'
+  }
+  return hadProjectBeforeLookup ? 'entry-not-warmed' : 'first-load'
 }
 
 /**
@@ -88,27 +175,42 @@ export interface FetchFileContentArgs {
 export async function fetchFileContentWithCache(args: FetchFileContentArgs): Promise<GitFileContentResult> {
   const project = args.repoRoot ?? args.cwd
   const key = buildCacheKey(args.file)
+  const force = Boolean(args.options?.force)
+  const hadProjectBeforeLookup = gitDiffContentCache.hasProject(project)
 
-  const cached = gitDiffContentCache.get(project, key)
+  const cached = force ? null : gitDiffContentCache.get(project, key)
   if (cached) {
     perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_GIT_DIFF_CONTENT_CACHE_HIT, {
       project,
       filename: args.file.filename,
-      changeType: args.file.changeType
+      changeType: args.file.changeType,
+      source: 'main-content-cache'
     })
-    return cached
+    return withCacheInfo(cached, {
+      state: 'hit',
+      source: 'main-content-cache',
+      project,
+      key
+    })
   }
 
+  const missReason = resolveMissReason(project, hadProjectBeforeLookup, args.options?.missReason)
   perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_GIT_DIFF_CONTENT_CACHE_MISS, {
     project,
     filename: args.file.filename,
-    changeType: args.file.changeType
+    changeType: args.file.changeType,
+    reason: missReason,
+    force
   })
   const result = await gitIpcWorkerClient.getFileContent(args.cwd, args.file, args.repoRoot)
+  let stored = false
+  let bytes = 0
+  let finalMissReason: GitDiffContentCacheMissReason = result.success ? missReason : 'worker-error'
   if (result.success) {
-    const bytes = estimateBytes(result)
-    const stored = gitDiffContentCache.put(project, key, result, bytes)
+    bytes = estimateBytes(result)
+    stored = gitDiffContentCache.put(project, key, withoutCacheInfo(result), bytes)
     if (!stored && bytes > 0) {
+      finalMissReason = 'single-file-too-large'
       perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_GIT_DIFF_PRECOMPUTE_SKIP_TOO_LARGE, {
         project,
         filename: args.file.filename,
@@ -117,7 +219,15 @@ export async function fetchFileContentWithCache(args: FetchFileContentArgs): Pro
       })
     }
   }
-  return result
+  return withCacheInfo(result, {
+    state: 'miss',
+    source: 'worker-rebuild',
+    missReason: finalMissReason,
+    project,
+    key,
+    stored,
+    bytes
+  })
 }
 
 export const gitDiffPrecomputeScheduler = new GitDiffPrecomputeScheduler({
@@ -158,7 +268,12 @@ export const gitDiffPrecomputeScheduler = new GitDiffPrecomputeScheduler({
       changeType: file.changeType,
       isSubmoduleEntry: file.isSubmoduleEntry
     } as ContentCacheFile
-    await fetchFileContentWithCache({ cwd, file: cacheFile, repoRoot })
+    await fetchFileContentWithCache({
+      cwd,
+      file: cacheFile,
+      repoRoot,
+      options: { missReason: 'precompute-pending' }
+    })
   }
 })
 
@@ -176,30 +291,46 @@ export function installContentCacheInvalidatorOnce(): void {
     if (reason === 'lru') {
       // Project was evicted from the watcher — drop the bucket too so we do
       // not keep a stale snapshot for a project we no longer track.
-      gitDiffContentCache.invalidateProject(cwd)
-      gitDiffPrecomputeScheduler.cancelProject(cwd)
-      perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_GIT_DIFF_CONTENT_CACHE_INVALIDATE_LRU, {
-        project: cwd,
-        reason
-      })
+      invalidateContentCacheForProject(cwd, 'project-queue-evicted', { schedulePrecompute: false })
       return
     }
-    const dropped = gitDiffContentCache.invalidateProject(cwd)
-    if (dropped > 0) {
-      perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_GIT_DIFF_CONTENT_CACHE_INVALIDATE_PROJECT, {
-        project: cwd,
-        reason,
-        droppedEntries: dropped
-      })
-    }
-    gitDiffPrecomputeScheduler.onProjectInvalidated(cwd)
+    invalidateContentCacheForProject(cwd, mapInvalidationReason(reason))
   })
+}
+
+export function invalidateContentCacheForProject(
+  project: string | undefined | null,
+  reason: GitDiffContentCacheMissReason,
+  options: { schedulePrecompute?: boolean } = {}
+): void {
+  if (!project) return
+  rememberProjectMissReason(project, reason)
+  const dropped = gitDiffContentCache.invalidateProject(project)
+  if (reason === 'project-queue-evicted') {
+    gitDiffPrecomputeScheduler.cancelProject(project)
+    perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_GIT_DIFF_CONTENT_CACHE_INVALIDATE_LRU, {
+      project,
+      reason
+    })
+    return
+  }
+  if (dropped > 0) {
+    perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_GIT_DIFF_CONTENT_CACHE_INVALIDATE_PROJECT, {
+      project,
+      reason,
+      droppedEntries: dropped
+    })
+  }
+  if (options.schedulePrecompute !== false) {
+    gitDiffPrecomputeScheduler.onProjectInvalidated(project)
+  }
 }
 
 export function inspectContentCacheStats() {
   return {
     cache: gitDiffContentCache.inspectStats(),
     scheduler: gitDiffPrecomputeScheduler.inspectStats(),
-    listCache: getGitDiffRequestCacheStats()
+    listCache: getGitDiffRequestCacheStats(),
+    watcher: gitDiffCacheInvalidator.inspectHealth()
   }
 }

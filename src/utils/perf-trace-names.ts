@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { CLICK_PHASE_EVENT_NAMES } from './click-phase-event-names'
+import { CLICK_PHASE_EVENT_NAMES } from './click-phase-event-names.ts'
 
 /**
  * Single source of truth for perf-trace event names.
@@ -287,16 +287,18 @@ export const PERF_TRACE_EVENT = {
   RENDERER_GIT_DIFF_MANUAL_REFRESH: 'renderer:git-diff.manual-refresh',
   RENDERER_GIT_DIFF_HUNK_NAVIGATE: 'renderer:git-diff.hunk-navigate',
   RENDERER_GIT_DIFF_HUNK_ACTION: 'renderer:git-diff.hunk-action',
+  RENDERER_GIT_DIFF_HUNK_WIDGET_INSTALL: 'renderer:git-diff.hunk-widget-install',
   RENDERER_GIT_DIFF_BODY_PREFETCH: 'renderer:git-diff.body-prefetch',
   RENDERER_GIT_DIFF_FILE_LOAD: 'renderer:git-diff.file-load',
   RENDERER_GIT_DIFF_BODY_RENDERED: 'renderer:git-diff.body-rendered',
+  RENDERER_GIT_DIFF_CACHE_INVALIDATION: 'renderer:git-diff.cache-invalidation',
   RENDERER_GIT_DIFF_FILE_LIST_MODE_CHANGE: 'renderer:git-diff.file-list-mode-change',
   RENDERER_GIT_DIFF_JUMP_TO_EDITOR: 'renderer:git-diff.jump-to-editor',
   RENDERER_GIT_DIFF_SPLIT_MODE_TOGGLE: 'renderer:git-diff.split-mode-toggle',
   RENDERER_PROJECT_EDITOR_JUMP_TO_DIFF: 'renderer:project-editor.jump-to-diff',
 
   // ───────── Renderer — Git Diff click → paint phase chain ─────────
-  // Six spans (ph='X') emitted once a click measurement seals. They
+  // Settled spans (ph='X') emitted once a click measurement seals. They
   // reproduce the JadeTree phase decomposition the in-app debug panel
   // surfaces, so a Perfetto trace contains the same diagnostic chain
   // without extracting it from `__onwardGitDiffDebug.getHistory()`.
@@ -308,9 +310,14 @@ export const PERF_TRACE_EVENT = {
   // in one place.
   RENDERER_GIT_DIFF_CLICK_PHASE_IPC: CLICK_PHASE_EVENT_NAMES.IPC,
   RENDERER_GIT_DIFF_CLICK_PHASE_STATE_SET: CLICK_PHASE_EVENT_NAMES.STATE_SET,
+  RENDERER_GIT_DIFF_CLICK_PHASE_MODEL_BIND: CLICK_PHASE_EVENT_NAMES.MODEL_BIND,
   RENDERER_GIT_DIFF_CLICK_PHASE_MOUNT: CLICK_PHASE_EVENT_NAMES.MOUNT,
   RENDERER_GIT_DIFF_CLICK_PHASE_DIFF_COMPUTE: CLICK_PHASE_EVENT_NAMES.DIFF_COMPUTE,
+  RENDERER_GIT_DIFF_CLICK_PHASE_DOM_COMMIT: CLICK_PHASE_EVENT_NAMES.DOM_COMMIT,
   RENDERER_GIT_DIFF_CLICK_PHASE_PAINT: CLICK_PHASE_EVENT_NAMES.PAINT,
+  RENDERER_GIT_DIFF_CLICK_PHASE_TOKENIZE_SETTLE: CLICK_PHASE_EVENT_NAMES.TOKENIZE_SETTLE,
+  RENDERER_GIT_DIFF_CLICK_PHASE_COLD_MOUNT: CLICK_PHASE_EVENT_NAMES.COLD_MOUNT,
+  RENDERER_GIT_DIFF_CLICK_PHASE_REVEAL_TIMEOUT: CLICK_PHASE_EVENT_NAMES.REVEAL_TIMEOUT,
   RENDERER_GIT_DIFF_CLICK_TOTAL: CLICK_PHASE_EVENT_NAMES.TOTAL
 } as const
 

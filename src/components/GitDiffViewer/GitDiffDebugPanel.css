@@ -4,6 +4,7 @@
  */
 
 .git-diff-debug-panel {
+  position: relative;
   background: var(--bg-1);
   border-bottom: 1px solid var(--border);
   font-size: var(--font-xs);
@@ -110,7 +111,14 @@
   color: var(--text-2);
 }
 
-.gddp-reset {
+.gddp-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.gddp-header-button {
   background: none;
   border: 1px solid var(--border);
   color: var(--text-2);
@@ -120,9 +128,11 @@
   font-size: var(--font-xs);
 }
 
-.gddp-reset:hover {
+.gddp-header-button:hover,
+.gddp-header-button.is-active {
   background: color-mix(in srgb, var(--accent) 12%, transparent);
   border-color: color-mix(in srgb, var(--accent) 60%, var(--border));
+  color: var(--text-1);
 }
 
 .gddp-body {
@@ -153,6 +163,90 @@
   color: var(--text-3);
   font-style: italic;
   margin: 0;
+}
+
+.gddp-metric-note {
+  margin: 0;
+  color: var(--text-3);
+  line-height: 1.35;
+}
+
+.gddp-list-cache-last {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  font-size: 11px;
+}
+
+.gddp-list-cache-key {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono, monospace);
+  color: var(--text-2);
+}
+
+/* Terms */
+
+.gddp-terms {
+  grid-column: 1 / -1;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 8px;
+}
+
+.gddp-terms-header {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
+.gddp-terms-header p {
+  margin: 0;
+  color: var(--text-2);
+}
+
+.gddp-terms-grid {
+  display: grid;
+  grid-template-columns: minmax(280px, 1.2fr) minmax(280px, 1fr);
+  gap: 12px 18px;
+}
+
+.gddp-terms-block {
+  min-width: 0;
+}
+
+.gddp-terms-block h5 {
+  margin: 0 0 4px 0;
+  color: var(--text-1);
+  font-size: var(--font-xs);
+  font-weight: 700;
+}
+
+.gddp-terms-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 6px 12px;
+  margin: 0;
+}
+
+.gddp-term {
+  min-width: 0;
+}
+
+.gddp-term dt {
+  color: var(--text-1);
+  font-weight: 600;
+  margin: 0;
+}
+
+.gddp-term dd {
+  color: var(--text-2);
+  margin: 1px 0 0 0;
+  line-height: 1.35;
 }
 
 /* Last-click phase bar + legend */
@@ -290,7 +384,7 @@
 
 .gddp-cache-row {
   display: grid;
-  grid-template-columns: 22px minmax(0, 1fr) 64px auto auto;
+  grid-template-columns: 22px minmax(0, 1fr) 64px auto;
   gap: 6px;
   align-items: center;
   font-variant-numeric: tabular-nums;
@@ -318,6 +412,16 @@
   text-overflow: ellipsis;
   font-family: var(--font-mono, monospace);
   font-size: 11px;
+  cursor: help;
+  border-radius: 3px;
+  outline: none;
+}
+
+.gddp-cache-path:hover,
+.gddp-cache-path:focus-visible,
+.gddp-cache-numbers:hover,
+.gddp-cache-numbers:focus-visible {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
 
 .gddp-cache-bar {
@@ -338,12 +442,133 @@
 .gddp-cache-numbers {
   white-space: nowrap;
   font-size: 11px;
+  cursor: help;
+  border-radius: 3px;
+  outline: none;
 }
 
-.gddp-cache-touched {
+.gddp-cache-hover-card {
+  position: absolute;
+  z-index: 50;
+  max-width: min(560px, calc(100% - 16px));
+  border: 1px solid color-mix(in srgb, var(--border) 85%, var(--accent));
+  border-radius: 6px;
+  background: var(--panel, var(--bg-1));
+  box-shadow: var(--shadow-1);
+  padding: 8px 10px;
+  color: var(--text-2);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.gddp-cache-hover-card.is-entries {
+  width: min(460px, calc(100% - 16px));
+}
+
+.gddp-cache-hover-title {
+  color: var(--text-1);
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+
+.gddp-cache-hover-path {
+  font-family: var(--font-mono, monospace);
+  color: var(--text-1);
+  word-break: break-all;
+}
+
+.gddp-cache-entry-list {
+  margin: 6px 0 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.gddp-cache-entry-list li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.gddp-cache-entry-main {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono, monospace);
+  color: var(--text-1);
+}
+
+.gddp-cache-entry-meta {
   color: var(--text-3);
   white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.gddp-cache-hover-empty,
+.gddp-cache-hover-more {
+  margin: 6px 0 0 0;
+  color: var(--text-3);
+  font-style: italic;
+}
+
+/* Watcher health */
+
+.gddp-watcher-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 90px;
+  overflow-y: auto;
+}
+
+.gddp-watcher-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.gddp-watcher-status {
+  color: var(--text-1);
+  font-weight: 600;
+  text-transform: uppercase;
   font-size: 10px;
+}
+
+.gddp-watcher-row.is-error .gddp-watcher-status,
+.gddp-watcher-error {
+  color: #ef4444;
+}
+
+.gddp-watcher-path {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: var(--font-mono, monospace);
+}
+
+.gddp-watcher-meta {
+  color: var(--text-3);
+  white-space: nowrap;
+}
+
+.gddp-watcher-error {
+  grid-column: 2 / -1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Histogram */
@@ -377,36 +602,6 @@
   display: block;
 }
 
-.gddp-context-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 12px;
-  border-top: 1px solid var(--border);
-  background: color-mix(in srgb, var(--text-3) 6%, transparent);
-  font-family: var(--font-mono, monospace);
-  font-size: 10px;
-  color: var(--text-3);
-}
-
-.gddp-context-label {
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  font-weight: 600;
-}
-
-.gddp-context-value {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  flex-shrink: 1;
-  min-width: 0;
-}
-
-.gddp-context-value:first-of-type {
-  flex: 1;
-}
-
 @media (max-width: 1100px) {
   .gddp-body {
     grid-template-columns: minmax(280px, 1fr) minmax(280px, 1fr);
@@ -415,6 +610,10 @@
 
 @media (max-width: 760px) {
   .gddp-body {
+    grid-template-columns: 1fr;
+  }
+
+  .gddp-terms-grid {
     grid-template-columns: 1fr;
   }
 }

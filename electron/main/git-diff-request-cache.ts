@@ -32,6 +32,14 @@ export interface GitDiffRequestCacheStats {
   ttlMs: number
   /** Soft cap on resident entries before pruning expired ones. */
   maxEntries: number
+  /** Most recent request that touched this cache. */
+  lastEvent: {
+    kind: 'hit' | 'miss' | 'force' | null
+    key: string | null
+    at: number | null
+    ageMs: number | null
+    entriesCleared: number | null
+  }
 }
 
 export class GitDiffRequestCacheController<T> {
@@ -43,6 +51,13 @@ export class GitDiffRequestCacheController<T> {
   private hits = 0
   private misses = 0
   private forces = 0
+  private lastEvent: GitDiffRequestCacheStats['lastEvent'] = {
+    kind: null,
+    key: null,
+    at: null,
+    ageMs: null,
+    entriesCleared: null
+  }
 
   constructor(options: GitDiffRequestCacheOptions<T>) {
     this.options = options
@@ -57,7 +72,8 @@ export class GitDiffRequestCacheController<T> {
       misses: this.misses,
       forces: this.forces,
       ttlMs: this.options.ttlMs,
-      maxEntries: this.options.maxEntries
+      maxEntries: this.options.maxEntries,
+      lastEvent: { ...this.lastEvent }
     }
   }
 
@@ -66,16 +82,26 @@ export class GitDiffRequestCacheController<T> {
     const now = this.now()
     const cached = this.cache.get(key)
     if (!force && cached && now - cached.at < this.options.ttlMs) {
+      const ageMs = now - cached.at
       this.hits += 1
-      options.onCacheHit?.(now - cached.at)
+      this.lastEvent = { kind: 'hit', key, at: now, ageMs, entriesCleared: null }
+      options.onCacheHit?.(ageMs)
       return this.options.clone(cached.value)
     }
     this.misses += 1
+    this.lastEvent = {
+      kind: force ? 'force' : 'miss',
+      key,
+      at: now,
+      ageMs: cached ? now - cached.at : null,
+      entriesCleared: null
+    }
 
     if (force) {
       const cleared = this.invalidateKey(key)
       if (cleared) {
         this.forces += 1
+        this.lastEvent = { kind: 'force', key, at: now, ageMs: cached ? now - cached.at : null, entriesCleared: 1 }
         options.onForceInvalidate?.(1)
       }
     } else {

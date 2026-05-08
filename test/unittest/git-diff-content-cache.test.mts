@@ -15,20 +15,14 @@ interface DummyValue {
 }
 
 function makeCache(opts: Partial<ConstructorParameters<typeof GitDiffContentCache>[0]> = {}) {
-  let clock = 1000
   const cache = new GitDiffContentCache<DummyValue>({
     projectByteLimit: 1000,
     maxProjects: 3,
     singleFileByteLimit: 800,
-    now: () => clock,
     ...opts
   })
   return {
-    cache,
-    advance: (ms: number) => {
-      clock += ms
-    },
-    getClock: () => clock
+    cache
   }
 }
 
@@ -68,31 +62,46 @@ test('single-file cap rejects oversized values without disturbing the bucket', (
   assert.equal(cache.get('/p', 'huge.ts'), null)
 })
 
-test('LRU project eviction kicks in past maxProjects', () => {
-  const { cache, advance } = makeCache({ maxProjects: 2 })
+test('project queue evicts the tail past maxProjects', () => {
+  const { cache } = makeCache({ maxProjects: 2 })
   cache.put('/p1', 'a.ts', { payload: '1a' }, 50)
-  advance(10)
   cache.put('/p2', 'a.ts', { payload: '2a' }, 50)
-  advance(10)
-  cache.put('/p3', 'a.ts', { payload: '3a' }, 50) // forces eviction of oldest project (/p1)
+  assert.deepEqual(cache.inspectStats().projects.map((p) => p.project), ['/p2', '/p1'])
+
+  cache.put('/p3', 'a.ts', { payload: '3a' }, 50)
   assert.equal(cache.get('/p1', 'a.ts'), null)
   assert.deepEqual(cache.get('/p2', 'a.ts'), { payload: '2a' })
   assert.deepEqual(cache.get('/p3', 'a.ts'), { payload: '3a' })
+  assert.equal(cache.consumeRecentProjectQueueEviction('/p1'), true)
+  assert.equal(cache.consumeRecentProjectQueueEviction('/p1'), false)
 })
 
-test('get bumps lastTouchedAt so frequently used projects survive LRU', () => {
-  const { cache, advance } = makeCache({ maxProjects: 2 })
+test('get moves the project to the front so it survives the next tail eviction', () => {
+  const { cache } = makeCache({ maxProjects: 2 })
   cache.put('/p1', 'a.ts', { payload: '1' }, 10)
-  advance(5)
   cache.put('/p2', 'a.ts', { payload: '2' }, 10)
-  advance(5)
-  // Touch /p1 to refresh its lastTouchedAt.
+  assert.deepEqual(cache.inspectStats().projects.map((p) => p.project), ['/p2', '/p1'])
+
   assert.deepEqual(cache.get('/p1', 'a.ts'), { payload: '1' })
-  advance(5)
-  cache.put('/p3', 'a.ts', { payload: '3' }, 10) // /p2 is now the LRU.
+  assert.deepEqual(cache.inspectStats().projects.map((p) => p.project), ['/p1', '/p2'])
+
+  cache.put('/p3', 'a.ts', { payload: '3' }, 10)
   assert.deepEqual(cache.get('/p1', 'a.ts'), { payload: '1' })
   assert.equal(cache.get('/p2', 'a.ts'), null)
   assert.deepEqual(cache.get('/p3', 'a.ts'), { payload: '3' })
+})
+
+test('put moves an existing project to the front without changing entry count', () => {
+  const { cache } = makeCache({ maxProjects: 3 })
+  cache.put('/p1', 'a.ts', { payload: '1a' }, 10)
+  cache.put('/p2', 'a.ts', { payload: '2a' }, 10)
+  cache.put('/p3', 'a.ts', { payload: '3a' }, 10)
+  assert.deepEqual(cache.inspectStats().projects.map((p) => p.project), ['/p3', '/p2', '/p1'])
+
+  cache.put('/p1', 'b.ts', { payload: '1b' }, 10)
+  const stats = cache.inspectStats()
+  assert.deepEqual(stats.projects.map((p) => p.project), ['/p1', '/p3', '/p2'])
+  assert.equal(stats.projects[0].entries, 2)
 })
 
 test('invalidateProject drops the whole bucket; other projects unaffected', () => {
@@ -145,10 +154,14 @@ test('inspectStats reports byte totals and configured limits', () => {
   assert.deepEqual(
     stats.projects.map((p) => ({ project: p.project, bytes: p.bytes, entries: p.entries })),
     [
-      { project: '/p1', bytes: 150, entries: 2 },
-      { project: '/p2', bytes: 30, entries: 1 }
+      { project: '/p2', bytes: 30, entries: 1 },
+      { project: '/p1', bytes: 150, entries: 2 }
     ]
   )
+  assert.deepEqual(stats.projects[1].entryDetails, [
+    { key: 'a.ts', bytes: 100 },
+    { key: 'b.ts', bytes: 50 }
+  ])
 })
 
 test('overwriting an existing entry replaces, does not double-count bytes', () => {

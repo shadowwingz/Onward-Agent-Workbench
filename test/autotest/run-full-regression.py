@@ -12,8 +12,8 @@ silently skipping anything.
 
 Behaviour highlights:
   - Same SCRIPTS list as the bash version, in the same order.
-  - 5-minute default timeout per runner, enforced via test/autotest/run-with-timeout.mjs.
-    Long suites may opt into a narrowly scoped per-runner override.
+  - 3-minute maximum timeout per runner, enforced via test/autotest/run-with-timeout.mjs.
+    Any runner exceeding this wall-clock budget is a failure.
   - 2-second inter-script gap; the dev app is killed by EXACT process name
     before and after every runner (CLAUDE.md hard rule — no wildcards).
   - Per-runner ONWARD_USER_DATA_DIR under the OS temp root, removed at the end.
@@ -66,6 +66,7 @@ SCRIPTS: List[str] = [
     "test/autotest/run-file-index-cache-ui-autotest.sh",
     "test/autotest/run-file-watch-autotest.sh",
     "test/autotest/run-git-cross-platform-autotest.sh",
+    "test/autotest/run-git-diff-click-latency-autotest.sh",
     "test/autotest/run-git-diff-recursive-submodules-autotest.sh",
     "test/autotest/run-git-diff-staleness-and-submodule-autotest.sh",
     "test/autotest/run-git-state-mirror-latency-autotest.sh",
@@ -107,19 +108,14 @@ SCRIPTS: List[str] = [
     "test/autotest/run-terminal-stress-autotest.sh",
     "test/autotest/run-terminal-title-rename-autotest.sh",
     "test/autotest/run-trace-infra-self-check-autotest.sh",
+    "test/autotest/run-unittest-suite-autotest.sh",
     "test/autotest/run-working-directory-copy-autotest.sh",
 ]
 
 WINDOWS_ONLY_SKIP = "test/autotest/run-auto-update-windows-e2e.sh"
 
-PER_SCRIPT_TIMEOUT_SEC = 300
-PER_SCRIPT_TIMEOUT_OVERRIDES_SEC = {
-    # This suite exercises Git Diff freshness, submodule filtering, UI actions,
-    # editor round-trips, and trace coverage in one packaged-app session. Direct
-    # runs currently take about 380s on macOS, so the orchestrator needs explicit
-    # headroom without relaxing the default timeout for every other suite.
-    "test/autotest/run-git-diff-staleness-and-submodule-autotest.sh": 420,
-}
+PER_SCRIPT_TIMEOUT_SEC = 180
+PER_SCRIPT_TIMEOUT_OVERRIDES_SEC = {}
 INTER_SCRIPT_SLEEP_SEC = 2
 
 IS_WINDOWS = platform.system() == "Windows"

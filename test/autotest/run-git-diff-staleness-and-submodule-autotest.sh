@@ -10,6 +10,7 @@ source "$ROOT_DIR/test/autotest/resolve-dev-app-bin.sh"
 APP_BIN="${1:-$(resolve_dev_app_bin "$ROOT_DIR" || true)}"
 LOG_FILE="${2:-$REPO_ROOT/traces/test-logs/git-diff-staleness-and-submodule-autotest.log}"
 mkdir -p "$(dirname "$LOG_FILE")"
+WATCHDOG_SEC="${GDS_WATCHDOG_SEC:-180}"
 
 if [[ -z "$APP_BIN" || ! -x "$APP_BIN" ]]; then
   echo "ERROR: app binary not found or not executable: ${APP_BIN:-<empty>}" >&2
@@ -49,9 +50,11 @@ echo "  Binary:        $APP_BIN"
 echo "  Clean repo:    $CLEAN_ROOT"
 echo "  Manifest:      $MANIFEST_PATH"
 echo "  User data dir: $USER_DATA_DIR"
+echo "  Watchdog:      ${WATCHDOG_SEC}s"
 echo "  Log:           $LOG_FILE"
 echo ""
 
+APP_EXIT=0
 ONWARD_DEBUG=1 \
 ONWARD_PERF_TRACE=1 \
 ONWARD_REPO_ROOT="$REPO_ROOT" \
@@ -61,7 +64,7 @@ ONWARD_AUTOTEST_SUITE=git-diff-staleness-and-submodule \
 ONWARD_AUTOTEST_CWD="$CLEAN_ROOT" \
 ONWARD_AUTOTEST_FIXTURE_EXTRA="$MANIFEST_PATH" \
 ONWARD_AUTOTEST_EXIT=1 \
-"$APP_BIN" > "$LOG_FILE" 2>&1 || true
+node "$REPO_ROOT/test/autotest/run-with-timeout.mjs" "$WATCHDOG_SEC" "$APP_BIN" > "$LOG_FILE" 2>&1 || APP_EXIT=$?
 
 echo ""
 echo "=== Test log (last 80 lines) ==="
@@ -74,6 +77,11 @@ if grep -q "\[AutoTest\] FAIL" "$LOG_FILE"; then
   echo "=== Failure details ==="
   grep "\[AutoTest\] FAIL" "$LOG_FILE" >&2
   exit 1
+fi
+
+if [[ "$APP_EXIT" -ne 0 ]]; then
+  echo "Git Diff staleness autotest exited with code $APP_EXIT" >&2
+  exit "$APP_EXIT"
 fi
 
 if ! grep -q "GDS-12-trace-marker-watcher-and-freshness-expected" "$LOG_FILE"; then

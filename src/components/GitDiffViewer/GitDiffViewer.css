@@ -903,8 +903,7 @@ body.git-diff-resizing * {
   transition: opacity 0.15s ease-out;
 }
 
-/* Render-then-reveal: hide editor during diff computation and scroll restoration */
-.diff-phase-waiting-diff .git-diff-editor-container,
+/* Render-then-reveal: only hide during synchronous scroll restoration. */
 .diff-phase-restoring-scroll .git-diff-editor-container {
   opacity: 0;
   pointer-events: none;
@@ -920,10 +919,8 @@ body.git-diff-resizing * {
   background-color: color-mix(in srgb, var(--accent) 20%, transparent) !important;
 }
 
-/* Per-hunk action toolbar — Monaco content widget anchored ABOVE each hunk's
- * first modified line. Always visible (no hover gating); each hunk owns its
- * own toolbar so Stage / Revert / Unstage are reachable in a single click
- * without the user having to discover any hidden interaction. */
+/* Per-hunk action toolbar — Monaco content widget anchored near each hunk and
+ * revealed while the hunk or toolbar is hovered. */
 .git-diff-hunk-actions {
   display: inline-flex;
   align-items: center;
@@ -935,12 +932,17 @@ body.git-diff-resizing * {
   box-shadow: var(--shadow-1);
   white-space: nowrap;
   z-index: 4;
-  pointer-events: auto;
+  opacity: 0;
+  pointer-events: none;
   transform: translateY(2px);
+  transition: opacity 0.08s ease, border-color 0.12s ease;
 }
 
+.git-diff-hunk-actions.is-visible,
 .git-diff-hunk-actions:hover,
 .git-diff-hunk-actions:focus-within {
+  opacity: 1;
+  pointer-events: auto;
   border-color: var(--border-strong);
 }
 

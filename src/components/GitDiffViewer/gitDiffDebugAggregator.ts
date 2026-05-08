@@ -17,15 +17,18 @@ import type { ClickLatencyMeasurement } from './clickLatencyTracker'
 export interface PhaseMs {
   ipcMs: number | null
   stateSetMs: number | null
+  modelBindMs: number | null
   mountMs: number | null
   diffComputeMs: number | null
+  domCommitMs: number | null
   paintMs: number | null
+  tokenizeSettleMs: number | null
 }
 
 export interface ClickAggregateStats {
   /** Total measurements considered (after slicing the window). */
   total: number
-  /** Measurements that completed (paintReadyAt fired). */
+  /** Measurements that completed (tokenizeSettleAt fired). */
   completed: number
   cancelled: number
   hitCount: number
@@ -52,9 +55,12 @@ export function computePhaseMs(m: ClickLatencyMeasurement): PhaseMs {
   return {
     ipcMs: span(m.ipcStartAt, m.ipcEndAt),
     stateSetMs: span(m.ipcEndAt, m.stateSetAt),
-    mountMs: span(m.stateSetAt, m.editorReadyAt),
-    diffComputeMs: span(m.editorReadyAt, m.diffComputedAt),
-    paintMs: span(m.diffComputedAt, m.paintReadyAt)
+    modelBindMs: span(m.stateSetAt, m.modelBoundAt),
+    mountMs: span(m.modelBoundAt ?? m.stateSetAt, m.editorReadyAt),
+    diffComputeMs: span(m.editorReadyAt ?? m.modelBoundAt, m.diffComputedAt),
+    domCommitMs: span(m.diffComputedAt, m.domCommittedAt),
+    paintMs: span(m.domCommittedAt ?? m.diffComputedAt, m.paintReadyAt),
+    tokenizeSettleMs: span(m.paintReadyAt ?? m.domCommittedAt ?? m.diffComputedAt, m.tokenizeSettleAt)
   }
 }
 
@@ -70,14 +76,14 @@ export function aggregateClickHistory(
   let unknownCount = 0
   const totals: number[] = []
   const phaseSums: PhaseMs = {
-    ipcMs: 0, stateSetMs: 0, mountMs: 0, diffComputeMs: 0, paintMs: 0
+    ipcMs: 0, stateSetMs: 0, modelBindMs: 0, mountMs: 0, diffComputeMs: 0, domCommitMs: 0, paintMs: 0, tokenizeSettleMs: 0
   }
   const phaseCounts: PhaseMs = {
-    ipcMs: 0, stateSetMs: 0, mountMs: 0, diffComputeMs: 0, paintMs: 0
+    ipcMs: 0, stateSetMs: 0, modelBindMs: 0, mountMs: 0, diffComputeMs: 0, domCommitMs: 0, paintMs: 0, tokenizeSettleMs: 0
   }
 
   for (const m of recent) {
-    if (m.cancelled || m.paintReadyAt === null || m.totalMs === null) {
+    if (m.cancelled || m.tokenizeSettleAt === null || m.totalMs === null) {
       cancelled += 1
       continue
     }
@@ -101,9 +107,12 @@ export function aggregateClickHistory(
   const phaseMean: PhaseMs = {
     ipcMs: phaseCounts.ipcMs ? round((phaseSums.ipcMs as number) / (phaseCounts.ipcMs as number)) : null,
     stateSetMs: phaseCounts.stateSetMs ? round((phaseSums.stateSetMs as number) / (phaseCounts.stateSetMs as number)) : null,
+    modelBindMs: phaseCounts.modelBindMs ? round((phaseSums.modelBindMs as number) / (phaseCounts.modelBindMs as number)) : null,
     mountMs: phaseCounts.mountMs ? round((phaseSums.mountMs as number) / (phaseCounts.mountMs as number)) : null,
     diffComputeMs: phaseCounts.diffComputeMs ? round((phaseSums.diffComputeMs as number) / (phaseCounts.diffComputeMs as number)) : null,
-    paintMs: phaseCounts.paintMs ? round((phaseSums.paintMs as number) / (phaseCounts.paintMs as number)) : null
+    domCommitMs: phaseCounts.domCommitMs ? round((phaseSums.domCommitMs as number) / (phaseCounts.domCommitMs as number)) : null,
+    paintMs: phaseCounts.paintMs ? round((phaseSums.paintMs as number) / (phaseCounts.paintMs as number)) : null,
+    tokenizeSettleMs: phaseCounts.tokenizeSettleMs ? round((phaseSums.tokenizeSettleMs as number) / (phaseCounts.tokenizeSettleMs as number)) : null
   }
 
   let totalMs: ClickAggregateStats['totalMs'] = null
