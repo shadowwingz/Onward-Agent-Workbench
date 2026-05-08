@@ -63,6 +63,7 @@ export async function testProjectEditorLargeFile(ctx: AutotestContext): Promise<
   const binaryTextPath = `${suiteDir}/unknown-text.rawbin`
   const supportedPngPath = 'resources/test-preview.png'
   const supportedPdfPath = 'test/autotest/fixtures/pdf-epub/onward-autotest.pdf'
+  const largeGifPath = 'test/autotest/results/project-editor-large-file/large-preview.gif'
 
   log('project-editor-large-file:setup', {
     suiteDir,
@@ -73,7 +74,8 @@ export async function testProjectEditorLargeFile(ctx: AutotestContext): Promise<
     binaryPathB,
     binaryTextPath,
     supportedPngPath,
-    supportedPdfPath
+    supportedPdfPath,
+    largeGifPath
   })
 
   try {
@@ -293,6 +295,32 @@ export async function testProjectEditorLargeFile(ctx: AutotestContext): Promise<
       active: api()?.getActiveFilePath?.(),
       choice: api()?.getOpenChoiceDialogState?.(),
       pdfState: api()?.getPdfReaderState?.()
+    })
+    if (cancelled()) return results
+
+    const largeGifOpen = api()!.openFileByPathAsUser(largeGifPath)
+    const largeGifReady = await waitFor(
+      'plf-large-gif-preview',
+      () => {
+        const state = api()?.getImageFilePreviewState?.()
+        return api()?.getActiveFilePath?.() === largeGifPath &&
+          api()?.getOpenChoiceDialogState?.()?.visible === false &&
+          Boolean(state?.visible && state.loaded && !state.broken)
+      },
+      12000
+    )
+    if (!largeGifReady && api()?.getOpenChoiceDialogState?.()?.visible) {
+      api()?.chooseOpenChoice?.('cancel')
+    }
+    await largeGifOpen
+    const largeGifState = api()?.getImageFilePreviewState?.()
+    record('PLF-19-large-gif-bypasses-image-size-limit', largeGifReady, {
+      active: api()?.getActiveFilePath?.(),
+      choice: api()?.getOpenChoiceDialogState?.(),
+      imageState: largeGifState
+    })
+    record('PLF-20-large-gif-preview-uses-file-url', Boolean(largeGifState?.src.startsWith('file:')), {
+      srcPrefix: largeGifState?.src.slice(0, 32) ?? null
     })
   } catch (error) {
     record('PLF-99-unhandled-error', false, { error: String(error) })

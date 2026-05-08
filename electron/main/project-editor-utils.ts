@@ -6,7 +6,7 @@
 import BetterSqlite3 from 'better-sqlite3'
 import { readdir, stat, readFile, writeFile, mkdir, rename, rm, unlink, access, open as openFileHandle } from 'fs/promises'
 import { resolve, relative, dirname, sep, normalize, extname, join } from 'path'
-import { MAX_IMAGE_FILE_SIZE, bufferToImageDataUrl, isSupportedImageFile } from './image-utils'
+import { isSupportedImageFile } from './image-utils'
 
 export const PROJECT_TEXT_WARNING_SIZE = 3 * 1024 * 1024
 export const PROJECT_TEXT_EAGER_LIMIT = 30 * 1024 * 1024
@@ -483,10 +483,8 @@ export async function readProjectFile(root: string, path: string, options: Proje
       ? MAX_PDF_FILE_SIZE
       : isEpubByExt
         ? MAX_EPUB_FILE_SIZE
-        : isImageByExt
-          ? MAX_IMAGE_FILE_SIZE
-          : PROJECT_TEXT_EAGER_LIMIT
-    if ((isPdfByExt || isEpubByExt || isImageByExt) && fileStat.size > sizeLimit && !isSqliteByExt) {
+        : PROJECT_TEXT_EAGER_LIMIT
+    if ((isPdfByExt || isEpubByExt) && fileStat.size > sizeLimit && !isSqliteByExt) {
       return {
         success: false,
         ...baseProjectReadResult(rootPath, path, fileStat.size),
@@ -542,7 +540,6 @@ export async function readProjectFile(root: string, path: string, options: Proje
     }
 
     if (isImageByExt) {
-      const buffer = await readFile(fullPath)
       return {
         success: true,
         root: rootPath,
@@ -551,7 +548,8 @@ export async function readProjectFile(root: string, path: string, options: Proje
         isBinary: true,
         isImage: true,
         isSqlite: false,
-        previewUrl: bufferToImageDataUrl(buffer, fullPath),
+        previewUrl: `${toFileUrl(fullPath)}?mtime=${Math.trunc(fileStat.mtimeMs)}`,
+        previewPath: fullPath,
         sizeBytes: fileStat.size
       }
     }

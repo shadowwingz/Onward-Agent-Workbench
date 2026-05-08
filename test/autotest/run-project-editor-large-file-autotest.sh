@@ -10,6 +10,7 @@ source "$ROOT_DIR/test/autotest/resolve-dev-app-bin.sh"
 APP_BIN="${1:-$(resolve_dev_app_bin "$ROOT_DIR" || true)}"
 LOG_FILE="${2:-$REPO_ROOT/traces/test-logs/project-editor-large-file-autotest.log}"
 SCRATCH_DIR="$ROOT_DIR/test/autotest/results/project-editor-large-file"
+LARGE_GIF_FIXTURE="$SCRATCH_DIR/large-preview.gif"
 
 cleanup() {
   rm -rf "$SCRATCH_DIR"
@@ -25,6 +26,7 @@ if [[ -z "$APP_BIN" || ! -x "$APP_BIN" ]]; then
 fi
 
 rm -f "$LOG_FILE"
+node "$ROOT_DIR/test/autotest/create-large-gif-fixture.mjs" "$LARGE_GIF_FIXTURE" $((12 * 1024 * 1024)) >/dev/null
 
 ONWARD_DEBUG=1 \
 ONWARD_AUTOTEST=1 \
@@ -39,8 +41,8 @@ if grep -q "\[AutoTest\] FAIL" "$LOG_FILE"; then
   exit 1
 fi
 
-if ! grep -q "PLF-18-supported-pdf-bypasses-binary-choice" "$LOG_FILE"; then
-  echo "Missing PLF-18-supported-pdf-bypasses-binary-choice result. Log: $LOG_FILE" >&2
+if ! grep -q "PLF-20-large-gif-preview-uses-file-url" "$LOG_FILE"; then
+  echo "Missing PLF-20-large-gif-preview-uses-file-url result. Log: $LOG_FILE" >&2
   tail -n 200 "$LOG_FILE" >&2
   exit 1
 fi

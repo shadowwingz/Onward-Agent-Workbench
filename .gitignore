@@ -4,6 +4,8 @@ release/
 dist/
 .pnpm-store/
 *.log
+current_tasks_*.md
+current-state-*.md
 # Python bytecode caches — created at any depth by `python3 <script>.py`.
 # No leading slash so the pattern matches `__pycache__/` and `*.pyc` in the
 # repo root as well as any subdirectory (e.g. test/autotest/__pycache__/).

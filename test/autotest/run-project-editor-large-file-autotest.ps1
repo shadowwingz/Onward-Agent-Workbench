@@ -9,6 +9,7 @@ $RootDir = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
 $AppBin = if ($args.Count -ge 1 -and $args[0]) { $args[0] } else { Resolve-DevAppBin $RootDir }
 $LogFile = if ($args.Count -ge 2 -and $args[1]) { $args[1] } else { Join-Path $RootDir "traces/test-logs/project-editor-large-file-autotest.log" }
 $ScratchDir = Join-Path $RootDir "test/autotest/results/project-editor-large-file"
+$LargeGifFixture = Join-Path $ScratchDir "large-preview.gif"
 
 if (-not $AppBin -or -not (Test-Path $AppBin)) {
   Write-Error "App binary not found or not executable: $AppBin`nRun a development build first: rm -rf out release && pnpm dist:dev"
@@ -21,6 +22,8 @@ if ($LogDir -and -not (Test-Path $LogDir)) {
 if (Test-Path $LogFile) {
   Remove-Item $LogFile -Force
 }
+
+& node (Join-Path $RootDir "test/autotest/create-large-gif-fixture.mjs") $LargeGifFixture (12 * 1024 * 1024) | Out-Null
 
 try {
   $env:ONWARD_DEBUG = "1"
@@ -35,8 +38,8 @@ try {
     Write-Error "ProjectEditor large-file autotest failed. Log: $LogFile"
   }
 
-  if (-not (Select-String -Path $LogFile -Pattern "PLF-18-supported-pdf-bypasses-binary-choice" -Quiet)) {
-    Write-Error "Missing PLF-18-supported-pdf-bypasses-binary-choice result. Log: $LogFile"
+  if (-not (Select-String -Path $LogFile -Pattern "PLF-20-large-gif-preview-uses-file-url" -Quiet)) {
+    Write-Error "Missing PLF-20-large-gif-preview-uses-file-url result. Log: $LogFile"
   }
 
   Write-Output "ProjectEditor large-file autotest passed. Log: $LogFile"
