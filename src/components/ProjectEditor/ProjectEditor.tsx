@@ -16,6 +16,7 @@ import { useSubpageEscape } from '../../hooks/useSubpageEscape'
 import { useI18n } from '../../i18n/useI18n'
 import { perfTrace } from '../../utils/perf-trace'
 import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
+import { shouldRetainProjectEditorViewOnClose } from './utils/projectEditorCloseRetention'
 import { isPreviewWorkPending } from './utils/previewRestoreSettle'
 import { runAllTests } from '../../autotest/autotest-runner'
 import type { AutotestContext, CpuSummary, ProjectEditorDebugApi, TestResult } from '../../autotest/types'
@@ -31,6 +32,7 @@ import {
 import { SubpagePanelButton, SubpagePanelShell, SubpageSwitcher, type SubpagePanelShellState } from '../SubpageSwitcher'
 import { OutlinePanel, type OutlineTarget } from './Outline/OutlinePanel'
 import { countSymbols } from './Outline/outlineParser'
+import { shouldCaptureOutlineScrollTop } from './Outline/outlineScrollRestore'
 import { OutlineSymbolKind, type OutlineItem } from './Outline/types'
 import { useOutlineSymbols } from './Outline/useOutlineSymbols'
 import { SearchPanel } from './GlobalSearch/SearchPanel'
@@ -160,6 +162,7 @@ type OpenFileOptions = {
   trackRecent?: boolean
   cursorPosition?: { lineNumber: number; column?: number } | null
   missingBehavior?: OpenMissingBehavior
+  forceReload?: boolean
   // Set by callers that originated inside the File Browser tree itself, to
   // skip the automatic "expand ancestors + center row" reveal that other
   // sources (Search, Pin, Recent, ...) trigger.
@@ -206,7 +209,6 @@ const MARKDOWN_RENDER_DEBOUNCE_MS = 300
 const MARKDOWN_RENDER_MAX_DEBOUNCE_MS = 1200
 const PROJECT_STATE_SAVE_DEBOUNCE_MS = 1200
 const PROGRAMMATIC_EDITOR_PREVIEW_SYNC_SUPPRESS_MS = 1200
-const PREVIEW_RESTORE_REVEAL_SETTLE_MS = MARKDOWN_RENDER_MAX_DEBOUNCE_MS + 100
 const MAX_PINNED_FILES = Infinity
 const MAX_RECENT_FILES = 10
 const MAX_PERSISTED_FILE_STATES = 20
@@ -325,6 +327,14 @@ type MarkdownCodeWrapDebugState = {
   blockOverflowWrap: string | null
   inlineWhiteSpace: string | null
   inlineOverflowWrap: string | null
+}
+
+type ProjectEditorReopenRestoreDebug = {
+  durationMs: number
+  cause: 'retained-view' | 'persisted-state'
+  filePath: string | null
+  markdownCacheMode: MarkdownSessionCacheRestoreResult['mode'] | null
+  finalizedAt: number
 }
 
 function normalizeScopeCwd(value: string | null): string | null {
@@ -939,6 +949,10 @@ export function ProjectEditor({
   const pinDropdownRef = useRef<HTMLDivElement>(null)
   const recentDropdownRef = useRef<HTMLDivElement>(null)
   const [fileContent, setFileContent] = useState('')
+  const [outlineContentSnapshot, setOutlineContentSnapshot] = useState<{
+    filePath: string | null
+    content: string
+  }>({ filePath: null, content: '' })
   const fileContentRef = useRef('')
   const [isBinary, setIsBinary] = useState(false)
   const [isImage, setIsImage] = useState(false)
@@ -1074,6 +1088,10 @@ export function ProjectEditor({
   const restoredStateRef = useRef<ProjectEditorState | null>(null)
   const lastEditorScopeRef = useRef<ProjectEditorScope | null>(null)
   const wasOpenRef = useRef(false)
+  const retainedCloseScopeRef = useRef<ProjectEditorScope | null>(null)
+  const retainedFreshnessRequestIdRef = useRef(0)
+  const projectEditorReopenStartedAtRef = useRef<number | null>(null)
+  const lastProjectEditorReopenRestoreRef = useRef<ProjectEditorReopenRestoreDebug | null>(null)
   const skipClosePersistRef = useRef(false)
   // Snapshot of activeFilePath captured by handleOpenGitDiff/History before
   // resetActiveFileState clears state. Used to fast-path file restoration on
@@ -1119,15 +1137,11 @@ export function ProjectEditor({
   // tests measure the actual phase-machine duration without polling jitter.
   const lastPreviewRevealRef = useRef<{
     durationMs: number
-    cause: 'fast-path' | 'safety-net'
+    cause: 'fast-path'
     hadWork: boolean
     finalizedAt: number
   } | null>(null)
-  // True between applyMarkdownSessionCacheHit start and the next reveal
-  // finalize. When set, queuePreviewReveal takes the fast path that skips
-  // the legacy 1300 ms safety timer; the cached HTML is already
-  // authoritative so there is nothing to wait for.
-  const cacheHitFreshRef = useRef(false)
+  const previewRevealHadWorkRef = useRef(false)
   const editorPreviewSyncFrameRef = useRef<number | null>(null)
   const suppressPreviewSyncOnRestoreRef = useRef(false)
   const markdownSessionCacheRenderRef = useRef<{ key: string; filePath: string; content: string } | null>(null)
@@ -1169,6 +1183,7 @@ export function ProjectEditor({
   const outlineScrollTopRef = useRef<Map<string, number>>(new Map())
   const outlineScrollByFileRef = useRef<Map<string, number>>(new Map())
   const lastOutlineDomRestoreSignatureRef = useRef<string | null>(null)
+  const pendingOutlineDomRestoreRef = useRef<{ key: string; targetScrollTop: number; signature?: string } | null>(null)
   const isDraggingRef = useRef(false)
 
   const [modalSize, setModalSize] = useState(() => {
@@ -1298,6 +1313,31 @@ export function ProjectEditor({
     }
   }, [])
 
+  const finalizeProjectEditorReopenRestore = useCallback((
+    cause: ProjectEditorReopenRestoreDebug['cause'],
+    filePath: string | null,
+    markdownCacheMode: MarkdownSessionCacheRestoreResult['mode'] | null
+  ) => {
+    const startedAt = projectEditorReopenStartedAtRef.current ?? performance.now()
+    const finalizedAt = performance.now()
+    const durationMs = +(finalizedAt - startedAt).toFixed(1)
+    const event: ProjectEditorReopenRestoreDebug = {
+      durationMs,
+      cause,
+      filePath,
+      markdownCacheMode,
+      finalizedAt
+    }
+    lastProjectEditorReopenRestoreRef.current = event
+    projectEditorReopenStartedAtRef.current = null
+    perfTrace(PERF_TRACE_EVENT.RENDERER_PROJECT_EDITOR_REOPEN_RESTORE, {
+      cause,
+      durationMs,
+      filePathLen: filePath?.length ?? 0,
+      markdownCacheMode
+    })
+  }, [])
+
   const scheduleEditorSyncFromPreview = useCallback((onSettled?: (synced: boolean) => void) => {
 	    cancelEditorPreviewSyncFrame()
 	    let attempts = 0
@@ -1333,6 +1373,7 @@ export function ProjectEditor({
     cancelPreviewRevealFrames()
     cancelPreviewSyncFrame()
     suppressPreviewSyncOnRestoreRef.current = true
+    previewRevealHadWorkRef.current = false
     previewRestorePhaseRef.current = 'waiting-html'
     setPreviewRestorePhase('waiting-html')
     mdpTrace('phase:waiting-html', { from: 'beginPreviewRestore' })
@@ -1343,9 +1384,9 @@ export function ProjectEditor({
     cancelPreviewSyncFrame()
     suppressPreviewSyncOnRestoreRef.current = true
     const revealStart = performance.now()
-    mdpTrace('reveal:queued', { settleMs: PREVIEW_RESTORE_REVEAL_SETTLE_MS })
+    mdpTrace('reveal:queued')
 
-    const finalize = (cause: 'fast-path' | 'safety-net', hadWork: boolean) => {
+    const finalize = () => {
       if (previewRevealSettleFrameRef.current !== null) {
         window.clearTimeout(previewRevealSettleFrameRef.current)
         previewRevealSettleFrameRef.current = null
@@ -1354,9 +1395,10 @@ export function ProjectEditor({
       suppressPreviewSyncOnRestoreRef.current = false
       previewRestorePhaseRef.current = 'idle'
       setPreviewRestorePhase('idle')
-      cacheHitFreshRef.current = false
       const finalizedAt = performance.now()
       const durationMs = +(finalizedAt - revealStart).toFixed(1)
+      const cause = 'fast-path' as const
+      const hadWork = previewRevealHadWorkRef.current
       lastPreviewRevealRef.current = { durationMs, cause, hadWork, finalizedAt }
       perfTrace(PERF_TRACE_EVENT.RENDERER_MARKDOWN_PREVIEW_REVEAL, {
         cause,
@@ -1367,12 +1409,6 @@ export function ProjectEditor({
     }
 
     const settleReveal = () => {
-      // Cache-hit fast path: when applyMarkdownSessionCacheHit just ran,
-      // the cached HTML already matches the file content and no worker /
-      // mermaid / sanitize work is queued. Skip the legacy 1300 ms safety
-      // timer in that case — it was sized for the worst-case worker
-      // debounce, not for cache hits.
-      const cacheHitFresh = cacheHitFreshRef.current
       const mermaidState = getMermaidPreviewStateRef.current()
       const workPending = isPreviewWorkPending({
         markdownRenderPending: markdownRenderPendingRef.current,
@@ -1381,21 +1417,21 @@ export function ProjectEditor({
         mermaidPending: mermaidState.pending,
         mermaidInFlight: mermaidRenderInFlightRef.current
       })
-      if (cacheHitFresh && !workPending) {
-        previewRevealSettleFrameRef.current = window.setTimeout(() => {
-          previewRevealSettleFrameRef.current = null
-          finalize('fast-path', false)
-        }, 0)
+      if (workPending) {
+        previewRevealHadWorkRef.current = true
+        mdpTrace('reveal:pending', {
+          markdownRenderPending: markdownRenderPendingRef.current,
+          workerInFlight: markdownWorkerInFlightRef.current,
+          workerQueued: markdownWorkerQueuedRef.current,
+          mermaidPending: mermaidState.pending,
+          mermaidInFlight: mermaidRenderInFlightRef.current
+        })
         return
       }
-      // Cache-miss / worker-in-flight: keep the legacy safety net.
-      // Removing it requires fixing the latent races in useOutlineSymbols
-      // (Monaco model swap) and the outline DOM restore — the 1300 ms
-      // timer was load-bearing for those, not for the reveal itself.
       previewRevealSettleFrameRef.current = window.setTimeout(() => {
         previewRevealSettleFrameRef.current = null
-        finalize('safety-net', workPending)
-      }, PREVIEW_RESTORE_REVEAL_SETTLE_MS)
+        finalize()
+      }, 0)
     }
     previewRevealFrameRef.current = window.setTimeout(() => {
       previewRevealFrameRef.current = null
@@ -1406,13 +1442,10 @@ export function ProjectEditor({
         pendingMarkdownSessionCacheRestoreRef.current = null
       }
       if (isMarkdownEditorVisibleRef.current) {
-        if (syncEditorToPreviewScrollRef.current()) {
-          settleReveal()
-        } else {
-          scheduleEditorSyncFromPreview(() => {
-            settleReveal()
-          })
+        if (!syncEditorToPreviewScrollRef.current()) {
+          scheduleEditorSyncFromPreview()
         }
+        settleReveal()
         return
       }
       settleReveal()
@@ -1535,6 +1568,16 @@ export function ProjectEditor({
         const scrollTop = Math.max(0, tree.scrollTop)
         outlineScrollTopRef.current.set(key, scrollTop)
         if (activePath) outlineScrollByFileRef.current.set(activePath, scrollTop)
+        if (scrollTop > 0) {
+          pendingOutlineDomRestoreRef.current = { key, targetScrollTop: scrollTop }
+        }
+      }
+    } else {
+      const activePath = activeFilePathRef.current
+      const key = getFileScrollKey(lastEditorScopeRef.current, activePath)
+      const savedScrollTop = key ? outlineScrollTopRef.current.get(key) : undefined
+      if (key && typeof savedScrollTop === 'number' && savedScrollTop > 0) {
+        pendingOutlineDomRestoreRef.current = { key, targetScrollTop: savedScrollTop }
       }
     }
     setIsOutlineVisible(visible)
@@ -1626,6 +1669,7 @@ export function ProjectEditor({
   const editorLanguage = useMemo(() => resolveMonacoLanguage(activeFilePath), [activeFilePath])
   const isMarkdownPreviewVisible = isMarkdownFile && isMarkdownPreviewOpen && !isBinary && !isImage && !isSqlite
   const isMarkdownRenderAllowed = isMarkdownPreviewVisible && isMarkdownRenderEnabled
+  const isMarkdownWorkerActive = isOpen && isMarkdownRenderAllowed
   const isPreviewContentVisible =
     isMarkdownRenderAllowed &&
     (previewRestorePhase === 'idle' || previewRestorePhase === 'revealing')
@@ -1763,7 +1807,8 @@ export function ProjectEditor({
     useOutlineSymbols({
       editor: editorRef.current,
       filePath: activeFilePath,
-      content: fileContent,
+      contentPath: outlineContentSnapshot.filePath,
+      content: outlineContentSnapshot.filePath === activeFilePath ? outlineContentSnapshot.content : '',
       isVisible: outlineShowInSplit,
     })
   const outlineSymbolsRef = useRef(outlineSymbols)
@@ -2027,6 +2072,7 @@ export function ProjectEditor({
       pendingViewStateRef.current = mem.editorViewState as import('monaco-editor').editor.ICodeEditorViewState
       pendingViewStatePathRef.current = filePath
       if (typeof mem.cursorLine === 'number' && mem.cursorLine > 1) {
+        pendingCursorRef.current = { lineNumber: mem.cursorLine, column: mem.cursorColumn ?? 1 }
         pendingViewStateFallbackRef.current = { path: filePath, line: mem.cursorLine }
       }
     } else if (typeof mem.cursorLine === 'number') {
@@ -2052,7 +2098,12 @@ export function ProjectEditor({
     if (typeof mem.outlineScrollTop === 'number') {
       const scope = lastEditorScopeRef.current
       const oKey = getFileScrollKey(scope, filePath)
-      if (oKey) outlineScrollTopRef.current.set(oKey, mem.outlineScrollTop)
+      if (oKey) {
+        outlineScrollTopRef.current.set(oKey, mem.outlineScrollTop)
+        if (mem.outlineScrollTop > 0) {
+          pendingOutlineDomRestoreRef.current = { key: oKey, targetScrollTop: mem.outlineScrollTop }
+        }
+      }
     }
   }, [])
 
@@ -2078,7 +2129,16 @@ export function ProjectEditor({
     const outlineKey = getFileScrollKey(scope, currentActiveFilePath)
     const outlineEl = (modalRef.current?.querySelector('.outline-panel-tree') ?? null) as HTMLDivElement | null
     if (outlineEl && outlineKey) {
-      outlineScrollTopRef.current.set(outlineKey, outlineEl.scrollTop)
+      const pendingRestore = pendingOutlineDomRestoreRef.current
+      const previousScrollTop = outlineScrollTopRef.current.get(outlineKey)
+      if (shouldCaptureOutlineScrollTop({
+        captureKey: outlineKey,
+        pendingRestoreKey: pendingRestore?.key ?? null,
+        previousScrollTop,
+        nextScrollTop: outlineEl.scrollTop
+      })) {
+        outlineScrollTopRef.current.set(outlineKey, outlineEl.scrollTop)
+      }
     }
 
     const activeMem = currentActiveFilePath ? fileMemoryRef.current.get(currentActiveFilePath) : null
@@ -2203,7 +2263,6 @@ export function ProjectEditor({
       htmlLength: entry.renderedHtml.length,
       imageCount: entry.imagePaths.length
     })
-    cacheHitFreshRef.current = true
     if (markdownRenderTimerRef.current) {
       window.clearTimeout(markdownRenderTimerRef.current)
       markdownRenderTimerRef.current = null
@@ -2255,11 +2314,17 @@ export function ProjectEditor({
     if (typeof currentOutlineScrollTop === 'number') {
       if (oKey) {
         outlineScrollTopRef.current.set(oKey, currentOutlineScrollTop)
+        if (currentOutlineScrollTop > 0) {
+          pendingOutlineDomRestoreRef.current = { key: oKey, targetScrollTop: currentOutlineScrollTop }
+        }
       }
       outlineScrollByFileRef.current.set(filePath, currentOutlineScrollTop)
     } else if (typeof entry.outlineScrollTop === 'number') {
       if (oKey) {
         outlineScrollTopRef.current.set(oKey, entry.outlineScrollTop)
+        if (entry.outlineScrollTop > 0) {
+          pendingOutlineDomRestoreRef.current = { key: oKey, targetScrollTop: entry.outlineScrollTop }
+        }
       }
       outlineScrollByFileRef.current.set(filePath, entry.outlineScrollTop)
     }
@@ -2276,23 +2341,10 @@ export function ProjectEditor({
     beginPreviewRestore()
     updatePreviewActiveSlug(entry.previewScrollMemory?.nearestHeadingSlug ?? null)
     queuePreviewReveal()
-    window.setTimeout(() => {
-      const cachedRender = markdownSessionCacheRenderRef.current
-      if (!isOpenRef.current || activeFilePathRef.current !== filePath || cachedRender?.key !== entry.key) return
-      restorePreviewFromMemoryRef.current()
-      if (isMarkdownEditorVisibleRef.current) {
-        scheduleEditorSyncFromPreview()
-      }
-      pendingMarkdownSessionCacheRestoreRef.current = null
-      suppressPreviewSyncOnRestoreRef.current = false
-      previewRestorePhaseRef.current = 'idle'
-      setPreviewRestorePhase('idle')
-    }, PREVIEW_RESTORE_REVEAL_SETTLE_MS + 200)
   }, [
     beginPreviewRestore,
     cancelMarkdownIdle,
     queuePreviewReveal,
-    scheduleEditorSyncFromPreview,
     updatePreviewActiveSlug,
     upsertFileMemory
   ])
@@ -2452,7 +2504,6 @@ export function ProjectEditor({
     updatePreviewActiveSlug(null)
     markdownApplyRequestIdRef.current += 1
     markdownPendingPayloadRef.current = null
-    cacheHitFreshRef.current = false
     setIsIndexing(false)
     editorScrollDisposableRef.current?.dispose()
     editorScrollDisposableRef.current = null
@@ -2476,6 +2527,7 @@ export function ProjectEditor({
     // the original behaviour.
     if (!preserveContent) {
       fileContentRef.current = ''
+      setOutlineContentSnapshot({ filePath: null, content: '' })
     }
     openFileTokenRef.current += 1
     if (!preserveContent) {
@@ -2556,6 +2608,7 @@ export function ProjectEditor({
     originalContentRef.current = ''
     originalModelVersionRef.current = null
     fileContentRef.current = ''
+    setOutlineContentSnapshot({ filePath: null, content: '' })
     openFileTokenRef.current += 1
     activeFilePathRef.current = null
     isBinaryRef.current = false
@@ -2876,7 +2929,8 @@ export function ProjectEditor({
   }, [imagePreviewUrl])
 
   useEffect(() => {
-    if (!isMarkdownRenderAllowed) {
+    if (!isMarkdownWorkerActive) {
+      const preserveClosedPreview = Boolean(retainedCloseScopeRef.current && !isOpen)
       resetPreviewRestoreState()
       if (markdownWorkerRef.current) {
         markdownWorkerRef.current.terminate()
@@ -2894,8 +2948,11 @@ export function ProjectEditor({
         window.clearTimeout(markdownRenderTimerRef.current)
         markdownRenderTimerRef.current = null
       }
-      setMarkdownRenderedHtml('')
-      setMarkdownImagePaths([])
+      if (!preserveClosedPreview) {
+        setMarkdownRenderedHtml('')
+        markdownRenderedHtmlRef.current = ''
+        setMarkdownImagePaths([])
+      }
       setMarkdownRenderPending(false)
       const currentContent = fileContentRef.current
       markdownRenderSourceRef.current = currentContent
@@ -3005,7 +3062,8 @@ export function ProjectEditor({
   }, [
     activeFilePath,
     cancelMarkdownIdle,
-    isMarkdownRenderAllowed,
+    isMarkdownWorkerActive,
+    isOpen,
     resetPreviewRestoreState,
     scheduleMarkdownApply,
     sendMarkdownRenderRequest
@@ -3052,20 +3110,22 @@ export function ProjectEditor({
   }, [resetPreviewRestoreState, rootPath])
 
   useEffect(() => {
-    if (!isMarkdownRenderAllowed) {
+    if (!isMarkdownWorkerActive) {
       if (markdownRenderTimerRef.current) {
         window.clearTimeout(markdownRenderTimerRef.current)
       }
-      setMarkdownRenderSource('')
+      if (!(retainedCloseScopeRef.current && !isOpen)) {
+        setMarkdownRenderSource('')
+      }
       setMarkdownRenderPending(false)
       return
     }
 
     scheduleMarkdownRender()
-  }, [activeFilePath, isMarkdownRenderAllowed, scheduleMarkdownRender])
+  }, [activeFilePath, isMarkdownWorkerActive, isOpen, scheduleMarkdownRender])
 
   useEffect(() => {
-    if (!isMarkdownRenderAllowed || !markdownRootPath) return
+    if (!isMarkdownWorkerActive || !markdownRootPath) return
     const cachedRender = markdownSessionCacheRenderRef.current
     if (
       cachedRender &&
@@ -3084,7 +3144,7 @@ export function ProjectEditor({
     }
     sendMarkdownRenderRequest()
   }, [
-    isMarkdownRenderAllowed,
+    isMarkdownWorkerActive,
     activeFilePath,
     markdownRenderSource,
     markdownRootPath,
@@ -3092,7 +3152,7 @@ export function ProjectEditor({
   ])
 
   useEffect(() => {
-    if (!isMarkdownRenderAllowed || !rootPath) return
+    if (!isMarkdownWorkerActive || !rootPath) return
     const pending = markdownImagePaths.filter((path) => !markdownImageMap[path])
     if (pending.length === 0) return
     let cancelled = false
@@ -3118,11 +3178,11 @@ export function ProjectEditor({
     return () => {
       cancelled = true
     }
-  }, [isMarkdownRenderAllowed, markdownImageMap, markdownImagePaths, rootPath, sendMarkdownRenderRequest])
+  }, [isMarkdownWorkerActive, markdownImageMap, markdownImagePaths, rootPath, sendMarkdownRenderRequest])
 
   // Watch referenced image files for changes and invalidate cache on modification
   useEffect(() => {
-    if (!isMarkdownRenderAllowed || !rootPath) return
+    if (!isMarkdownWorkerActive || !rootPath) return
 
     const currentPaths = new Set(markdownImagePaths)
     const watched = watchedImagePathsRef.current
@@ -3153,7 +3213,7 @@ export function ProjectEditor({
     return () => {
       unsubscribe()
     }
-  }, [isMarkdownRenderAllowed, markdownImagePaths, rootPath])
+  }, [isMarkdownWorkerActive, markdownImagePaths, rootPath])
 
   const showStatus = useCallback((type: 'success' | 'error', text: string) => {
     setStatusMessage({ type, text })
@@ -3641,18 +3701,29 @@ export function ProjectEditor({
     sync(0)
   }, [])
 
-  const waitForEditorModelReady = useCallback(async (targetPath: string, timeoutMs = 2000) => {
+  const waitForEditorModelReady = useCallback(async (
+    targetPath: string,
+    timeoutMs = 2000,
+    expectedContent?: string
+  ) => {
     const start = performance.now()
     while (performance.now() - start < timeoutMs) {
       if (activeFilePathRef.current !== targetPath) return false
       const editor = editorRef.current
-      if (editor?.getModel()) return true
+      const model = editor?.getModel()
+      if (
+        model &&
+        isEditorModelMatchingPath(targetPath) &&
+        (expectedContent === undefined || model.getValue() === expectedContent)
+      ) {
+        return true
+      }
       await new Promise<void>((resolve) => {
         window.setTimeout(resolve, 16)
       })
     }
     return false
-  }, [])
+  }, [isEditorModelMatchingPath])
 
   const openFile = useCallback(async (
     path: string,
@@ -3683,7 +3754,7 @@ export function ProjectEditor({
       }
     }
 
-    if (currentActiveFilePath === path) {
+    if (currentActiveFilePath === path && !options?.forceReload) {
       setSelectedPath(path)
       if (source === 'user' && options?.trackRecent) {
         touchRecentFile(path)
@@ -3765,6 +3836,7 @@ export function ProjectEditor({
           setEpubPreviewData(null)
           setFileContent('')
           fileContentRef.current = ''
+          setOutlineContentSnapshot({ filePath: null, content: '' })
           originalContentRef.current = ''
           originalModelVersionRef.current = null
           setIsDirty(false)
@@ -3886,6 +3958,7 @@ export function ProjectEditor({
       pendingViewStateFallbackRef.current = null
       setFileContent('')
       fileContentRef.current = ''
+      setOutlineContentSnapshot({ filePath: null, content: '' })
       originalContentRef.current = ''
       originalModelVersionRef.current = null
       setIsDirty(false)
@@ -3899,6 +3972,7 @@ export function ProjectEditor({
       pendingViewStateFallbackRef.current = null
       setFileContent('')
       fileContentRef.current = ''
+      setOutlineContentSnapshot({ filePath: null, content: '' })
       originalContentRef.current = ''
       originalModelVersionRef.current = null
       setIsDirty(false)
@@ -3912,6 +3986,7 @@ export function ProjectEditor({
       pendingViewStateFallbackRef.current = null
       setFileContent('')
       fileContentRef.current = ''
+      setOutlineContentSnapshot({ filePath: null, content: '' })
       originalContentRef.current = ''
       originalModelVersionRef.current = null
       setIsDirty(false)
@@ -3922,6 +3997,7 @@ export function ProjectEditor({
     const textContent = result.content ?? ''
     setFileContent(textContent)
     fileContentRef.current = textContent
+    setOutlineContentSnapshot({ filePath: path, content: textContent })
     originalContentRef.current = textContent
     originalModelVersionRef.current = null
     setIsDirty(false)
@@ -3950,7 +4026,7 @@ export function ProjectEditor({
     setIsMarkdownRenderEnabled(shouldEnableMarkdown && isMarkdownPreviewOpenRef.current)
 
     const applyPendingAfterModelReady = async () => {
-      const ready = await waitForEditorModelReady(path)
+      const ready = await waitForEditorModelReady(path, 2000, textContent)
       if (!ready) return false
       if (
         (pendingViewStateRef.current || pendingCursorRef.current) &&
@@ -3992,6 +4068,26 @@ export function ProjectEditor({
   useEffect(() => {
     openFileRef.current = openFile
   }, [openFile])
+
+  const validateRetainedActiveFileFreshness = useCallback(async (path: string, retainedContent: string) => {
+    const root = rootRef.current
+    if (!root) return
+    const requestId = retainedFreshnessRequestIdRef.current + 1
+    retainedFreshnessRequestIdRef.current = requestId
+    const result = await window.electronAPI.project.readFile(root, path)
+    if (requestId !== retainedFreshnessRequestIdRef.current) return
+    if (!isOpenRef.current || activeFilePathRef.current !== path) return
+    if (
+      result.success &&
+      !result.isBinary &&
+      !result.isImage &&
+      !result.isSqlite &&
+      (result.content ?? '') === retainedContent
+    ) {
+      return
+    }
+    await openFileRef.current(path, 'restore', { forceReload: true })
+  }, [])
 
   const invalidateFileIndex = useCallback(() => {
     const root = rootRef.current
@@ -4096,9 +4192,26 @@ export function ProjectEditor({
       debugLog('root:effect', { isOpen, cwd })
     }
     if (!isOpen) {
+      const retainClosedView = Boolean(retainedCloseScopeRef.current)
       gitDiffOpenRef.current = false
       debugAutoOpenRef.current = false
       restoringStateRef.current = false
+      restoreTokenRef.current += 1
+      openFileTokenRef.current += 1
+      setContextMenu(null)
+      setSearchOpen(false)
+      setSidebarMode('files')
+      setInitialSearchType('content')
+      setSearchQuery('')
+      setSearchResults([])
+      setSearchActiveIndex(0)
+      setPreviewSearchOpen(false)
+      previewSearchOpenRef.current = false
+      setDialog(null)
+      setDialogInput('')
+      if (retainClosedView) {
+        return
+      }
       setTree([])
       setSelectedPath(null)
       setActiveFilePath(null)
@@ -4111,6 +4224,7 @@ export function ProjectEditor({
       activeFilePathRef.current = null
       setFileContent('')
       fileContentRef.current = ''
+      setOutlineContentSnapshot({ filePath: null, content: '' })
       setIsBinary(false)
       isBinaryRef.current = false
       setIsImage(false)
@@ -4125,17 +4239,6 @@ export function ProjectEditor({
       setIsLoadingFile(false)
       setRootPath(null)
       setRootError(null)
-      setSearchOpen(false)
-      setSidebarMode('files')
-      setInitialSearchType('content')
-      setSearchQuery('')
-      setSearchResults([])
-      setSearchActiveIndex(0)
-      setContextMenu(null)
-      setPreviewSearchOpen(false)
-      previewSearchOpenRef.current = false
-      setDialog(null)
-      setDialogInput('')
       setMarkdownImageMap({})
       markdownImageMapRef.current = {}
       void window.electronAPI.project.unwatchAllImageFiles()
@@ -4150,6 +4253,7 @@ export function ProjectEditor({
       : null)
 
     if (!effectiveCwd) {
+      retainedCloseScopeRef.current = null
       setRootError(t('projectEditor.error.noWorkingDirectory'))
       setRootPath(null)
       setPinnedFiles([])
@@ -4168,6 +4272,7 @@ export function ProjectEditor({
         debugLog('root:changed', { previousRoot, nextRoot: normalizedCwd })
       }
       restoreTokenRef.current += 1
+      retainedCloseScopeRef.current = null
       hasRestoredStateRef.current = false
       restoringStateRef.current = false
       resetActiveFileState()
@@ -4250,6 +4355,9 @@ export function ProjectEditor({
     }
 
     if (currentScope) {
+      if (!wasOpenRef.current) {
+        projectEditorReopenStartedAtRef.current = performance.now()
+      }
       const previousScope = lastEditorScopeRef.current
       if (previousScope && !isSameProjectEditorScope(previousScope, currentScope)) {
         persistProjectEditorState(previousScope)
@@ -4272,6 +4380,7 @@ export function ProjectEditor({
         setActiveFilePath(subpageReturn.path)
         fileContentRef.current = subpageReturn.content
         setFileContent(subpageReturn.content)
+        setOutlineContentSnapshot({ filePath: subpageReturn.path, content: subpageReturn.content })
         isBinaryRef.current = subpageReturn.isBinary
         setIsBinary(subpageReturn.isBinary)
         isImageRef.current = subpageReturn.isImage
@@ -4284,6 +4393,16 @@ export function ProjectEditor({
         setIsEpub(subpageReturn.isEpub)
       }
       if (scopeChanged || !wasOpenRef.current) {
+        const retainedCloseScope = retainedCloseScopeRef.current
+        const hasRetainedViewForScope = Boolean(
+          retainedCloseScope &&
+          isSameProjectEditorScope(retainedCloseScope, currentScope) &&
+          activeFilePathRef.current &&
+          rootRef.current
+        )
+        if (!hasRetainedViewForScope) {
+          retainedCloseScopeRef.current = null
+        }
         restoredStateRef.current = getProjectEditorState(currentScope)
         hasRestoredStateRef.current = false
         restoringStateRef.current = false
@@ -4303,14 +4422,54 @@ export function ProjectEditor({
         }
 
         if (storedState?.activeFilePath && isMarkdownPath(storedState.activeFilePath)) {
-          beginPreviewRestore()
+          const activePath = activeFilePathRef.current
+          const root = rootRef.current
+          const cacheRead = root && activePath
+            ? readMarkdownSessionCache(root, activePath, fileContentRef.current)
+            : null
+          if (
+            hasRetainedViewForScope &&
+            activePath === storedState.activeFilePath &&
+            isMarkdownPreviewOpenRef.current &&
+            (Boolean(markdownRenderedHtmlRef.current) || Boolean(cacheRead?.entry))
+          ) {
+            if (cacheRead) {
+              markdownSessionLastRestoreRef.current = cacheRead.result
+            }
+            if (!markdownRenderedHtmlRef.current && cacheRead?.entry) {
+              applyMarkdownSessionCacheHitRef.current(activePath, fileContentRef.current, cacheRead.entry)
+            } else {
+              resetPreviewRestoreState()
+            }
+            finalizeProjectEditorReopenRestore(
+              'retained-view',
+              activePath,
+              cacheRead?.result.mode ?? null
+            )
+            void validateRetainedActiveFileFreshness(activePath, fileContentRef.current)
+          } else {
+            beginPreviewRestore()
+          }
         } else {
           resetPreviewRestoreState()
+          if (hasRetainedViewForScope) {
+            finalizeProjectEditorReopenRestore('retained-view', activeFilePathRef.current, null)
+          }
         }
       }
     }
     wasOpenRef.current = true
-  }, [beginPreviewRestore, cwd, getProjectEditorState, isOpen, persistProjectEditorState, resetPreviewRestoreState, _terminalId])
+  }, [
+    beginPreviewRestore,
+    cwd,
+    finalizeProjectEditorReopenRestore,
+    getProjectEditorState,
+    isOpen,
+    persistProjectEditorState,
+    resetPreviewRestoreState,
+    validateRetainedActiveFileFreshness,
+    _terminalId
+  ])
 
   useEffect(() => {
     const flushProjectEditorBeforeUnload = () => {
@@ -4754,6 +4913,13 @@ export function ProjectEditor({
             }
             applyPendingViewState()
           }
+          if (projectEditorReopenStartedAtRef.current !== null) {
+            finalizeProjectEditorReopenRestore(
+              'persisted-state',
+              stored.activeFilePath,
+              isMarkdownPath(stored.activeFilePath) ? markdownSessionLastRestoreRef.current.mode : null
+            )
+          }
         }
       } finally {
         if (token === restoreTokenRef.current) {
@@ -4772,6 +4938,7 @@ export function ProjectEditor({
     openFile,
     queueFileTreeScrollRestore,
     restoreFileMemory,
+    finalizeProjectEditorReopenRestore,
     rootError,
     rootPath,
     tree.length,
@@ -5398,9 +5565,22 @@ export function ProjectEditor({
   // Outline scroll position capture callback
   const handleOutlineScrollCapture = useCallback((scrollTop: number) => {
     const key = getFileScrollKey(lastEditorScopeRef.current, activeFilePathRef.current)
+    const previousScrollTop = key ? outlineScrollTopRef.current.get(key) : undefined
+    const pendingRestore = pendingOutlineDomRestoreRef.current
+    if (!shouldCaptureOutlineScrollTop({
+      captureKey: key,
+      pendingRestoreKey: pendingRestore?.key ?? null,
+      previousScrollTop,
+      nextScrollTop: scrollTop
+    })) {
+      return
+    }
     if (key) outlineScrollTopRef.current.set(key, scrollTop)
     const activePath = activeFilePathRef.current
     if (activePath) outlineScrollByFileRef.current.set(activePath, Math.max(0, scrollTop))
+    if (key && pendingRestore?.key === key && scrollTop > 0) {
+      pendingOutlineDomRestoreRef.current = null
+    }
     scheduleProjectStateSave()
   }, [scheduleProjectStateSave])
 
@@ -5438,6 +5618,7 @@ export function ProjectEditor({
     }
 
     const key = getFileScrollKey(lastEditorScopeRef.current, activeFilePath)
+    if (!key) return
     const savedScrollTop = key ? outlineScrollTopRef.current.get(key) : undefined
     if (typeof savedScrollTop !== 'number' || savedScrollTop <= 0) return
     if (outlineSymbols.length === 0) return
@@ -5446,9 +5627,23 @@ export function ProjectEditor({
     if (lastOutlineDomRestoreSignatureRef.current === signature) return
 
     const targetScrollTop = Math.max(0, savedScrollTop)
+    pendingOutlineDomRestoreRef.current = { key, targetScrollTop, signature }
     let resizeObserver: ResizeObserver | null = null
-    let mutationObserver: MutationObserver | null = null
+    let mountMutationObserver: MutationObserver | null = null
+    let treeMutationObserver: MutationObserver | null = null
     let mountFrameId = 0
+    let retryFrameId = 0
+
+    const disconnectTreeObservers = () => {
+      resizeObserver?.disconnect()
+      resizeObserver = null
+      treeMutationObserver?.disconnect()
+      treeMutationObserver = null
+      if (retryFrameId) {
+        window.cancelAnimationFrame(retryFrameId)
+        retryFrameId = 0
+      }
+    }
 
     const tryApply = (tree: HTMLElement): boolean => {
       const maxScrollTop = Math.max(0, tree.scrollHeight - tree.clientHeight)
@@ -5463,24 +5658,48 @@ export function ProjectEditor({
       const isApplied = Math.abs(tree.scrollTop - clampedTarget) <= 2
       if (isApplied) {
         lastOutlineDomRestoreSignatureRef.current = signature
+        if (pendingOutlineDomRestoreRef.current?.key === key) {
+          pendingOutlineDomRestoreRef.current = null
+        }
       }
       return isApplied
+    }
+
+    const scheduleRetry = (tree: HTMLElement) => {
+      if (retryFrameId) return
+      retryFrameId = window.requestAnimationFrame(() => {
+        retryFrameId = 0
+        if (tryApply(tree)) {
+          disconnectTreeObservers()
+        }
+      })
     }
 
     const observeTree = (tree: HTMLElement) => {
       // Synchronous attempt first — covers the warm path where the
       // outline is already laid out (file switch with cached symbols).
       if (tryApply(tree)) return
-      // Tree exists but `scrollHeight` is still 0 (children rendering).
-      // ResizeObserver fires the moment the inner content commits a
-      // non-zero size, then we apply once and disconnect.
+      // Tree exists but its scroll range is not ready yet. ResizeObserver
+      // catches container/layout size changes, while MutationObserver catches
+      // the common path where the fixed-size scroll container receives its
+      // outline items after the parent effect has already run.
       resizeObserver = new ResizeObserver(() => {
         if (tryApply(tree)) {
-          resizeObserver?.disconnect()
-          resizeObserver = null
+          disconnectTreeObservers()
         }
       })
       resizeObserver.observe(tree)
+      treeMutationObserver = new MutationObserver(() => {
+        scheduleRetry(tree)
+      })
+      treeMutationObserver.observe(tree, { childList: true, subtree: true })
+      scheduleRetry(tree)
+    }
+
+    const handOffMountedTree = (tree: HTMLElement) => {
+      mountMutationObserver?.disconnect()
+      mountMutationObserver = null
+      observeTree(tree)
     }
 
     const tree = modalRef.current?.querySelector('.outline-panel-tree') as HTMLElement | null
@@ -5489,18 +5708,17 @@ export function ProjectEditor({
     } else {
       // OutlinePanel has not mounted yet (rare race when the effect runs
       // between the parent commit and the panel render). Watch the modal
-      // root for the tree to appear, then hand off to ResizeObserver.
+      // root for the tree to appear, then observe the tree's own layout and
+      // content readiness.
       const modalRoot = modalRef.current
       if (modalRoot) {
-        mutationObserver = new MutationObserver(() => {
+        mountMutationObserver = new MutationObserver(() => {
           const found = modalRoot.querySelector('.outline-panel-tree') as HTMLElement | null
           if (found) {
-            mutationObserver?.disconnect()
-            mutationObserver = null
-            observeTree(found)
+            handOffMountedTree(found)
           }
         })
-        mutationObserver.observe(modalRoot, { childList: true, subtree: true })
+        mountMutationObserver.observe(modalRoot, { childList: true, subtree: true })
       } else {
         // Fall back to a single rAF to give React one frame to mount.
         mountFrameId = window.requestAnimationFrame(() => {
@@ -5512,9 +5730,12 @@ export function ProjectEditor({
     }
 
     return () => {
-      resizeObserver?.disconnect()
-      mutationObserver?.disconnect()
+      disconnectTreeObservers()
+      mountMutationObserver?.disconnect()
       if (mountFrameId) window.cancelAnimationFrame(mountFrameId)
+      if (pendingOutlineDomRestoreRef.current?.signature === signature) {
+        pendingOutlineDomRestoreRef.current = null
+      }
     }
   }, [activeFilePath, handleOutlineScrollCapture, isOpen, modalRef, outlineShowInSplit, outlineSymbols.length])
 
@@ -5602,6 +5823,7 @@ export function ProjectEditor({
 
         setFileContent(content)
         fileContentRef.current = content
+        setOutlineContentSnapshot({ filePath: activeFilePathRef.current, content })
         originalContentRef.current = content
         originalModelVersionRef.current = null
         setIsDirty(false)
@@ -5681,6 +5903,12 @@ export function ProjectEditor({
     if (!canClose) return
     // Capture all scroll positions before final persist
     const scope = lastEditorScopeRef.current
+    const retainViewOnClose = shouldRetainProjectEditorViewOnClose({
+      hasActiveFile: Boolean(activeFilePathRef.current),
+      hasRootPath: Boolean(rootRef.current),
+      hasUnsavedChanges: dirtyRef.current,
+      hasMissingFileNotice: Boolean(missingFileNoticeRef.current)
+    })
     if (scope) {
       const treeEl = fileTreeContainerRef.current
       const treeKey = getScrollScopeKey(scope)
@@ -5688,10 +5916,14 @@ export function ProjectEditor({
         fileTreeScrollTopRef.current.set(treeKey, treeEl.scrollTop)
       }
       capturePreviewScrollMemory()
+      captureMarkdownSessionCacheRef.current(retainViewOnClose ? 'close-retain' : 'close')
       persistProjectEditorState(scope, { flush: true })
     }
+    retainedCloseScopeRef.current = retainViewOnClose ? scope : null
     skipClosePersistRef.current = true
-    resetActiveFileState()
+    if (!retainViewOnClose) {
+      resetActiveFileState()
+    }
     onClose()
   }, [capturePreviewScrollMemory, confirmDiscardChanges, onClose, persistProjectEditorState, resetActiveFileState])
 
@@ -5865,6 +6097,15 @@ export function ProjectEditor({
       isOpen: () => isOpenRef.current,
       getRootPath: () => rootRef.current,
       getActiveFilePath: () => activeFilePathRef.current,
+      isSelectFileEmptyStateVisible: () => {
+        if (!isOpenRef.current || activeFilePathRef.current) return false
+        const root: ParentNode = modalRef.current ?? document
+        return Boolean(
+          root.querySelector('.project-editor-editor-placeholder') ||
+          root.querySelector('.project-editor-editor-body > .project-editor-empty')
+        )
+      },
+      getLastProjectEditorReopenRestore: () => lastProjectEditorReopenRestoreRef.current,
       getSidebarMode: () => sidebarModeRef.current,
       setSidebarMode: (mode: 'files' | 'search') => {
         setSidebarMode(mode)
@@ -6884,6 +7125,7 @@ export function ProjectEditor({
         activeFilePathRef.current = null
         setFileContent('')
         fileContentRef.current = ''
+        setOutlineContentSnapshot({ filePath: null, content: '' })
         setIsBinary(false)
         isBinaryRef.current = false
         setIsImage(false)

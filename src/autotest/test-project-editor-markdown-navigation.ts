@@ -9,6 +9,7 @@ const SAMPLE_MARKDOWN_PATH = 'test/autotest/fixtures/dl_math_foundations.md'
 const HIGHLIGHT_FIXTURE_PATH = 'docs/api-reference.md'
 const OUTLINE_SCROLL_FIXTURE_PATH = 'docs/porting-diff-analysis.md'
 const OUTLINE_SCROLL_FIXTURE_TEXT = 'Porting Diff Analysis'
+const OUTLINE_SCROLL_MIN_SYMBOLS = 40
 const IMAGE_FIXTURE_PATH = 'test/autotest/fixtures/markdown-image-preview.md'
 const CODE_WRAP_FIXTURE_PATH = 'test/autotest/fixtures/markdown-code-wrap.md'
 const CODE_OUTLINE_FIXTURE_PATH = 'test/autotest/fixtures/outline-fixture.py'
@@ -248,14 +249,27 @@ export async function testProjectEditorMarkdownNavigation(ctx: AutotestContext):
   let savedMarkdownOutlineScroll = 0
   if (canManageOutline) {
     await getApi()?.openFileByPath?.(OUTLINE_SCROLL_FIXTURE_PATH)
-    const highlightOutlineReady = await waitForMarkdownFile(
+    const highlightOutlineReady = await waitFor(
       'pmn-highlight-outline-ready',
-      OUTLINE_SCROLL_FIXTURE_PATH,
-      OUTLINE_SCROLL_FIXTURE_TEXT
+      () => {
+        const current = getApi()
+        if (!current?.isOpen?.()) return false
+        if (current?.getActiveFilePath?.() !== OUTLINE_SCROLL_FIXTURE_PATH) return false
+        if (!current?.isMarkdownPreviewVisible?.()) return false
+        if (current?.isMarkdownRenderPending?.()) return false
+        const html = current?.getMarkdownRenderedHtml?.() ?? ''
+        return (
+          html.includes(OUTLINE_SCROLL_FIXTURE_TEXT) &&
+          (current?.getOutlineSymbolCount?.() ?? 0) >= OUTLINE_SCROLL_MIN_SYMBOLS
+        )
+      },
+      15000,
+      120
     )
     record('PMN-13-highlight-outline-ready', highlightOutlineReady, {
       activeFilePath: getApi()?.getActiveFilePath?.() ?? null,
-      symbolCount: getApi()?.getOutlineSymbolCount?.() ?? 0
+      symbolCount: getApi()?.getOutlineSymbolCount?.() ?? 0,
+      minSymbols: OUTLINE_SCROLL_MIN_SYMBOLS
     })
     if (!highlightOutlineReady || cancelled()) return results
 
@@ -430,6 +444,25 @@ export async function testProjectEditorMarkdownNavigation(ctx: AutotestContext):
   )
   record('PMN-27-preview-outline-api-available', canUsePreviewOutline)
   if (canUsePreviewOutline) {
+    const sampleOutlineReadyForPreviewTarget = await waitFor(
+      'pmn-sample-outline-ready-for-preview-target',
+      () => {
+        const current = getApi()
+        return Boolean(
+          current?.getActiveFilePath?.() === SAMPLE_MARKDOWN_PATH &&
+          current?.isOutlineVisible?.() &&
+          (current?.getOutlineSymbolCount?.() ?? 0) >= 3
+        )
+      },
+      5000,
+      80
+    )
+    record('PMN-28-sample-outline-ready-for-preview-target', sampleOutlineReadyForPreviewTarget, {
+      activeFilePath: getApi()?.getActiveFilePath?.() ?? null,
+      symbolCount: getApi()?.getOutlineSymbolCount?.() ?? 0
+    })
+    if (!sampleOutlineReadyForPreviewTarget || cancelled()) return results
+
     const beforeSlug = getApi()?.getPreviewActiveSlug?.() ?? null
     const previewScrollBeforeTrack = getApi()?.getPreviewScrollTop?.() ?? 0
     const previewScrollHeightBeforeTrack = getApi()?.getPreviewScrollHeight?.() ?? 0
@@ -447,7 +480,7 @@ export async function testProjectEditorMarkdownNavigation(ctx: AutotestContext):
       80
     )
     const afterSlug = getApi()?.getPreviewActiveSlug?.() ?? null
-    record('PMN-28-preview-scroll-updates-active-heading', previewTracked, {
+    record('PMN-29-preview-scroll-updates-active-heading', previewTracked, {
       beforeSlug,
       afterSlug,
       previewTargetFraction,
@@ -469,7 +502,8 @@ export async function testProjectEditorMarkdownNavigation(ctx: AutotestContext):
       5000,
       80
     )
-    record('PMN-29-outline-falls-back-to-preview-when-editor-hidden', clickedPreviewHeading && previewFallbackWorked, {
+    record('PMN-30-outline-falls-back-to-preview-when-editor-hidden', clickedPreviewHeading && previewFallbackWorked, {
+      clickedPreviewHeading,
       effectiveTarget: getApi()?.getOutlineEffectiveTarget?.() ?? null,
       effectiveTargetBeforeClick: previewTargetBeforeClick,
       previewScrollBeforeClick: Math.round(previewScrollBeforeClick),
@@ -485,7 +519,7 @@ export async function testProjectEditorMarkdownNavigation(ctx: AutotestContext):
     3000,
     60
   )
-  record('PMN-30-markdown-editor-restored-before-preview-close', editorRestoredBeforePreviewClose, {
+  record('PMN-31-markdown-editor-restored-before-preview-close', editorRestoredBeforePreviewClose, {
     editorVisible: getApi()?.isMarkdownEditorVisible?.(),
     previewVisible: getApi()?.isMarkdownPreviewVisible?.()
   })
@@ -501,7 +535,7 @@ export async function testProjectEditorMarkdownNavigation(ctx: AutotestContext):
     4000,
     80
   )
-  record('PMN-31-markdown-edit-mode-can-hide-preview', previewHidden, {
+  record('PMN-32-markdown-edit-mode-can-hide-preview', previewHidden, {
     editorVisible: getApi()?.isMarkdownEditorVisible?.(),
     previewVisible: getApi()?.isMarkdownPreviewVisible?.()
   })
@@ -522,7 +556,7 @@ export async function testProjectEditorMarkdownNavigation(ctx: AutotestContext):
       5000,
       80
     )
-    record('PMN-32-outline-falls-back-to-editor-when-preview-hidden', clickedEditorHeading && editorFallbackWorked, {
+    record('PMN-33-outline-falls-back-to-editor-when-preview-hidden', clickedEditorHeading && editorFallbackWorked, {
       effectiveTarget: getApi()?.getOutlineEffectiveTarget?.() ?? null,
       effectiveTargetBeforeClick: editorTargetBeforeClick,
       cursor: getApi()?.getCursorPosition?.() ?? null
@@ -532,14 +566,14 @@ export async function testProjectEditorMarkdownNavigation(ctx: AutotestContext):
 
   api?.setMarkdownPreviewVisible?.(true)
   const previewRestored = await waitForMarkdownFile('pmn-preview-restored', SAMPLE_MARKDOWN_PATH, 'Deep Learning Math Foundations')
-  record('PMN-33-markdown-preview-restored', previewRestored, {
+  record('PMN-34-markdown-preview-restored', previewRestored, {
     previewVisible: getApi()?.isMarkdownPreviewVisible?.(),
     htmlLength: getApi()?.getMarkdownRenderedHtml?.().length ?? 0
   })
   if (!previewRestored || cancelled()) return results
 
   const codeWrapFixture = await window.electronAPI.project.readFile(ctx.rootPath, CODE_WRAP_FIXTURE_PATH)
-  record('PMN-34-code-wrap-fixture-exists', codeWrapFixture.success, {
+  record('PMN-35-code-wrap-fixture-exists', codeWrapFixture.success, {
     path: CODE_WRAP_FIXTURE_PATH,
     error: codeWrapFixture.success ? null : codeWrapFixture.error
   })
@@ -547,7 +581,7 @@ export async function testProjectEditorMarkdownNavigation(ctx: AutotestContext):
 
   await getApi()?.openFileByPath?.(CODE_WRAP_FIXTURE_PATH)
   const codeWrapRendered = await waitForMarkdownFile('pmn-code-wrap-rendered', CODE_WRAP_FIXTURE_PATH, 'Markdown Code Wrap Fixture')
-  record('PMN-35-code-wrap-markdown-rendered', codeWrapRendered, {
+  record('PMN-36-code-wrap-markdown-rendered', codeWrapRendered, {
     activeFilePath: getApi()?.getActiveFilePath?.() ?? null,
     htmlLength: getApi()?.getMarkdownRenderedHtml?.().length ?? 0
   })
@@ -558,7 +592,7 @@ export async function testProjectEditorMarkdownNavigation(ctx: AutotestContext):
     api?.setMarkdownCodeWrapEnabled &&
     api?.getMarkdownCodeWrapState
   )
-  record('PMN-36-code-wrap-api-available', canToggleCodeWrap)
+  record('PMN-37-code-wrap-api-available', canToggleCodeWrap)
   if (canToggleCodeWrap) {
     api?.setMarkdownCodeWrapEnabled?.(false)
     const wrapDisabled = await waitFor(
@@ -575,7 +609,7 @@ export async function testProjectEditorMarkdownNavigation(ctx: AutotestContext):
       4000,
       80
     )
-    record('PMN-37-code-wrap-disabled-state', wrapDisabled, {
+    record('PMN-38-code-wrap-disabled-state', wrapDisabled, {
       state: getApi()?.getMarkdownCodeWrapState?.() ?? null
     })
     if (cancelled()) return results
@@ -596,19 +630,19 @@ export async function testProjectEditorMarkdownNavigation(ctx: AutotestContext):
       4000,
       80
     )
-    record('PMN-38-code-wrap-updates-inline-and-block-code', wrapEnabled, {
+    record('PMN-39-code-wrap-updates-inline-and-block-code', wrapEnabled, {
       state: getApi()?.getMarkdownCodeWrapState?.() ?? null
     })
     if (!wrapEnabled || cancelled()) return results
   }
 
   const reopened = await reopenProjectEditor('pmn-reopen-project-editor')
-  record('PMN-39-project-editor-reopened', reopened)
+  record('PMN-40-project-editor-reopened', reopened)
   if (!reopened || cancelled()) return results
 
   await getApi()?.openFileByPath?.(CODE_WRAP_FIXTURE_PATH)
   const wrapFixtureAfterReopen = await waitForMarkdownFile('pmn-code-wrap-after-reopen', CODE_WRAP_FIXTURE_PATH, 'Markdown Code Wrap Fixture')
-  record('PMN-40-code-wrap-fixture-opened-after-reopen', wrapFixtureAfterReopen, {
+  record('PMN-41-code-wrap-fixture-opened-after-reopen', wrapFixtureAfterReopen, {
     activeFilePath: getApi()?.getActiveFilePath?.() ?? null
   })
   if (!wrapFixtureAfterReopen || cancelled()) return results
@@ -627,7 +661,7 @@ export async function testProjectEditorMarkdownNavigation(ctx: AutotestContext):
       4000,
       80
     )
-    record('PMN-41-code-wrap-persists-after-project-editor-reopen', wrapPersistedAfterReopen, {
+    record('PMN-42-code-wrap-persists-after-project-editor-reopen', wrapPersistedAfterReopen, {
       state: getApi()?.getMarkdownCodeWrapState?.() ?? null
     })
   }
@@ -639,7 +673,7 @@ export async function testProjectEditorMarkdownNavigation(ctx: AutotestContext):
       OUTLINE_SCROLL_FIXTURE_PATH,
       OUTLINE_SCROLL_FIXTURE_TEXT
     )
-    record('PMN-42-highlight-opened-after-reopen', highlightAfterReopen, {
+    record('PMN-43-highlight-opened-after-reopen', highlightAfterReopen, {
       activeFilePath: getApi()?.getActiveFilePath?.() ?? null
     })
     if (!highlightAfterReopen || cancelled()) return results
@@ -654,7 +688,7 @@ export async function testProjectEditorMarkdownNavigation(ctx: AutotestContext):
       5000,
       80
     )
-    record('PMN-43-outline-restores-after-project-editor-reopen', outlineAfterReopen, {
+    record('PMN-44-outline-restores-after-project-editor-reopen', outlineAfterReopen, {
       savedScrollTop: Math.round(savedMarkdownOutlineScroll),
       restoredScrollTop: Math.round(getApi()?.getOutlineScrollTop?.() ?? 0)
     })
@@ -674,7 +708,7 @@ export async function testProjectEditorMarkdownNavigation(ctx: AutotestContext):
     3000,
     60
   )
-  record('PMN-44-markdown-editor-restored', editorRestored, {
+  record('PMN-45-markdown-editor-restored', editorRestored, {
     editorVisible: getApi()?.isMarkdownEditorVisible?.()
   })
 

@@ -23,6 +23,7 @@
 
 import { spawn } from 'node:child_process'
 import { readdir } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
 
@@ -30,6 +31,17 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = resolve(__dirname, '..', '..')
 const UNITTEST_DIR = resolve(REPO_ROOT, 'test', 'unittest')
 const PER_FILE_TIMEOUT_MS = 60_000
+const requireFromRunner = createRequire(import.meta.url)
+const RUNTIME_TEST_PACKAGES = [
+  {
+    name: 'typescript',
+    usedBy: [
+      'main-work-scheduler-unit.mjs',
+      'renderer-work-scheduler-unit.mjs',
+      'terminal-output-scheduler-unit.mjs',
+    ],
+  },
+]
 
 async function discoverUnitTests() {
   const entries = await readdir(UNITTEST_DIR, { withFileTypes: true })
@@ -37,6 +49,34 @@ async function discoverUnitTests() {
     .filter((e) => e.isFile() && (e.name.endsWith('.mjs') || e.name.endsWith('.mts')))
     .map((e) => e.name)
     .sort()
+}
+
+function packageInstalled(packageName) {
+  try {
+    requireFromRunner.resolve(`${packageName}/package.json`)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function runPreflight(files) {
+  const missing = []
+  for (const pkg of RUNTIME_TEST_PACKAGES) {
+    if (!pkg.usedBy.some((file) => files.includes(file))) continue
+    if (!packageInstalled(pkg.name)) missing.push(pkg)
+  }
+  if (missing.length === 0) return
+
+  console.error('ERROR: unit-test runtime dependencies are not installed.')
+  console.error(`Working dir: ${REPO_ROOT}`)
+  for (const pkg of missing) {
+    console.error(`  - Missing package "${pkg.name}" required by ${pkg.usedBy.join(', ')}`)
+  }
+  console.error('')
+  console.error('Install project dependencies first:')
+  console.error('  pnpm install --frozen-lockfile')
+  process.exit(1)
 }
 
 function runOne(file) {
@@ -75,6 +115,7 @@ async function main() {
     console.error(`ERROR: no unit-test files found under ${UNITTEST_DIR}`)
     process.exit(1)
   }
+  runPreflight(files)
 
   console.log(`=== Unit-test suite: ${files.length} file(s) ===`)
   console.log(`Working dir: ${REPO_ROOT}`)

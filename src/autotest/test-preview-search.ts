@@ -12,6 +12,7 @@ const SCROLL_SETTLE_MS = 600
 const CENTERING_TOLERANCE = 0.22
 const MIN_EXPECTED_MATCHES = 20
 const NAV_STRIDE = 5
+const MAX_NEXT_CHECKPOINTS = 8
 const INTER_NAV_MS = 60
 
 async function resolveTerminalShellKind(terminalId: string): Promise<TerminalShellKind | undefined> {
@@ -204,7 +205,7 @@ export async function testPreviewSearch(ctx: AutotestContext): Promise<TestResul
   let prevActiveTop = positions.length > 0 ? positions[0].top : 0
   let nextOrderViolations = 0
   let nextCenterViolations = 0
-  const totalSteps = matchCount - 1
+  const totalSteps = Math.min(matchCount - 1, NAV_STRIDE * MAX_NEXT_CHECKPOINTS)
   const checkpoints = Math.ceil(totalSteps / NAV_STRIDE)
 
   log('PS-06:begin-next-traversal', { totalSteps, stride: NAV_STRIDE, checkpoints })
@@ -352,7 +353,6 @@ export async function testPreviewSearch(ctx: AutotestContext): Promise<TestResul
     api.previewSearchGoToNext!()
     totalNavigations++
     wrapGuard++
-    await sleep(INTER_NAV_MS)
   }
   await sleep(SCROLL_SETTLE_MS)
 

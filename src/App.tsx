@@ -62,6 +62,10 @@ const DEBUG_TERMINAL_FOCUS = Boolean(window.electronAPI?.debug?.enabled)
 
 type SendAndExecuteDelayPlatform = AppInfo['platform']
 
+interface AppDebugApi {
+  triggerShortcutAction: (action: ShortcutAction) => boolean
+}
+
 interface SendAndExecuteDelayContext {
   platform: SendAndExecuteDelayPlatform
   platformVersion: string
@@ -1263,10 +1267,12 @@ function AppContent({
   const [projectEditorTerminalId, setProjectEditorTerminalId] = useState<string | null>(null)
   const [projectEditorCwd, setProjectEditorCwd] = useState<string | null>(null)
   const [projectEditorDirty, setProjectEditorDirty] = useState(false)
-  const [projectEditorOpenRequest, setProjectEditorOpenRequest] = useState<ProjectEditorOpenRequest | null>(null)
-  const projectEditorDebugOpenedRef = useRef(false)
-  const projectEditorProfileScenarioRef = useRef(false)
-  const projectEditorOpenRequestIdRef = useRef(0)
+	  const [projectEditorOpenRequest, setProjectEditorOpenRequest] = useState<ProjectEditorOpenRequest | null>(null)
+	  const projectEditorDebugOpenedRef = useRef(false)
+	  const projectEditorProfileScenarioRef = useRef(false)
+	  const projectEditorOpenRequestIdRef = useRef(0)
+	  const projectEditorOpenTokenRef = useRef(0)
+	  const lastProjectEditorOpenScopeRef = useRef<{ terminalId: string; cwd: string | null } | null>(null)
 
   const clearPanelBeforeSettings = useCallback(() => {
     panelBeforeSettingsByTabRef.current = {}
@@ -1372,11 +1378,11 @@ function AppContent({
     }
   }, [clearPanelBeforeSettings, getPanelBeforeSettings])
 
-  const handleOpenProjectEditor = useCallback(async (
-    terminalId: string,
-    options?: {
-      filePath?: string | null
-      repoRoot?: string | null
+	const handleOpenProjectEditor = useCallback(async (
+		terminalId: string,
+		options?: {
+			filePath?: string | null
+			repoRoot?: string | null
     }
   ) => {
     if (
@@ -1392,16 +1398,47 @@ function AppContent({
     const persistedCwd = state.tabs
       .flatMap((tab) => tab.terminals)
       .find((terminal) => terminal.id === terminalId)?.lastCwd ?? null
+    const requestedRepoRoot = typeof options?.repoRoot === 'string' && options.repoRoot.trim()
+      ? options.repoRoot
+      : null
+    const retainedScope = lastProjectEditorOpenScopeRef.current
+    const retainedCwd = retainedScope?.terminalId === terminalId
+      ? retainedScope.cwd
+      : null
+    const immediateCwd = requestedRepoRoot ?? retainedCwd
+    const openToken = ++projectEditorOpenTokenRef.current
+    if (activeTab?.terminals.some((terminal) => terminal.id === terminalId) && activeTab.activeTerminalId !== terminalId) {
+      updateActiveTab({ activeTerminalId: terminalId })
+    }
+    setLastFocusedTerminalId(terminalId)
     setProjectEditorTerminalId(terminalId)
-    setProjectEditorCwd(persistedCwd)
-    setProjectEditorOpen(true)
+    if (immediateCwd) {
+      setProjectEditorCwd(immediateCwd)
+      setProjectEditorOpen(true)
+    }
     try {
-      const resolvedCwd = await window.electronAPI.git.getTerminalCwd(terminalId) || persistedCwd
+      const resolvedTerminalCwd = requestedRepoRoot
+        ? requestedRepoRoot
+        : await window.electronAPI.git.getTerminalCwd(terminalId)
+      const resolvedCwd = resolvedTerminalCwd || immediateCwd || persistedCwd
+      if (projectEditorOpenTokenRef.current !== openToken) return
+      if (resolvedCwd) {
+        lastProjectEditorOpenScopeRef.current = { terminalId, cwd: resolvedCwd }
+        setTerminalLastCwd(terminalId, resolvedCwd)
+      }
       setProjectEditorCwd(resolvedCwd)
+      setProjectEditorOpen(true)
     } catch {
-      setProjectEditorCwd(persistedCwd)
+      if (projectEditorOpenTokenRef.current !== openToken) return
+      const fallbackCwd = immediateCwd || persistedCwd
+      if (fallbackCwd) {
+        lastProjectEditorOpenScopeRef.current = { terminalId, cwd: fallbackCwd }
+      }
+      setProjectEditorCwd(fallbackCwd)
+      setProjectEditorOpen(true)
     }
     if (typeof options?.filePath === 'string' && options.filePath.trim()) {
+      if (projectEditorOpenTokenRef.current !== openToken) return
       projectEditorOpenRequestIdRef.current += 1
       setProjectEditorOpenRequest({
         id: projectEditorOpenRequestIdRef.current,
@@ -1410,7 +1447,7 @@ function AppContent({
         repoRoot: options.repoRoot ?? null
       })
     }
-  }, [projectEditorOpen, projectEditorTerminalId, projectEditorDirty, state.tabs, t])
+  }, [activeTab, projectEditorOpen, projectEditorTerminalId, projectEditorDirty, setLastFocusedTerminalId, setTerminalLastCwd, state.tabs, t, updateActiveTab])
 
   // Debug profile: Automatically execute ProjectEditor <-> Git Diff loop to facilitate CPU sampling
   useEffect(() => {
@@ -1490,20 +1527,27 @@ function AppContent({
       if (!debugCwd) {
         console.warn('[ProjectEditorDebug] skipped auto open: failed to resolve cwd')
         return
-      }
-      projectEditorDebugOpenedRef.current = true
-      console.log('[ProjectEditorDebug] auto open project editor', firstTerminal.id, debugCwd)
-      window.electronAPI.debug.log('App:autoOpenProjectEditor', { terminalId: firstTerminal.id, cwd: debugCwd })
-      setProjectEditorTerminalId(firstTerminal.id)
-      setProjectEditorCwd(debugCwd)
-      setProjectEditorOpen(true)
-    })()
-  }, [activeTab, isLoaded, projectEditorOpen])
+	      }
+	      projectEditorDebugOpenedRef.current = true
+	      console.log('[ProjectEditorDebug] auto open project editor', firstTerminal.id, debugCwd)
+	      window.electronAPI.debug.log('App:autoOpenProjectEditor', { terminalId: firstTerminal.id, cwd: debugCwd })
+	      if (activeTab.activeTerminalId !== firstTerminal.id) {
+	        updateActiveTab({ activeTerminalId: firstTerminal.id })
+	      }
+	      setLastFocusedTerminalId(firstTerminal.id)
+	      projectEditorOpenTokenRef.current += 1
+	      lastProjectEditorOpenScopeRef.current = { terminalId: firstTerminal.id, cwd: debugCwd }
+	      setProjectEditorTerminalId(firstTerminal.id)
+	      setProjectEditorCwd(debugCwd)
+	      setProjectEditorOpen(true)
+	    })()
+	  }, [activeTab, isLoaded, projectEditorOpen, setLastFocusedTerminalId, updateActiveTab])
 
-  const handleCloseProjectEditor = useCallback(() => {
-    setProjectEditorOpen(false)
-    setProjectEditorTerminalId(null)
-    setProjectEditorCwd(null)
+	  const handleCloseProjectEditor = useCallback(() => {
+	    projectEditorOpenTokenRef.current += 1
+	    setProjectEditorOpen(false)
+	    setProjectEditorTerminalId(null)
+	    setProjectEditorCwd(null)
     setProjectEditorDirty(false)
     setProjectEditorOpenRequest(null)
   }, [])
@@ -1525,29 +1569,28 @@ function AppContent({
   }, [registerTryCloseSettingsOnSwitch, handleTryCloseSettingsOnSwitch])
 
   // Restore focus when ProjectEditor or Settings panel closes
-  const prevProjectEditorOpenRef = useRef(projectEditorOpen)
-  const projectEditorTerminalIdRef = useRef(projectEditorTerminalId)
-  const prevShowSettingsRef = useRef(showSettings)
-  const prevShowChangeLogRef = useRef(showChangeLog)
-  const prevShowFeedbackModalRef = useRef(showFeedbackModal)
+	  const prevProjectEditorOpenRef = useRef(projectEditorOpen)
+	  const prevShowSettingsRef = useRef(showSettings)
+	  const prevShowChangeLogRef = useRef(showChangeLog)
+	  const prevShowFeedbackModalRef = useRef(showFeedbackModal)
 
-  useEffect(() => {
-    projectEditorTerminalIdRef.current = projectEditorTerminalId
-  }, [projectEditorTerminalId])
-
-  useEffect(() => {
-    const wasOpen = prevProjectEditorOpenRef.current
-    prevProjectEditorOpenRef.current = projectEditorOpen
-    if (wasOpen && !projectEditorOpen) {
-      // Restore focus to the terminal that opened the editor
-      const terminalId = projectEditorTerminalIdRef.current ?? activeTab?.activeTerminalId
-      if (terminalId) {
-        requestAnimationFrame(() => {
-          terminalSessionManager.focusIfNeeded(terminalId)
-        })
-      }
-    }
-  }, [projectEditorOpen, activeTab?.activeTerminalId])
+	  useEffect(() => {
+	    const wasOpen = prevProjectEditorOpenRef.current
+	    prevProjectEditorOpenRef.current = projectEditorOpen
+	    if (wasOpen && !projectEditorOpen) {
+	      const terminalId = lastProjectEditorOpenScopeRef.current?.terminalId ?? activeTab?.activeTerminalId
+	      if (terminalId) {
+	        setLastFocusOwner('terminal')
+	        setLastFocusedTerminalId(terminalId)
+	        if (activeTab?.terminals.some((terminal) => terminal.id === terminalId) && activeTab.activeTerminalId !== terminalId) {
+	          updateActiveTab({ activeTerminalId: terminalId })
+	        }
+	        requestAnimationFrame(() => {
+	          terminalSessionManager.focusIfNeeded(terminalId)
+	        })
+	      }
+	    }
+	  }, [activeTab, projectEditorOpen, setLastFocusedTerminalId, setLastFocusOwner, updateActiveTab])
 
   useEffect(() => {
     const wasOpen = prevShowSettingsRef.current
@@ -2053,6 +2096,23 @@ function SettingsProviderWithHandler() {
       }
     }
   }, [activeTab, state.tabs, switchTab, updateActiveTab, getLastFocusedTerminalId, setLastFocusedTerminalId, setLastFocusOwner, closeSettings, tryCloseSettingsOnSwitch, focusEditor, submitEditor, requestTerminalFocus])
+
+  useEffect(() => {
+    if (!window.electronAPI?.debug?.autotest) return
+    const debugWindow = window as Window & { __onwardAppDebug?: AppDebugApi }
+    const api: AppDebugApi = {
+      triggerShortcutAction: (action) => {
+        handleShortcutAction(action)
+        return true
+      }
+    }
+    debugWindow.__onwardAppDebug = api
+    return () => {
+      if (debugWindow.__onwardAppDebug === api) {
+        delete debugWindow.__onwardAppDebug
+      }
+    }
+  }, [handleShortcutAction])
 
   const restoreLastFocus = useCallback((reason: TerminalFocusRestoreReason) => {
     if (!activeTab) return

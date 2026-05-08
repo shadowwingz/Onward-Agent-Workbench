@@ -150,13 +150,13 @@ point at files under `test/unittest/`.
 | Feature / Bug | Tests |
 |---|---|
 | Markdown preview renders highlight / image / outline | `run-project-editor-markdown-navigation` (PMN-01..09) |
-| Outline scroll memory across switches and reopens | `run-project-editor-markdown-navigation` (PMN-13..17, PMN-39..43) |
+| Outline scroll memory across switches and reopens | `run-project-editor-markdown-navigation` (PMN-13..17, PMN-40..44) |
 | Code-outline (TS / py) symbols + scroll memory | `run-project-editor-markdown-navigation` (PMN-18..23) |
 | Read mode keeps preview open on edit toggle | `run-project-editor-markdown-navigation` (PMN-24) |
-| Outline target falls back between editor / preview when one is hidden | `run-project-editor-markdown-navigation` (PMN-27..33) |
-| Code-wrap preference (inline + block, persists across reopen) | `run-project-editor-markdown-navigation` (PMN-34..44) |
-| Markdown session restore (last file + section + mode) | `run-project-editor-markdown-session-restore` (PMSR-*) |
-| Markdown preview reveal latency (cache-hit fast path vs cache-miss safety net, 3 fixture sizes) | `run-markdown-preview-latency` (MPL-*) + unit `preview-restore-settle` (PRS-U-*) |
+| Outline target falls back between editor / preview when one is hidden | `run-project-editor-markdown-navigation` (PMN-27..34) |
+| Code-wrap preference (inline + block, persists across reopen) | `run-project-editor-markdown-navigation` (PMN-35..45) |
+| Markdown session restore (last file + section + mode, ESC close + shortcut reopen shell/body sync) | `run-project-editor-markdown-session-restore` (PMSR-*) |
+| Markdown preview reveal latency (cache-miss + cache-hit fast path, 3 fixture sizes) | `run-markdown-preview-latency` (MPL-*) + unit `preview-restore-settle` (PRS-U-*) |
 | Markdown LaTeX (KaTeX) rendering in preview | `run-markdown-latex-preview` (MLP-*) |
 | Mermaid pan / zoom / fullscreen in preview | `run-mermaid-panzoom` (MPZ-01..02) |
 | Preview position restore across file switch (incl. Mermaid layout) | `run-preview-position-restore` (PPR-01..12) |

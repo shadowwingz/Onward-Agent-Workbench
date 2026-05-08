@@ -11,6 +11,29 @@ const TARGET_HEADING = `4.2 Anthropic: ${TARGET_HEADING_TOPIC}`
 const TARGET_HEADING_SLUG = `42-anthropic-${String.fromCharCode(21452)}-agent-${String.fromCharCode(36328, 20250, 35805, 26550, 26500)}`
 const TARGET_MIN_LINE = 260
 const FALLBACK_TARGET_LINE = 70
+const SHORTCUT_REOPEN_TRIALS = 5
+const SHORTCUT_REOPEN_SAMPLE_MS = 500
+
+type ProjectEditorReopenRestore = {
+  durationMs: number
+  cause: 'retained-view' | 'persisted-state'
+  filePath: string | null
+  markdownCacheMode: 'hit' | 'miss' | 'stale' | 'disabled' | null
+  finalizedAt: number
+} | null
+
+interface ShortcutReopenObservation {
+  trial: number
+  triggered: boolean
+  reopened: boolean
+  previewReady: boolean
+  selectFileEmptyStateSamples: number
+  bodyBeforeShellSamples: number
+  bodyVisibleSamples: number
+  shellVisibleSamples: number
+  totalSamples: number
+  reopenRestore: ProjectEditorReopenRestore
+}
 
 function buildFallbackMarkdownContent(): string {
   const lines: string[] = [
@@ -43,7 +66,7 @@ function buildFallbackMarkdownContent(): string {
 }
 
 export async function testProjectEditorMarkdownSessionRestore(ctx: AutotestContext): Promise<TestResult[]> {
-  const { assert, cancelled, log, reopenProjectEditor, rootPath, sleep, waitFor } = ctx
+  const { assert, cancelled, log, rootPath, sleep, waitFor } = ctx
   const results: TestResult[] = []
   const record = (name: string, ok: boolean, detail?: Record<string, unknown>) => {
     assert(name, ok, detail)
@@ -96,6 +119,66 @@ export async function testProjectEditorMarkdownSessionRestore(ctx: AutotestConte
       8000,
       100
     )
+  }
+  const sampleShortcutReopenFrames = async (durationMs: number) => {
+    const samples: Array<{
+      selectFileEmptyStateVisible: boolean
+      shellVisible: boolean
+      bodyVisible: boolean
+    }> = []
+    const waitForSampleTick = () => new Promise<void>((resolve) => {
+      let resolved = false
+      const finish = () => {
+        if (resolved) return
+        resolved = true
+        resolve()
+      }
+      requestAnimationFrame(finish)
+      window.setTimeout(finish, 32)
+    })
+    const startedAt = performance.now()
+    while (performance.now() - startedAt < durationMs) {
+      const host = document.querySelector('.terminal-grid-subpage-host.is-open')
+      const shellVisible = Boolean(host?.querySelector('[data-subpage-panel-shell="true"]'))
+      const bodyVisible = Boolean(host?.querySelector('.project-editor-overlay.panel.is-open .project-editor-body'))
+      samples.push({
+        selectFileEmptyStateVisible: Boolean(getApi()?.isSelectFileEmptyStateVisible?.()),
+        shellVisible,
+        bodyVisible
+      })
+      await waitForSampleTick()
+    }
+    return samples
+  }
+  const reopenProjectEditorViaShortcut = async (trial: number): Promise<ShortcutReopenObservation> => {
+    const samplesPromise = sampleShortcutReopenFrames(SHORTCUT_REOPEN_SAMPLE_MS)
+    const triggered = window.__onwardAppDebug?.triggerShortcutAction?.({ type: 'terminalProjectEditor' }) === true
+    const reopened = await waitFor(
+      `pmsr-project-editor-shortcut-reopen-${trial}`,
+      () => Boolean(getApi()?.isOpen?.()),
+      8000,
+      80
+    )
+    const samples = await samplesPromise
+    const previewReady = reopened
+      ? await waitForPreviewReady(`pmsr-preview-ready-after-shortcut-reopen-${trial}`, targetPath)
+      : false
+    const selectFileEmptyStateSamples = samples.filter(sample => sample.selectFileEmptyStateVisible).length
+    const bodyBeforeShellSamples = samples.filter(sample => sample.bodyVisible && !sample.shellVisible).length
+    const bodyVisibleSamples = samples.filter(sample => sample.bodyVisible).length
+    const shellVisibleSamples = samples.filter(sample => sample.shellVisible).length
+    return {
+      trial,
+      triggered,
+      reopened,
+      previewReady,
+      selectFileEmptyStateSamples,
+      bodyBeforeShellSamples,
+      bodyVisibleSamples,
+      shellVisibleSamples,
+      totalSamples: samples.length,
+      reopenRestore: getApi()?.getLastProjectEditorReopenRestore?.() ?? null
+    }
   }
 
   let targetPath = HARNESS_MARKDOWN_PATH
@@ -214,11 +297,38 @@ export async function testProjectEditorMarkdownSessionRestore(ctx: AutotestConte
     })
     if (!closed || cancelled()) return results
 
-    const reopened = await reopenProjectEditor('pmsr-project-editor-reopen')
-    record('PMSR-08-project-editor-reopened', reopened, {
-      isOpen: getApi()?.isOpen?.() ?? false
+    const canUseShortcutDebug = Boolean(window.__onwardAppDebug?.triggerShortcutAction)
+    record('PMSR-07a-shortcut-debug-api-available', canUseShortcutDebug, {
+      hasAppDebug: Boolean(window.__onwardAppDebug),
+      hasTriggerShortcutAction: Boolean(window.__onwardAppDebug?.triggerShortcutAction)
     })
-    if (!reopened || cancelled()) return results
+    if (!canUseShortcutDebug || cancelled()) return results
+
+    const shortcutReopenObservations: ShortcutReopenObservation[] = []
+    const firstShortcutReopen = await reopenProjectEditorViaShortcut(1)
+    shortcutReopenObservations.push(firstShortcutReopen)
+    record('PMSR-08-project-editor-reopened-by-shortcut', firstShortcutReopen.triggered && firstShortcutReopen.reopened, {
+      isOpen: getApi()?.isOpen?.() ?? false,
+      observation: firstShortcutReopen
+    })
+    if (!firstShortcutReopen.reopened || cancelled()) return results
+    const reopenRestore = firstShortcutReopen.reopenRestore
+    record('PMSR-08a-no-select-file-empty-state-during-shortcut-reopen', firstShortcutReopen.selectFileEmptyStateSamples === 0, {
+      selectFileEmptyStateSamples: firstShortcutReopen.selectFileEmptyStateSamples,
+      totalSamples: firstShortcutReopen.totalSamples,
+      activeFilePath: getApi()?.getActiveFilePath?.() ?? null,
+      reopenRestore
+    })
+    record('PMSR-08b-shortcut-reopen-used-retained-markdown-view', reopenRestore?.cause === 'retained-view' && reopenRestore.filePath === targetPath, {
+      reopenRestore,
+      expectedFilePath: targetPath
+    })
+    record('PMSR-08c-shortcut-reopen-shell-before-body', firstShortcutReopen.bodyVisibleSamples > 0 && firstShortcutReopen.bodyBeforeShellSamples === 0, {
+      bodyBeforeShellSamples: firstShortcutReopen.bodyBeforeShellSamples,
+      bodyVisibleSamples: firstShortcutReopen.bodyVisibleSamples,
+      shellVisibleSamples: firstShortcutReopen.shellVisibleSamples,
+      totalSamples: firstShortcutReopen.totalSamples
+    })
 
     const restoredPreview = await waitForPreviewReady('pmsr-preview-restored-after-reopen', targetPath)
     record('PMSR-09-target-file-and-mode-restored', restoredPreview && getApi()?.isMarkdownEditorVisible?.() === true, {
@@ -265,6 +375,44 @@ export async function testProjectEditorMarkdownSessionRestore(ctx: AutotestConte
       cacheEntry,
       cacheSize: cacheState?.size ?? null,
       cacheLimit: cacheState?.limit ?? null
+    })
+
+    for (let trial = 2; trial <= SHORTCUT_REOPEN_TRIALS; trial += 1) {
+      if (cancelled()) return results
+      const closedForTrial = await closeProjectEditor(`pmsr-project-editor-closed-shortcut-repeat-${trial}`)
+      if (!closedForTrial) {
+        shortcutReopenObservations.push({
+          trial,
+          triggered: false,
+          reopened: false,
+          previewReady: false,
+          selectFileEmptyStateSamples: -1,
+          bodyBeforeShellSamples: -1,
+          bodyVisibleSamples: 0,
+          shellVisibleSamples: 0,
+          totalSamples: 0,
+          reopenRestore: null
+        })
+        break
+      }
+      const observation = await reopenProjectEditorViaShortcut(trial)
+      shortcutReopenObservations.push(observation)
+      if (!observation.reopened || !observation.previewReady) break
+    }
+    const repeatedShortcutPathOk =
+      shortcutReopenObservations.length === SHORTCUT_REOPEN_TRIALS &&
+      shortcutReopenObservations.every((observation) =>
+        observation.triggered &&
+        observation.reopened &&
+        observation.previewReady &&
+        observation.selectFileEmptyStateSamples === 0 &&
+        observation.bodyVisibleSamples > 0 &&
+        observation.bodyBeforeShellSamples === 0 &&
+        observation.reopenRestore?.cause === 'retained-view' &&
+        observation.reopenRestore.filePath === targetPath
+      )
+    record('PMSR-13-escape-and-shortcut-reopen-repeat', repeatedShortcutPathOk, {
+      trials: shortcutReopenObservations
     })
   } finally {
     for (const cleanupPath of cleanupPaths) {

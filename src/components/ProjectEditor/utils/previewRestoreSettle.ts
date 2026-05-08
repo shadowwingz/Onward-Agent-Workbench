@@ -6,10 +6,9 @@
 /**
  * Pure-logic helper for the preview-restore phase machine.
  *
- * `isPreviewWorkPending` answers: should `queuePreviewReveal` install the
- * conservative safety timer (work might still produce more state changes)
- * or take the fast path (everything is already settled, finalize on the
- * next paint frame)?
+ * `isPreviewWorkPending` answers: should `queuePreviewReveal` keep waiting
+ * for a render/mermaid/layout event (work might still produce more state
+ * changes), or take the fast path because everything is already settled?
  *
  * Locked down by test/unittest/preview-restore-settle.test.mts.
  */

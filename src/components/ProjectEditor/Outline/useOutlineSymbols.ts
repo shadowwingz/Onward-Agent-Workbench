@@ -6,12 +6,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { OutlineItem } from './types'
 import { parseOutlineSymbols } from './outlineParser'
+import { resolveOutlineParseSource } from './outlineParseSource'
 
 const DEBOUNCE_MS = 400
 
 export interface UseOutlineSymbolsOptions {
   editor: import('monaco-editor').editor.IStandaloneCodeEditor | null
   filePath: string | null
+  contentPath?: string | null
   content: string
   isVisible: boolean
 }
@@ -51,6 +53,7 @@ function findNearestSymbolForLine(items: OutlineItem[], line: number): OutlineIt
 export function useOutlineSymbols({
   editor,
   filePath,
+  contentPath,
   content,
   isVisible,
 }: UseOutlineSymbolsOptions): UseOutlineSymbolsResult {
@@ -88,18 +91,32 @@ export function useOutlineSymbols({
     timerRef.current = window.setTimeout(() => {
       timerRef.current = null
       const model = editor?.getModel() ?? null
+      const source = resolveOutlineParseSource({
+        filePath,
+        contentPath: contentPath ?? filePath,
+        content,
+        model
+      })
+      if (!source.ready) {
+        if (currentToken !== tokenRef.current) return
+        setSymbols([])
+        symbolsRef.current = []
+        setIsLoading(true)
+        return
+      }
 
-      // Read live content from the editor model so the outline reflects
-      // in-progress edits, not the stale `content` state prop.
-      const currentContent = model?.getValue() ?? content
-      void parseOutlineSymbols(currentContent, filePath, model).then((result) => {
+      void parseOutlineSymbols(
+        source.content,
+        filePath,
+        source.model as import('monaco-editor').editor.ITextModel | null
+      ).then((result) => {
         if (currentToken !== tokenRef.current) return
         setSymbols(result)
         symbolsRef.current = result
         setIsLoading(false)
       })
     }, delay)
-  }, [isVisible, filePath, content, editor])
+  }, [isVisible, filePath, contentPath, content, editor])
 
   // Keep a ref to the latest triggerParse so the model-content listener
   // always calls the current version without needing it as a dependency.
@@ -123,6 +140,14 @@ export function useOutlineSymbols({
   useEffect(() => {
     if (!editor) return
     const disposable = editor.onDidChangeModelContent(() => {
+      triggerParseRef.current()
+    })
+    return () => disposable.dispose()
+  }, [editor])
+
+  useEffect(() => {
+    if (!editor) return
+    const disposable = editor.onDidChangeModel(() => {
       triggerParseRef.current()
     })
     return () => disposable.dispose()

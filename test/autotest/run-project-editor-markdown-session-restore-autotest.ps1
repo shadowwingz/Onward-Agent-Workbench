@@ -53,6 +53,9 @@ if ($content -match 'totalFailed: [1-9]') {
 if ($content -notmatch 'PMSR-11-editor-section-restored-after-reopen') {
   Write-Error "Missing PMSR-11 result; the test may not have executed correctly. Log: $LogFile"
 }
+if ($content -notmatch 'PMSR-13-escape-and-shortcut-reopen-repeat') {
+  Write-Error "Missing PMSR-13 shortcut reopen repeat result; the high-frequency shortcut path may not have executed. Log: $LogFile"
+}
 
 Write-Host 'Project Editor Markdown session restore autotest passed'
 Write-Host "  Log: $LogFile"

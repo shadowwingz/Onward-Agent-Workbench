@@ -7,9 +7,15 @@
  * Automated test sharing type definition
  */
 
+import type { ShortcutAction } from '../types/settings.d.ts'
+
 // ============================================================
 // Debug API interface
 // ============================================================
+
+export interface AppDebugApi {
+  triggerShortcutAction: (action: ShortcutAction) => boolean
+}
 
 export interface GitDiffDebugApi {
   isOpen: () => boolean
@@ -239,6 +245,14 @@ export interface ProjectEditorDebugApi {
   isOpen: () => boolean
   getRootPath: () => string | null
   getActiveFilePath: () => string | null
+  isSelectFileEmptyStateVisible?: () => boolean
+  getLastProjectEditorReopenRestore?: () => {
+    durationMs: number
+    cause: 'retained-view' | 'persisted-state'
+    filePath: string | null
+    markdownCacheMode: 'hit' | 'miss' | 'stale' | 'disabled' | null
+    finalizedAt: number
+  } | null
   getSidebarMode?: () => 'files' | 'search'
   setSidebarMode?: (mode: 'files' | 'search') => void
   getEditorContent: () => string
@@ -395,7 +409,7 @@ export interface ProjectEditorDebugApi {
   getPreviewRestorePhase?: () => 'idle' | 'waiting-html' | 'restoring-layout' | 'revealing'
   getLastPreviewReveal?: () => {
     durationMs: number
-    cause: 'fast-path' | 'safety-net'
+    cause: 'fast-path'
     hadWork: boolean
     finalizedAt: number
   } | null
@@ -677,6 +691,7 @@ declare global {
     __onwardGitHistoryDebug?: GitHistoryDebugApi
     __onwardPromptNotebookDebug?: PromptNotebookDebugApi
     __onwardProjectEditorDebug?: ProjectEditorDebugApi
+    __onwardAppDebug?: AppDebugApi
     __onwardSettingsDebug?: SettingsDebugApi
     __onwardChangeLogDebug?: ChangeLogDebugApi
     __onwardTerminalFocusDebug?: TerminalFocusDebugApi

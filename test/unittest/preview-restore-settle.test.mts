@@ -3,18 +3,18 @@
  * SPDX-License-Identifier: Apache-2.0
  *
  * Unit tests for isPreviewWorkPending(): the pure-logic decision that
- * picks between the fast path (setTimeout(0) → phase:idle) and the
- * safety net (setTimeout(1300ms) → phase:idle) inside
+ * picks between the fast path (setTimeout(0) -> phase:idle) and waiting
+ * for the next render/mermaid/layout event inside
  * `ProjectEditor.tsx::queuePreviewReveal::settleReveal`. Pair with the
  * autotest suite `run-markdown-preview-latency` which exercises the
  * same decision through the live React component against three
  * representative markdown source sizes.
  *
- * The truth table is simple: any single signal "still working" forces
- * the safety net; only when every signal is idle do we take the fast
- * path. This unit test enumerates every reachable combination so a
- * future refactor that drops a signal (and thus the fast path silently
- * starts firing while work is still in flight) fails loudly here.
+ * The truth table is simple: any single signal "still working" delays
+ * reveal; only when every signal is idle do we take the fast path. This
+ * unit test enumerates every reachable combination so a future refactor
+ * that drops a signal (and thus the fast path silently starts firing
+ * while work is still in flight) fails loudly here.
  *
  * Usage:
  *   node --experimental-strip-types --test test/unittest/preview-restore-settle.test.mts
@@ -41,28 +41,28 @@ test('PRS-U-01 all idle → fast path (returns false)', () => {
   assert.equal(isPreviewWorkPending(idleSignals), false)
 })
 
-// ─────────────── PRS-U-02: each individual signal forces safety net ───────────────
-test('PRS-U-02 markdownRenderPending → safety net', () => {
+// ─────────────── PRS-U-02: each individual signal delays reveal ───────────────
+test('PRS-U-02 markdownRenderPending delays reveal', () => {
   assert.equal(isPreviewWorkPending({ ...idleSignals, markdownRenderPending: true }), true)
 })
 
-test('PRS-U-03 workerInFlight → safety net', () => {
+test('PRS-U-03 workerInFlight delays reveal', () => {
   assert.equal(isPreviewWorkPending({ ...idleSignals, workerInFlight: true }), true)
 })
 
-test('PRS-U-04 workerQueued → safety net', () => {
+test('PRS-U-04 workerQueued delays reveal', () => {
   assert.equal(isPreviewWorkPending({ ...idleSignals, workerQueued: true }), true)
 })
 
-test('PRS-U-05 mermaidPending=1 → safety net', () => {
+test('PRS-U-05 mermaidPending=1 delays reveal', () => {
   assert.equal(isPreviewWorkPending({ ...idleSignals, mermaidPending: 1 }), true)
 })
 
-test('PRS-U-06 mermaidPending=10 → safety net', () => {
+test('PRS-U-06 mermaidPending=10 delays reveal', () => {
   assert.equal(isPreviewWorkPending({ ...idleSignals, mermaidPending: 10 }), true)
 })
 
-test('PRS-U-07 mermaidInFlight → safety net', () => {
+test('PRS-U-07 mermaidInFlight delays reveal', () => {
   assert.equal(isPreviewWorkPending({ ...idleSignals, mermaidInFlight: true }), true)
 })
 
@@ -72,14 +72,14 @@ test('PRS-U-08 mermaidPending=0 alone is not work', () => {
 })
 
 // ─────────────── PRS-U-09: every combination of two signals is still work ───────────────
-test('PRS-U-09 markdownRenderPending + workerInFlight → safety net', () => {
+test('PRS-U-09 markdownRenderPending + workerInFlight delays reveal', () => {
   assert.equal(
     isPreviewWorkPending({ ...idleSignals, markdownRenderPending: true, workerInFlight: true }),
     true
   )
 })
 
-test('PRS-U-10 workerQueued + mermaidInFlight → safety net', () => {
+test('PRS-U-10 workerQueued + mermaidInFlight delays reveal', () => {
   assert.equal(
     isPreviewWorkPending({ ...idleSignals, workerQueued: true, mermaidInFlight: true }),
     true

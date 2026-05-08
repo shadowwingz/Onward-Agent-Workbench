@@ -319,7 +319,7 @@ export const TerminalGrid = memo(function TerminalGrid({
   // `!previous.editor === true` and clobbered activeSubpage='diff' with
   // 'editor' (SN-05 reproduction). The new logic only picks a panel when the
   // current activeSubpage points to a closed panel.
-  useEffect(() => {
+  useLayoutEffect(() => {
     const currentStillOpen = (
       activeSubpage === 'diff' ? gitDiffOpen :
       activeSubpage === 'history' ? gitHistoryOpen :
@@ -335,12 +335,21 @@ export const TerminalGrid = memo(function TerminalGrid({
 
   const activePanelShellState = activeSubpage ? panelShellStates[activeSubpage] ?? null : null
   const lastPanelShellStateRef = useRef<SubpagePanelShellState | null>(null)
-  if (activePanelShellState) {
+  const lastPanelShellStateBySubpageRef = useRef<Partial<Record<SubpageId, SubpagePanelShellState>>>({})
+  if (activeSubpage && activePanelShellState) {
     lastPanelShellStateRef.current = activePanelShellState
+    lastPanelShellStateBySubpageRef.current[activeSubpage] = activePanelShellState
   } else if (!anySubpageOpen) {
     lastPanelShellStateRef.current = null
   }
-  const renderedPanelShellState = activePanelShellState ?? (anySubpageOpen ? lastPanelShellStateRef.current : null)
+  const retainedPanelShellState = activeSubpage
+    ? lastPanelShellStateBySubpageRef.current[activeSubpage] ?? null
+    : null
+  const renderedPanelShellState = activePanelShellState ?? (
+    anySubpageOpen
+      ? retainedPanelShellState ?? lastPanelShellStateRef.current
+      : null
+  )
   const activeSubpageSelect = activePanelShellState?.onSelect
 
   useEffect(() => {
@@ -1936,11 +1945,17 @@ export const TerminalGrid = memo(function TerminalGrid({
           return
         }
         if (!projectEditorOpenInGrid) {
+          setActiveSubpage('editor')
+          perfTrace(PERF_TRACE_EVENT.RENDERER_SUBPAGE_FRESHNESS_CHECK, {
+            subpage: 'editor',
+            cwd: getPersistedTerminalCwd(shortcutAction.terminalId),
+            reason: 'open'
+          })
           onOpenProjectEditor(shortcutAction.terminalId)
         }
         break
     }
-  }, [shortcutAction, hidden, visibleTerminals, handleViewGitDiff, handleViewGitHistory, handleChangeWorkDir, handleOpenWorkDir, onOpenProjectEditor, anySubpageOpen, activeSubpage, activeSubpageSelect, gitDiffOpen, gitHistoryOpen, projectEditorOpenInGrid])
+  }, [shortcutAction, hidden, visibleTerminals, handleViewGitDiff, handleViewGitHistory, handleChangeWorkDir, handleOpenWorkDir, onOpenProjectEditor, anySubpageOpen, activeSubpage, activeSubpageSelect, gitDiffOpen, gitHistoryOpen, projectEditorOpenInGrid, getPersistedTerminalCwd])
 
   const handleTerminalFocus = useCallback((terminalId: string, event?: React.MouseEvent) => {
     // Skip focus steal when click originates inside a browser panel

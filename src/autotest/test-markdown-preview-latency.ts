@@ -9,10 +9,10 @@
  * Pairs with `test/unittest/preview-restore-settle.test.mts` (pure-logic
  * truth table for `isPreviewWorkPending`).
  *
- * Goal: prove the Solution C event-driven settle in
+ * Goal: prove the event-driven settle in
  * `ProjectEditor.tsx::queuePreviewReveal` actually shrinks the
- * preview-restore phase machine on cache hits — the user-perceptible
- * "loading dots" window — across three representative document sizes.
+ * preview-restore phase machine for both cache misses and cache hits
+ * across three representative document sizes.
  *
  * What this exercises: open file (cache miss) → wait for reveal to
  * settle, capture `lastPreviewReveal.durationMs`. Then close preview
@@ -27,11 +27,9 @@
  * locks the actual phase-machine cost rather than total open-file
  * latency dominated by IPC and worker spawn.
  *
- * Three trials per fixture, take the median, assert
- * `cacheHit < cacheMiss * 0.5` (a 2× speedup is the floor; the
- * implementation should land ~3-30× depending on file size). Plus a
- * generous absolute floor of 500 ms on cache-hit so a fully-broken
- * phase machine still fails.
+ * Three trials per fixture, aggregate inside the test, and assert both
+ * cache-miss and cache-hit reveal under their budgets. A fully-broken
+ * phase machine that reintroduces a fixed wait fails here.
  */
 
 import type { AutotestContext, TestResult } from './types'
@@ -52,10 +50,9 @@ const TRIALS_PER_FIXTURE = 3
 // Cache-hit reveal — the user-reported scenario. The cache-hit fast
 // path skips the legacy safety timer; empirically lands at 5-30 ms.
 const CACHE_HIT_BUDGET_MS = 100
-// Cache-miss reveal — keeps the legacy ~1300 ms safety net. Removing
-// it would expose latent races in `useOutlineSymbols` (Monaco model
-// swap) and the outline DOM restore. Budget 1500 ms with headroom.
-const CACHE_MISS_BUDGET_MS = 1500
+// Cache-miss reveal should also skip the old fixed wait after the
+// outline model-swap race is fixed. Budget agreed for this change.
+const CACHE_MISS_BUDGET_MS = 250
 const REVEAL_TIMEOUT_MS = 8000
 
 function median(values: number[]): number {
@@ -66,7 +63,7 @@ function median(values: number[]): number {
 }
 
 export async function testMarkdownPreviewLatency(ctx: AutotestContext): Promise<TestResult[]> {
-  const { assert, cancelled, log, rootPath, sleep, waitFor } = ctx
+  const { assert, cancelled, log, reopenProjectEditor, rootPath, sleep, waitFor } = ctx
   const results: TestResult[] = []
   const record = (name: string, ok: boolean, detail?: Record<string, unknown>) => {
     assert(name, ok, detail)
@@ -105,6 +102,12 @@ export async function testMarkdownPreviewLatency(ctx: AutotestContext): Promise<
     }
     if (cancelled()) return results
 
+    const opened = await reopenProjectEditor('markdown-preview-latency-root')
+    record('MPL-01-project-editor-opened', opened, {
+      rootPath: getApi()?.getRootPath?.() ?? null
+    })
+    if (!opened || cancelled()) return results
+
     const api = getApi()
     if (
       !api?.openFileByPathAsUser ||
@@ -112,10 +115,10 @@ export async function testMarkdownPreviewLatency(ctx: AutotestContext): Promise<
       !api.getPreviewRestorePhase ||
       !api.getLastPreviewReveal
     ) {
-      record('MPL-01-debug-api-available', false, { error: 'ProjectEditor debug API is incomplete' })
+      record('MPL-02-debug-api-available', false, { error: 'ProjectEditor debug API is incomplete' })
       return results
     }
-    record('MPL-01-debug-api-available', true)
+    record('MPL-02-debug-api-available', true)
 
     const waitForRevealUpdate = async (
       label: string,
@@ -284,9 +287,7 @@ export async function testMarkdownPreviewLatency(ctx: AutotestContext): Promise<
         budgetMs: CACHE_HIT_BUDGET_MS
       })
 
-      // Assertion 2 — cache-miss reveal under absolute budget. Same metric,
-      // larger budget because the layoutEffect side has more layout work
-      // for bigger files.
+      // Assertion 2 — cache-miss reveal under absolute budget.
       record(`MPL-${fixture.size}-cache-miss-under-budget`, meetsBudget(cacheMissValues, CACHE_MISS_BUDGET_MS), {
         cacheMissTrials: cacheMissValues,
         cacheMissMedian,
@@ -294,21 +295,13 @@ export async function testMarkdownPreviewLatency(ctx: AutotestContext): Promise<
       })
 
       // Assertion 3 — every cache-hit reveal takes the fast path.
-      // A regression that re-introduces the unconditional safety timer
-      // for cache hits would flip cause to 'safety-net' here.
       record(`MPL-${fixture.size}-cache-hit-fast-path`, allFastPathHit, {
         hitCauses: trials.map((t) => t.hitCause)
       })
 
-      // Assertion 4 — relative speedup. The cache-hit median should be
-      // dramatically faster than the cache-miss median. We assert at
-      // least 5× speedup; the implementation lands at 100×+ in practice.
-      const speedupOk = cacheHitMedian > 0 && cacheMissMedian / cacheHitMedian >= 5
-      record(`MPL-${fixture.size}-cache-hit-speedup-vs-miss`, speedupOk, {
-        cacheHitMedian,
-        cacheMissMedian,
-        speedupRatio,
-        minSpeedup: 5
+      // Assertion 4 — every cache-miss reveal also takes the fast path.
+      record(`MPL-${fixture.size}-cache-miss-fast-path`, allFastPathMiss, {
+        missCauses: trials.map((t) => t.missCause)
       })
     }
   } finally {
