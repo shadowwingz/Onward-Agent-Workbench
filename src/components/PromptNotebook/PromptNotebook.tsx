@@ -406,7 +406,8 @@ export const PromptNotebook = memo(function PromptNotebook({
         pinned: p.pinned,
         color: p.color ?? undefined,
         lastUsedAt: p.lastUsedAt,
-        taskNumbers: promptTaskHistory.promptTaskNumbers.get(p.id) ?? []
+        taskNumbers: promptTaskHistory.promptTaskNumbers.get(p.id) ?? [],
+        sendHistoryCount: p.sendHistory?.length ?? 0
       })),
       getVisiblePromptItems: () => filteredPrompts.map(p => ({
         id: p.id,
@@ -479,6 +480,12 @@ export const PromptNotebook = memo(function PromptNotebook({
       isTargetsEnabled: () => targetsEnabled,
       setTargetsEnabled: (nextEnabled: boolean) => {
         setTargetsEnabled(nextEnabled)
+        return true
+      },
+      reorderPinnedPrompts: (dragId: string, targetId: string, position: 'before' | 'after') => {
+        if (!prompts.some(prompt => prompt.id === dragId && prompt.pinned)) return false
+        if (!prompts.some(prompt => prompt.id === targetId && prompt.pinned)) return false
+        onReorderPinnedPrompts(dragId, targetId, position)
         return true
       },
       getCleanupConfig: () => ({
@@ -598,6 +605,7 @@ export const PromptNotebook = memo(function PromptNotebook({
     onAddSchedule,
     onUpdateSchedule,
     onDeleteSchedule,
+    onReorderPinnedPrompts,
     promptTaskHistory,
     filteredPrompts,
     selectedId,
@@ -1086,8 +1094,8 @@ export const PromptNotebook = memo(function PromptNotebook({
     void handleSendAndExecute([terminalId], sendContent)
   }, [handleSendAndExecute])
 
-  // Pinned prompt list (sorted by lastUsed desc) feeds the menu's "Import
-  // pinned" submenu.
+  // Keep the global pinned Prompt order from Prompt History. Users can
+  // reorder that list manually, and the editor import menu mirrors it.
   const pinnedPrompts = useMemo(() => {
     return prompts.filter(p => p.pinned)
   }, [prompts])

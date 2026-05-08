@@ -87,6 +87,7 @@ point at files under `test/unittest/`.
 | Per-Task font override (style settings) | (`shouldRun('per-agent-font')`, no shell runner) |
 | Renderer + main work scheduler unit tests | `test/unittest/main-work-scheduler-unit.mjs`, `renderer-work-scheduler-unit.mjs`, `terminal-output-scheduler-unit.mjs` |
 | 8-grid (2x4) preset, Custom layout popover, downsize confirm dialog, focusTerminal 7/8 shortcuts | `run-task-layout` (TLM-00..05) + `test/unittest/task-layout-utils.test.mts` (TLM-U-01..41) |
+| Terminal content right-click menu sends a manually ordered pinned Prompt to the clicked Task without touching Prompt history metadata | `run-prompt-editor-context-menu` (TPCM-01..03) |
 
 ### 2.2 Tab / Subpage navigation / Settings UI
 
@@ -170,6 +171,7 @@ point at files under `test/unittest/`.
 | Prompt input long-tail under terminal pressure | `run-prompt-input-longtail` (PILT-01, PILT-02) |
 | Prompt list filter / color tag / task badge | `run-prompt-list` (PL-01..12) |
 | Prompt editor right-click context menu — send-to-task order, undo / cut / copy / paste / clear-content / pinned-import / save-as-pinned / insert cwd / insert branch / insert task title / send-to-task; auto viewport flip + clamp, including oversized Send-to-Task and Import Pin submenus with internal scrolling. Also locks down the textarea's virtual-cursor behaviour: click-anywhere padding to (row, col), IME guard, paste at virtual position, undo of virtual padding, submit-time stripping of trailing whitespace / empty rows, real right-click ordering, modified-click no-op, caret/selection placement, repeated virtual clicks, scroll-offset row calculation, PromptSender send preview transform, and context-menu Send-to-Task transform; AND the global Canvas/Line input-mode dropdown in the title row (default Line, Line disables virtual click, Canvas restores it, Line still submits, user choice persists across Tabs). | `run-prompt-editor-context-menu` (PECM-01..37) |
+| Prompt editor Import Pin submenu follows the manually reordered pinned Prompt order from Prompt History | `run-prompt-editor-context-menu` (PECM-38) |
 | Send-transform pure function — strips per-line trailing whitespace and trailing empty rows so virtual-cursor placements with no input do not leak to the terminal. | `node --experimental-strip-types --test test/unittest/prompt-virtual-padding.test.mts` (PVP-U-01..08, 10..13). Out-of-band unit; not in `SCRIPTS`. |
 | Prompt sender grid layout, action buttons, send/execute | `run-prompt-sender` (PS-01..10) |
 | Bug fix: terminal grid uncapped, sender respects 50% cap | `run-prompt-sender` (PS-31, PS-32, PS-33) |

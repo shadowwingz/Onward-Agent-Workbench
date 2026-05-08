@@ -423,11 +423,7 @@ export function PromptEditorContextMenu({
   }, [hasContent, snapshot.value, onSendToTask, onClose, focusBack])
 
   const sortedPinned = useMemo(() => {
-    return [...pinnedPrompts].sort((a, b) => {
-      const ta = a.lastUsedAt || a.updatedAt || 0
-      const tb = b.lastUsedAt || b.updatedAt || 0
-      return tb - ta
-    })
+    return pinnedPrompts.filter(prompt => prompt.pinned)
   }, [pinnedPrompts])
   const visiblePinned = showAllPinned
     ? sortedPinned

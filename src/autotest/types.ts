@@ -189,7 +189,7 @@ export interface ScheduleDebugInfo {
 
 export interface PromptNotebookDebugApi {
   getPromptCount: () => number
-  getPrompts: () => Array<{ id: string; title: string; content: string; pinned: boolean; color?: string; lastUsedAt: number; taskNumbers: number[] }>
+  getPrompts: () => Array<{ id: string; title: string; content: string; pinned: boolean; color?: string; lastUsedAt: number; taskNumbers: number[]; sendHistoryCount: number }>
   getVisiblePromptItems?: () => Array<{ id: string; title: string; color?: string; taskNumbers: number[] }>
   getSelectedPromptId?: () => string | null
   getLastEditorSendToTask?: () => { content: string; terminalId: string } | null
@@ -212,6 +212,7 @@ export interface PromptNotebookDebugApi {
   setFilterEnabled?: (enabled: boolean) => boolean
   isTargetsEnabled?: () => boolean
   setTargetsEnabled?: (enabled: boolean) => boolean
+  reorderPinnedPrompts?: (dragId: string, targetId: string, position: 'before' | 'after') => boolean
   getCleanupConfig: () => { autoEnabled: boolean; autoKeepDays: number; autoDeleteColored: boolean; lastAutoCleanupAt: number | null }
   getEditorContent: () => string
   getEditorHeight: () => number | null

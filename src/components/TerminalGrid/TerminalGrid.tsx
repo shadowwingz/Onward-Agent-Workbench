@@ -6,6 +6,7 @@
 import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo, memo } from 'react'
 import { createPortal } from 'react-dom'
 import { LayoutMode, TerminalInfo, TerminalShortcutAction, TerminalFocusRequest } from '../../types/prompt'
+import type { Prompt } from '../../types/electron'
 import { resolveLayout, isSameLayoutMode, layoutDataAttr } from '../../utils/layout-mode'
 import { TerminalDropdown } from '../TerminalDropdown'
 import { TerminalTitleMenu } from '../TerminalTitleMenu'
@@ -28,7 +29,7 @@ import {
 import { focusCoordinator } from '../../terminal/focus-coordinator'
 import type { TerminalDebugApi } from '../../autotest/types'
 import { perfMonitor } from '../../utils/perf-monitor'
-import { perfTrace } from '../../utils/perf-trace'
+import { perfTrace, perfTraceTask } from '../../utils/perf-trace'
 import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
 import { useI18n } from '../../i18n/useI18n'
 import { buildChangeDirectoryCommand, type TerminalShellKind } from '../../utils/terminal-command'
@@ -81,6 +82,8 @@ interface TerminalGridProps {
   initialActiveSubpage?: SubpageId | null
   initialSubpageTerminalId?: string | null
   onActiveSubpageChange?: (subpage: SubpageId | null, terminalId: string | null) => void
+  pinnedPrompts?: Prompt[]
+  onSendAndExecutePinnedPrompt?: (terminalId: string, prompt: Prompt) => void
 }
 
 interface TerminalGitInfo {
@@ -94,6 +97,19 @@ interface TerminalGitInfo {
 const TERMINAL_PATH_SEGMENTS = 3
 const FOCUS_REQUEST_MAX_ATTEMPTS = 12
 const FOCUS_REQUEST_RETRY_MS = 50
+const TERMINAL_CONTEXT_MENU_MARGIN = 8
+const TERMINAL_CONTEXT_SUBMENU_GAP = 2
+const PINNED_PROMPT_LABEL_LIMIT = 56
+
+function ellipsis(value: string, maxLength: number): string {
+  const oneLine = value.replace(/\s+/g, ' ').trim()
+  return oneLine.length > maxLength ? `${oneLine.slice(0, Math.max(0, maxLength - 3))}...` : oneLine
+}
+
+function getPinnedPromptLabel(prompt: Prompt, fallback: string): string {
+  const title = (prompt.title || '').trim()
+  return title || ellipsis(prompt.content || '', 40) || fallback
+}
 
 async function resolveTerminalShellKind(terminalId: string): Promise<TerminalShellKind | undefined> {
   try {
@@ -127,7 +143,9 @@ export const TerminalGrid = memo(function TerminalGrid({
   onProjectEditorDirtyChange,
   initialActiveSubpage = null,
   initialSubpageTerminalId = null,
-  onActiveSubpageChange
+  onActiveSubpageChange,
+  pinnedPrompts = [],
+  onSendAndExecutePinnedPrompt
 }: TerminalGridProps) {
   // Performance instrumentation: track render count
   perfMonitor.recordReactRender()
@@ -281,9 +299,19 @@ export const TerminalGrid = memo(function TerminalGrid({
 
   // Terminal context menu state
   const [termCtxMenu, setTermCtxMenu] = useState<{ x: number; y: number; terminalId: string; hasSelection: boolean } | null>(null)
+  const [termCtxMenuPosition, setTermCtxMenuPosition] = useState<{ x: number; y: number } | null>(null)
+  const [termCtxPinnedOpen, setTermCtxPinnedOpen] = useState(false)
+  const [termCtxPinnedFlipped, setTermCtxPinnedFlipped] = useState(false)
   const contextMenuListeners = useRef<Map<string, (e: MouseEvent) => void>>(new Map())
+  const termCtxMenuRef = useRef<HTMLDivElement | null>(null)
+  const termCtxPinnedSubmenuRef = useRef<HTMLDivElement | null>(null)
   const previousActiveSubpageRef = useRef<SubpageId | null>(null)
   const subpageSwitchTimerRef = useRef<number | null>(null)
+  const orderedPinnedPrompts = useMemo(() => pinnedPrompts.filter(prompt => prompt.pinned), [pinnedPrompts])
+  const orderedPinnedPromptCountRef = useRef(0)
+  useEffect(() => {
+    orderedPinnedPromptCountRef.current = orderedPinnedPrompts.length
+  }, [orderedPinnedPrompts.length])
 
   const updatePanelShellState = useCallback((subpage: SubpageId, state: SubpagePanelShellState | null) => {
     setPanelShellStates((prev) => {
@@ -597,6 +625,11 @@ export const TerminalGrid = memo(function TerminalGrid({
   }, [copyTextToClipboard, showCopyNotice, t])
 
   // Terminal context menu handlers
+  const closeTermCtxMenu = useCallback(() => {
+    setTermCtxMenu(null)
+    setTermCtxPinnedOpen(false)
+  }, [])
+
   const handleTermCtxCopy = useCallback(() => {
     if (!termCtxMenu) return
     const session = terminalSessionManager.getSession(termCtxMenu.terminalId)
@@ -607,8 +640,8 @@ export const TerminalGrid = memo(function TerminalGrid({
         session.terminal.clearSelection()
       }
     }
-    setTermCtxMenu(null)
-  }, [termCtxMenu])
+    closeTermCtxMenu()
+  }, [termCtxMenu, closeTermCtxMenu])
 
   const handleTermCtxPaste = useCallback(() => {
     if (!termCtxMenu) return
@@ -619,33 +652,92 @@ export const TerminalGrid = memo(function TerminalGrid({
         terminalSessionManager.paste(termId, text)
       }
     })
-    setTermCtxMenu(null)
+    closeTermCtxMenu()
     terminalSessionManager.focus(termId)
-  }, [termCtxMenu])
+  }, [termCtxMenu, closeTermCtxMenu])
 
   const handleTermCtxSelectAll = useCallback(() => {
     if (!termCtxMenu) return
     const session = terminalSessionManager.getSession(termCtxMenu.terminalId)
     session?.terminal.selectAll()
-    setTermCtxMenu(null)
-  }, [termCtxMenu])
+    closeTermCtxMenu()
+  }, [termCtxMenu, closeTermCtxMenu])
 
   const handleTermCtxClear = useCallback(() => {
     if (!termCtxMenu) return
     const termId = termCtxMenu.terminalId
     const session = terminalSessionManager.getSession(termId)
     session?.terminal.clear()
-    setTermCtxMenu(null)
+    closeTermCtxMenu()
     terminalSessionManager.focus(termId)
-  }, [termCtxMenu])
+  }, [termCtxMenu, closeTermCtxMenu])
+
+  const handleTermCtxSendPinnedPrompt = useCallback((prompt: Prompt) => {
+    if (!termCtxMenu || !onSendAndExecutePinnedPrompt) return
+    const terminalId = termCtxMenu.terminalId
+    perfTraceTask(PERF_TRACE_EVENT.RENDERER_TERMINAL_CTX_PINNED_PROMPT_SEND, {
+      bytes: prompt.content.length,
+      pinnedCount: orderedPinnedPrompts.length
+    }, terminalId)
+    onSendAndExecutePinnedPrompt(terminalId, prompt)
+    closeTermCtxMenu()
+    terminalSessionManager.focus(terminalId)
+  }, [termCtxMenu, onSendAndExecutePinnedPrompt, orderedPinnedPrompts.length, closeTermCtxMenu])
+
+  useLayoutEffect(() => {
+    if (!termCtxMenu) {
+      setTermCtxMenuPosition(null)
+      return
+    }
+    const el = termCtxMenuRef.current
+    if (!el) {
+      setTermCtxMenuPosition({ x: termCtxMenu.x, y: termCtxMenu.y })
+      return
+    }
+    const rect = el.getBoundingClientRect()
+    const maxX = window.innerWidth - rect.width - TERMINAL_CONTEXT_MENU_MARGIN
+    const maxY = window.innerHeight - rect.height - TERMINAL_CONTEXT_MENU_MARGIN
+    const next = {
+      x: Math.max(TERMINAL_CONTEXT_MENU_MARGIN, Math.min(termCtxMenu.x, maxX)),
+      y: Math.max(TERMINAL_CONTEXT_MENU_MARGIN, Math.min(termCtxMenu.y, maxY))
+    }
+    setTermCtxMenuPosition(prev => (prev?.x === next.x && prev.y === next.y ? prev : next))
+  }, [termCtxMenu, termCtxPinnedOpen, orderedPinnedPrompts.length])
+
+  useLayoutEffect(() => {
+    if (!termCtxPinnedOpen) {
+      setTermCtxPinnedFlipped(false)
+      return
+    }
+    const menu = termCtxMenuRef.current
+    const submenu = termCtxPinnedSubmenuRef.current
+    if (!menu || !submenu) return
+    const menuRect = menu.getBoundingClientRect()
+    const submenuRect = submenu.getBoundingClientRect()
+    const roomRight = window.innerWidth - TERMINAL_CONTEXT_MENU_MARGIN - menuRect.right - TERMINAL_CONTEXT_SUBMENU_GAP
+    const roomLeft = menuRect.left - TERMINAL_CONTEXT_MENU_MARGIN - TERMINAL_CONTEXT_SUBMENU_GAP
+    setTermCtxPinnedFlipped(roomRight < submenuRect.width && roomLeft > roomRight)
+  }, [termCtxPinnedOpen, orderedPinnedPrompts.length])
 
   // Close terminal context menu on mousedown outside
   useEffect(() => {
     if (!termCtxMenu) return
-    const handleMouseDown = () => setTermCtxMenu(null)
+    const handleMouseDown = (event: MouseEvent) => {
+      if (termCtxMenuRef.current?.contains(event.target as Node)) return
+      closeTermCtxMenu()
+    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return
+      event.preventDefault()
+      closeTermCtxMenu()
+    }
     document.addEventListener('mousedown', handleMouseDown)
-    return () => document.removeEventListener('mousedown', handleMouseDown)
-  }, [termCtxMenu])
+    document.addEventListener('keydown', handleKeyDown)
+    return () => {
+      document.removeEventListener('mousedown', handleMouseDown)
+      document.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [termCtxMenu, closeTermCtxMenu])
 
   // Autotest-only sticky overrides so tests can pin branch / repoName without
   // being clobbered by the main-process git watcher poll cycle.
@@ -1205,6 +1297,11 @@ export const TerminalGrid = memo(function TerminalGrid({
         e.stopPropagation()
         const session = terminalSessionManager.getSession(id)
         const hasSelection = session ? session.terminal.hasSelection() : false
+        perfTraceTask(PERF_TRACE_EVENT.RENDERER_TERMINAL_CTX_MENU_OPEN, {
+          hasSelection,
+          pinnedCount: orderedPinnedPromptCountRef.current
+        }, id)
+        setTermCtxPinnedOpen(false)
         setTermCtxMenu({ x: e.clientX, y: e.clientY, terminalId: id, hasSelection })
       }
       el.addEventListener('contextmenu', onContextMenu)
@@ -2281,9 +2378,16 @@ export const TerminalGrid = memo(function TerminalGrid({
       )}
       {termCtxMenu && createPortal(
         <div
+          ref={termCtxMenuRef}
           className="terminal-context-menu"
-          style={{ position: 'fixed', left: termCtxMenu.x, top: termCtxMenu.y }}
+          style={{
+            position: 'fixed',
+            left: termCtxMenuPosition?.x ?? termCtxMenu.x,
+            top: termCtxMenuPosition?.y ?? termCtxMenu.y
+          }}
           onMouseDown={(e) => e.stopPropagation()}
+          onContextMenu={(e) => e.preventDefault()}
+          role="menu"
         >
           <button
             className="terminal-context-item"
@@ -2300,6 +2404,54 @@ export const TerminalGrid = memo(function TerminalGrid({
             <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M10 1.5a.5.5 0 0 0-.5-.5h-3a.5.5 0 0 0-.5.5v1a.5.5 0 0 0 .5.5h3a.5.5 0 0 0 .5-.5v-1zM5 1a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v1a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V1z" /><path d="M3 2.5A1.5 1.5 0 0 1 4.5 1h.585A1.98 1.98 0 0 0 5 2v1a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2V2c0-.068-.004-.135-.011-.2H11.5A1.5 1.5 0 0 1 13 3.5v10a1.5 1.5 0 0 1-1.5 1.5h-7A1.5 1.5 0 0 1 3 13.5v-11z" /></svg>
             <span>{t('terminal.contextMenu.paste')}</span>
           </button>
+          {onSendAndExecutePinnedPrompt && (
+            <div
+              className="terminal-context-submenu-wrapper"
+              onMouseEnter={() => {
+                if (orderedPinnedPrompts.length > 0) setTermCtxPinnedOpen(true)
+              }}
+              onMouseLeave={() => setTermCtxPinnedOpen(false)}
+            >
+              <button
+                className={`terminal-context-item has-submenu ${termCtxPinnedOpen ? 'submenu-open' : ''}`}
+                role="menuitem"
+                aria-haspopup="menu"
+                aria-expanded={termCtxPinnedOpen}
+                disabled={orderedPinnedPrompts.length === 0}
+                data-testid="terminal-context-send-pinned"
+                onClick={() => {
+                  if (orderedPinnedPrompts.length === 0) return
+                  setTermCtxPinnedOpen(prev => !prev)
+                }}
+              >
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M15.854.146a.5.5 0 0 1 .11.54l-5.819 14.547a.75.75 0 0 1-1.329.124l-3.178-4.995L.643 7.184a.75.75 0 0 1 .124-1.33L15.314.037a.5.5 0 0 1 .54.11zM6.636 10.07l2.761 4.338L14.13 2.576 6.636 10.07zm6.787-8.201L1.591 6.602l4.339 2.76 7.494-7.493z" /></svg>
+                <span>{t('terminal.contextMenu.sendAndExecuteToTask')}</span>
+                <svg className="terminal-context-submenu-chevron" width="10" height="10" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M4.646 1.646a.5.5 0 0 1 .708 0l6 6a.5.5 0 0 1 0 .708l-6 6a.5.5 0 0 1-.708-.708L10.293 8 4.646 2.354a.5.5 0 0 1 0-.708z" /></svg>
+              </button>
+              {termCtxPinnedOpen && (
+                <div
+                  ref={termCtxPinnedSubmenuRef}
+                  className={`terminal-context-submenu ${termCtxPinnedFlipped ? 'flip' : ''}`}
+                  role="menu"
+                  data-testid="terminal-context-pinned-submenu"
+                  onMouseDown={(event) => event.stopPropagation()}
+                >
+                  {orderedPinnedPrompts.map((prompt) => (
+                    <button
+                      key={prompt.id}
+                      className="terminal-context-item"
+                      role="menuitem"
+                      title={prompt.content}
+                      onClick={() => handleTermCtxSendPinnedPrompt(prompt)}
+                    >
+                      <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M9.828.722a.5.5 0 0 1 .354.146l4.95 4.95a.5.5 0 0 1-.707.708l-.812-.813-3.05 3.05a.746.746 0 0 1-.11.143L8.95 10.41a.5.5 0 0 1-.354.147h-.002a.5.5 0 0 1-.353-.146L5.657 7.826a.5.5 0 0 1 0-.708L7.16 5.615a.746.746 0 0 1 .143-.11l3.05-3.05-.813-.812a.5.5 0 0 1 .288-.92zM7.864 6.354L6.414 7.804l2.782 2.782 1.45-1.45-2.782-2.782z" /><path d="M1.5 15a.5.5 0 0 1-.354-.854l4.5-4.5a.5.5 0 0 1 .708.708l-4.5 4.5A.5.5 0 0 1 1.5 15z" /></svg>
+                      <span>{ellipsis(getPinnedPromptLabel(prompt, t('terminal.contextMenu.untitledPrompt')), PINNED_PROMPT_LABEL_LIMIT)}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
           <div className="terminal-context-separator" />
           <button
             className="terminal-context-item"

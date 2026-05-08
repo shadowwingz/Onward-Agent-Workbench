@@ -506,6 +506,10 @@
   animation: terminal-context-fade-in 0.15s ease;
 }
 
+.terminal-context-submenu-wrapper {
+  position: relative;
+}
+
 .terminal-context-item {
   display: flex;
   align-items: center;
@@ -521,6 +525,10 @@
   cursor: pointer;
   white-space: nowrap;
   transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.terminal-context-item.has-submenu {
+  padding-right: 6px;
 }
 
 .terminal-context-item:hover:not(:disabled) {
@@ -540,6 +548,43 @@
 
 .terminal-context-item:hover:not(:disabled) svg {
   color: var(--text-2);
+}
+
+.terminal-context-item span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.terminal-context-submenu-chevron {
+  margin-left: auto;
+}
+
+.terminal-context-item.has-submenu:hover .terminal-context-submenu-chevron,
+.terminal-context-item.has-submenu.submenu-open .terminal-context-submenu-chevron {
+  color: var(--text-2);
+}
+
+.terminal-context-submenu {
+  position: absolute;
+  left: calc(100% + 2px);
+  top: -6px;
+  min-width: 220px;
+  max-width: min(420px, calc(100vw - 24px));
+  max-height: min(360px, calc(100vh - 24px));
+  overflow: auto;
+  background-color: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow-1);
+  padding: 6px;
+  z-index: 1101;
+  animation: terminal-context-fade-in 0.15s ease;
+}
+
+.terminal-context-submenu.flip {
+  left: auto;
+  right: calc(100% + 2px);
 }
 
 .terminal-context-separator {

@@ -562,6 +562,8 @@ const en = {
 
   'terminal.contextMenu.copy': 'Copy',
   'terminal.contextMenu.paste': 'Paste',
+  'terminal.contextMenu.sendAndExecuteToTask': 'Send and execute to Task',
+  'terminal.contextMenu.untitledPrompt': '(Untitled)',
   'terminal.contextMenu.selectAll': 'Select All',
   'terminal.contextMenu.clear': 'Clear Terminal',
 
@@ -1718,6 +1720,8 @@ const zhCN: LocaleTranslations = {
 
   'terminal.contextMenu.copy': '复制',
   'terminal.contextMenu.paste': '粘贴',
+  'terminal.contextMenu.sendAndExecuteToTask': '发送并执行到 Task',
+  'terminal.contextMenu.untitledPrompt': '（未命名）',
   'terminal.contextMenu.selectAll': '全选',
   'terminal.contextMenu.clear': '清除终端',
 

@@ -23,10 +23,11 @@ export async function testPromptEditorContextMenu(ctx: AutotestContext): Promise
 
   const notebookApi = () => (window as unknown as {
     __onwardPromptNotebookDebug?: {
-      getPrompts: () => Array<{ id: string; title: string; content: string; pinned: boolean }>
+      getPrompts: () => Array<{ id: string; title: string; content: string; pinned: boolean; lastUsedAt: number; sendHistoryCount?: number }>
       setEditorContent: (content: string) => void
       getEditorContent: () => string
       getLastEditorSendToTask?: () => { content: string; terminalId: string } | null
+      reorderPinnedPrompts?: (dragId: string, targetId: string, position: 'before' | 'after') => boolean
     }
   }).__onwardPromptNotebookDebug
   const senderApi = () => (window as unknown as {
@@ -230,6 +231,76 @@ export async function testPromptEditorContextMenu(ctx: AutotestContext): Promise
     if (!ready) return null
     await sleep(80)
     return document.querySelector(`[data-testid="${submenuId}"]`) as HTMLElement | null
+  }
+
+  const findTerminalContextMenu = () =>
+    document.querySelector('.terminal-context-menu') as HTMLElement | null
+
+  const findTerminalContainer = (terminalId: string) => {
+    const cells = Array.from(document.querySelectorAll<HTMLElement>('.terminal-grid-cell[data-terminal-id]'))
+    const cell = cells.find(el => el.getAttribute('data-terminal-id') === terminalId)
+    return cell?.querySelector('.terminal-grid-container') as HTMLElement | null
+  }
+
+  const closeTerminalContextMenu = async () => {
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+    document.body.dispatchEvent(new MouseEvent('mousedown', {
+      bubbles: true,
+      cancelable: true,
+      clientX: 2,
+      clientY: 2
+    }))
+    await waitFor('pecm-terminal-menu-closed', () => findTerminalContextMenu() === null, 1000, 40)
+  }
+
+  const openTerminalContextMenu = async (terminalId: string): Promise<HTMLElement | null> => {
+    await closeTerminalContextMenu()
+    const container = findTerminalContainer(terminalId)
+    if (!container) return null
+    const rect = container.getBoundingClientRect()
+    const dispatch = () => {
+      container.dispatchEvent(new MouseEvent('contextmenu', {
+        bubbles: true,
+        cancelable: true,
+        button: 2,
+        clientX: rect.left + Math.max(8, Math.min(24, rect.width / 2)),
+        clientY: rect.top + Math.max(8, Math.min(24, rect.height / 2))
+      }))
+    }
+    dispatch()
+    const ready = await waitFor('pecm-terminal-context-menu-open', () => {
+      if (findTerminalContextMenu() !== null) return true
+      dispatch()
+      return false
+    }, 2500, 40)
+    return ready ? findTerminalContextMenu() : null
+  }
+
+  const openTerminalPinnedSubmenu = async (): Promise<HTMLElement | null> => {
+    const root = findTerminalContextMenu()
+    const trigger = root?.querySelector('[data-testid="terminal-context-send-pinned"]') as HTMLElement | null
+    if (!trigger) return null
+    trigger.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true, cancelable: true }))
+    trigger.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+    const ready = await waitFor('pecm-terminal-pinned-submenu', () => {
+      return document.querySelector('[data-testid="terminal-context-pinned-submenu"]') !== null
+    }, 1500, 40)
+    return ready
+      ? document.querySelector('[data-testid="terminal-context-pinned-submenu"]') as HTMLElement | null
+      : null
+  }
+
+  const savePinnedPromptViaMenu = async (content: string, marker: string) => {
+    const beforePinIds = new Set(notebookApi()!.getPrompts().filter(p => p.pinned).map(p => p.id))
+    const pinMenu = await openMenuWith(content, 0, content.length)
+    if (!pinMenu) return null
+    const clicked = clickItem('pecm-save-as-pin')
+    const saved = await waitFor(`pecm-save-pin-${marker}`, () => {
+      return notebookApi()!.getPrompts().some(p => p.pinned && p.title.includes(marker) && !beforePinIds.has(p.id))
+    }, 3000, 80)
+    await closeMenu()
+    if (!clicked || !saved) return null
+    return notebookApi()!.getPrompts().find(p => p.pinned && p.title.includes(marker) && !beforePinIds.has(p.id)) ?? null
   }
 
   const rectDetail = (el: HTMLElement | null) => {
@@ -1074,6 +1145,96 @@ export async function testPromptEditorContextMenu(ctx: AutotestContext): Promise
     expectedTerminalId: targetTerminal34,
     tailHasMarker: tail34.includes(ctxMarker34)
   })
+
+  // ─────────── PECM-38: Import Pin follows manual Prompt History pin order ───────────
+  const orderedFirstMarker38 = `pin-order-first-${Date.now()}`
+  const orderedSecondMarker38 = `pin-order-second-${Date.now()}`
+  const orderedFirstContent38 = `echo ${orderedFirstMarker38}`
+  const orderedSecondContent38 = `echo ${orderedSecondMarker38}`
+  const firstOrderPin38 = await savePinnedPromptViaMenu(orderedFirstContent38, orderedFirstMarker38)
+  await sleep(30)
+  const secondOrderPin38 = await savePinnedPromptViaMenu(orderedSecondContent38, orderedSecondMarker38)
+  const reorderAvailable38 = typeof notebookApi()?.reorderPinnedPrompts === 'function'
+  const reordered38 = Boolean(
+    firstOrderPin38 &&
+    secondOrderPin38 &&
+    notebookApi()?.reorderPinnedPrompts?.(firstOrderPin38.id, secondOrderPin38.id, 'before')
+  )
+  await waitFor('pecm-38-pinned-order-applied', () => {
+    const ids = notebookApi()!.getPrompts().filter(p => p.pinned).map(p => p.id)
+    return Boolean(firstOrderPin38 && secondOrderPin38) &&
+      ids.indexOf(firstOrderPin38!.id) >= 0 &&
+      ids.indexOf(secondOrderPin38!.id) >= 0 &&
+      ids.indexOf(firstOrderPin38!.id) < ids.indexOf(secondOrderPin38!.id)
+  }, 2000, 80)
+  menu = await openMenuWith('', 0, 0)
+  const importSubmenu38 = await openSubmenuByTestId('pecm-import-pin', 'pecm-import-pin-submenu')
+  const importLabels38 = importSubmenu38
+    ? Array.from(importSubmenu38.querySelectorAll('[role="menuitem"]')).map(el => el.textContent ?? '')
+    : []
+  const firstImportIndex38 = importLabels38.findIndex(label => label.includes(orderedFirstMarker38))
+  const secondImportIndex38 = importLabels38.findIndex(label => label.includes(orderedSecondMarker38))
+  record('PECM-38-import-pin-manual-order', Boolean(firstOrderPin38) && Boolean(secondOrderPin38) && reorderAvailable38 && reordered38 && firstImportIndex38 >= 0 && secondImportIndex38 >= 0 && firstImportIndex38 < secondImportIndex38, {
+    firstOrderPin: firstOrderPin38,
+    secondOrderPin: secondOrderPin38,
+    reorderAvailable: reorderAvailable38,
+    reordered: reordered38,
+    importLabels: importLabels38,
+    firstImportIndex: firstImportIndex38,
+    secondImportIndex: secondImportIndex38
+  })
+  await closeMenu()
+
+  // ─────────── TPCM-01..03: terminal content menu sends pinned prompt to right-clicked Task ───────────
+  const targetTerminalTpcm = cards[Math.min(1, cards.length - 1)]?.id ?? cards[0]?.id ?? null
+  const beforeFirstPinTpcm = firstOrderPin38
+    ? notebookApi()!.getPrompts().find(p => p.id === firstOrderPin38.id) ?? null
+    : null
+  const terminalMenuTpcm = targetTerminalTpcm ? await openTerminalContextMenu(targetTerminalTpcm) : null
+  const terminalSubmenuTpcm = terminalMenuTpcm ? await openTerminalPinnedSubmenu() : null
+  const terminalLabelsTpcm = terminalSubmenuTpcm
+    ? Array.from(terminalSubmenuTpcm.querySelectorAll('[role="menuitem"]')).map(el => el.textContent ?? '')
+    : []
+  const firstTerminalIndexTpcm = terminalLabelsTpcm.findIndex(label => label.includes(orderedFirstMarker38))
+  const secondTerminalIndexTpcm = terminalLabelsTpcm.findIndex(label => label.includes(orderedSecondMarker38))
+  record('TPCM-01-terminal-pin-menu-manual-order', Boolean(targetTerminalTpcm) && terminalMenuTpcm !== null && terminalSubmenuTpcm !== null && firstTerminalIndexTpcm >= 0 && secondTerminalIndexTpcm >= 0 && firstTerminalIndexTpcm < secondTerminalIndexTpcm, {
+    targetTerminal: targetTerminalTpcm,
+    terminalLabels: terminalLabelsTpcm,
+    firstTerminalIndex: firstTerminalIndexTpcm,
+    secondTerminalIndex: secondTerminalIndexTpcm
+  })
+
+  const firstTerminalItemTpcm = terminalSubmenuTpcm
+    ? Array.from(terminalSubmenuTpcm.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'))
+      .find(el => (el.textContent ?? '').includes(orderedFirstMarker38)) ?? null
+    : null
+  firstTerminalItemTpcm?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+  const terminalReceivedTpcm = Boolean(targetTerminalTpcm) && await waitFor('tpcm-terminal-received-pinned-prompt', () => {
+    return terminalApi()?.getTailText(targetTerminalTpcm!, 80)?.includes(orderedFirstMarker38) === true
+  }, 5000, 120)
+  const otherTerminalHasMarkerTpcm = cards
+    .filter(card => card.id !== targetTerminalTpcm)
+    .some(card => terminalApi()?.getTailText(card.id, 80)?.includes(orderedFirstMarker38) === true)
+  record('TPCM-02-terminal-pin-menu-sends-to-right-clicked-task', Boolean(firstTerminalItemTpcm) && terminalReceivedTpcm && !otherTerminalHasMarkerTpcm, {
+    targetTerminal: targetTerminalTpcm,
+    clicked: Boolean(firstTerminalItemTpcm),
+    terminalReceived: terminalReceivedTpcm,
+    otherTerminalHasMarker: otherTerminalHasMarkerTpcm,
+    targetTail: targetTerminalTpcm ? terminalApi()?.getTailText(targetTerminalTpcm, 80) ?? '' : ''
+  })
+
+  const afterFirstPinTpcm = firstOrderPin38
+    ? notebookApi()!.getPrompts().find(p => p.id === firstOrderPin38.id) ?? null
+    : null
+  record('TPCM-03-terminal-pin-menu-does-not-touch-prompt-history', Boolean(beforeFirstPinTpcm) && Boolean(afterFirstPinTpcm) &&
+    beforeFirstPinTpcm?.lastUsedAt === afterFirstPinTpcm?.lastUsedAt &&
+    (beforeFirstPinTpcm?.sendHistoryCount ?? 0) === (afterFirstPinTpcm?.sendHistoryCount ?? 0), {
+    beforeLastUsedAt: beforeFirstPinTpcm?.lastUsedAt,
+    afterLastUsedAt: afterFirstPinTpcm?.lastUsedAt,
+    beforeSendHistoryCount: beforeFirstPinTpcm?.sendHistoryCount ?? 0,
+    afterSendHistoryCount: afterFirstPinTpcm?.sendHistoryCount ?? 0
+  })
+  await closeTerminalContextMenu()
 
   // ─────────── PECM-37: Canvas/Line mode is global and persisted ───────────
   const tabCountBefore37 = findTabItems().length

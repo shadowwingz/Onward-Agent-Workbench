@@ -210,6 +210,12 @@ export const PERF_TRACE_EVENT = {
 
   // ───────── Renderer — user input: terminal ─────────
   RENDERER_TERMINAL_FOCUS_CHANGE: 'renderer:terminal.focus-change',
+  // Right-click on a Task terminal content area opens the custom terminal
+  // context menu. Args carry only selection and pinned-prompt counts.
+  RENDERER_TERMINAL_CTX_MENU_OPEN: 'renderer:terminal.ctx-menu-open',
+  // Selecting a pinned Prompt from the terminal context menu dispatches it
+  // to the right-clicked Task. Args carry payload byte count, never content.
+  RENDERER_TERMINAL_CTX_PINNED_PROMPT_SEND: 'renderer:terminal.ctx-pinned-prompt-send',
   RENDERER_TERMINAL_SEND_INPUT: 'renderer:terminal.send-input',
 
   // ───────── Renderer — user input: project editor ─────────

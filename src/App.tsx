@@ -186,7 +186,8 @@ const TabTerminalGrid = memo(function TabTerminalGrid({
   projectEditorOpen,
   projectEditorOpenRequest,
   onCloseProjectEditor,
-  onProjectEditorDirtyChange
+  onProjectEditorDirtyChange,
+  onSendAndExecutePinnedPrompt
 }: {
   tab: TabState
   isActive: boolean
@@ -203,8 +204,9 @@ const TabTerminalGrid = memo(function TabTerminalGrid({
   projectEditorOpenRequest: ProjectEditorOpenRequest | null
   onCloseProjectEditor: () => void
   onProjectEditorDirtyChange: (dirty: boolean) => void
+  onSendAndExecutePinnedPrompt: (terminalId: string, prompt: Prompt) => void
 }) {
-  const { getTerminalDisplayName, updateTabById } = useAppState()
+  const { state, getTerminalDisplayName, updateTabById } = useAppState()
   const terminals: TerminalInfo[] = useMemo(() => {
     return tab.terminals.map((t, index) => ({
       id: t.id,
@@ -271,6 +273,8 @@ const TabTerminalGrid = memo(function TabTerminalGrid({
       initialActiveSubpage={tab.activeSubpage}
       initialSubpageTerminalId={tab.subpageTerminalId}
       onActiveSubpageChange={handleActiveSubpageChange}
+      pinnedPrompts={state.globalPrompts}
+      onSendAndExecutePinnedPrompt={onSendAndExecutePinnedPrompt}
     />
   )
 })
@@ -969,6 +973,10 @@ function AppContent({
       return result
     }, 'prompt')
   }, [sendContentToTerminals, writeToTerminals])
+
+  const handleTerminalPinnedPromptSend = useCallback((terminalId: string, prompt: Prompt) => {
+    void handleSendAndExecuteOnTerminals([terminalId], prompt.content)
+  }, [handleSendAndExecuteOnTerminals])
 
   const handleRetrySchedule = useCallback(async (promptId: string) => {
     const prompt = allPromptsForSchedule.find(p => p.id === promptId)
@@ -1817,6 +1825,7 @@ function AppContent({
               projectEditorOpenRequest={projectEditorOpenRequest}
               onCloseProjectEditor={handleCloseProjectEditor}
               onProjectEditorDirtyChange={setProjectEditorDirty}
+              onSendAndExecutePinnedPrompt={handleTerminalPinnedPromptSend}
             />
           ))}
         </div>
