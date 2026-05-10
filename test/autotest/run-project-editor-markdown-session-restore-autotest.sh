@@ -64,5 +64,11 @@ if ! grep -q "PMSR-11-editor-section-restored-after-reopen" "$LOG_FILE"; then
   exit 1
 fi
 
+if ! grep -q "PMSR-13-escape-and-shortcut-reopen-repeat" "$LOG_FILE"; then
+  echo "Missing PMSR-13 shortcut reopen repeat result; the high-frequency shortcut path may not have executed" >&2
+  tail -n 80 "$LOG_FILE" >&2
+  exit 1
+fi
+
 echo "Project Editor Markdown session restore autotest passed"
 echo "  Log: $LOG_FILE"

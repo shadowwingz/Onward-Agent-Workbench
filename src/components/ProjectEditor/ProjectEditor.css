@@ -23,21 +23,22 @@
   opacity: 0;
   visibility: hidden;
   pointer-events: none;
-  transition: opacity 0.16s ease, visibility 0s linear 0.16s;
+  /* No fade — keyboard-shortcut entry/exit must feel instant. The previous
+     0.16s opacity transition + 0.16s visibility delay produced a visible
+     "afterimage" on every toggle that hurt the snappiness expected from
+     a global shortcut. */
 }
 
 .project-editor-overlay.panel.is-open {
   opacity: 1;
   visibility: visible;
   pointer-events: auto;
-  transition: opacity 0.16s ease;
 }
 
 .project-editor-overlay.panel.is-hidden {
   opacity: 0;
   visibility: hidden;
   pointer-events: none;
-  transition: opacity 0.16s ease, visibility 0s linear 0.16s;
 }
 
 .project-editor-modal {

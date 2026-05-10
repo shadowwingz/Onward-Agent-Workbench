@@ -220,6 +220,7 @@ export const PERF_TRACE_EVENT = {
 
   // ───────── Renderer — user input: project editor ─────────
   RENDERER_PROJECT_FILE_OPEN: 'renderer:project.file-open',
+  RENDERER_PROJECT_EDITOR_REOPEN_RESTORE: 'renderer:project.editor-reopen-restore',
   RENDERER_PROJECT_SUBPAGE_NAVIGATE: 'renderer:project.subpage-navigate',
   RENDERER_PROJECT_SEARCH_GLOBAL: 'renderer:project.search.global',
 
@@ -235,6 +236,10 @@ export const PERF_TRACE_EVENT = {
   RENDERER_MARKDOWN_RENDER: 'renderer:markdown.render',
   RENDERER_MARKDOWN_SANITIZE: 'renderer:markdown.dompurify-sanitize',
   RENDERER_MARKDOWN_MERMAID: 'renderer:markdown.mermaid-render',
+  // Instant event emitted when preview restore reaches phase:idle. Payload:
+  // cause, hadWork (whether any markdown/worker/mermaid signal was pending
+  // during this restore cycle), durationMs.
+  RENDERER_MARKDOWN_PREVIEW_REVEAL: 'renderer:markdown.preview-reveal',
   RENDERER_MONACO_VIEWSTATE_RESTORE: 'renderer:monaco.viewstate-restore',
   RENDERER_XTERM_WEBGL_INIT: 'renderer:xterm.webgl-context-init',
 

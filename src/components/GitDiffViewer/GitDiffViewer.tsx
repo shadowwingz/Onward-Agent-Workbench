@@ -222,18 +222,25 @@ function resolveCompareStatus(container: Element | null): CompareStatus {
 // autotests verify what the user actually sees.
 export function inspectPdfCompareDom() {
   const root = document.querySelector('.git-pdf-compare')
-  if (!root) return { visible: false, status: null, originalSrc: null, modifiedSrc: null, originalHasEmpty: false, modifiedHasEmpty: false }
+  if (!root) return { visible: false, status: null, originalSrc: null, modifiedSrc: null, originalHasEmpty: false, modifiedHasEmpty: false, paneCount: 0, isSinglePane: false }
   const panes = Array.from(root.querySelectorAll('.git-pdf-compare-pane')) as HTMLElement[]
-  const [leftPane, rightPane] = [panes[0] ?? null, panes[1] ?? null]
+  // Look up by data-side so single-pane layouts (status='added' / 'deleted')
+  // still resolve original vs modified correctly even though only one is in the DOM.
+  const findBySide = (side: 'original' | 'modified') =>
+    panes.find(p => p.dataset?.side === side) ?? null
+  const originalPane = findBySide('original')
+  const modifiedPane = findBySide('modified')
   const readSrc = (pane: HTMLElement | null) =>
     (pane?.querySelector('iframe.git-pdf-compare-frame') as HTMLIFrameElement | null)?.src ?? null
   return {
     visible: true,
     status: resolveCompareStatus(root),
-    originalSrc: readSrc(leftPane),
-    modifiedSrc: readSrc(rightPane),
-    originalHasEmpty: Boolean(leftPane?.querySelector('.git-pdf-compare-empty')),
-    modifiedHasEmpty: Boolean(rightPane?.querySelector('.git-pdf-compare-empty'))
+    originalSrc: readSrc(originalPane),
+    modifiedSrc: readSrc(modifiedPane),
+    originalHasEmpty: Boolean(originalPane?.querySelector('.git-pdf-compare-empty')),
+    modifiedHasEmpty: Boolean(modifiedPane?.querySelector('.git-pdf-compare-empty')),
+    paneCount: panes.length,
+    isSinglePane: Boolean(root.querySelector('.git-pdf-compare-panes.is-single'))
   }
 }
 

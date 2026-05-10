@@ -11,6 +11,36 @@ const TARGET_HEADING = `4.2 Anthropic: ${TARGET_HEADING_TOPIC}`
 const TARGET_HEADING_SLUG = `42-anthropic-${String.fromCharCode(21452)}-agent-${String.fromCharCode(36328, 20250, 35805, 26550, 26500)}`
 const TARGET_MIN_LINE = 260
 const FALLBACK_TARGET_LINE = 70
+const SHORTCUT_REOPEN_TRIALS = 5
+const SHORTCUT_REOPEN_SAMPLE_MS = 500
+
+type ProjectEditorReopenRestore = {
+  durationMs: number
+  cause: 'retained-view' | 'persisted-state'
+  filePath: string | null
+  markdownCacheMode: 'hit' | 'miss' | 'stale' | 'disabled' | null
+  finalizedAt: number
+} | null
+
+interface ShortcutReopenObservation {
+  trial: number
+  triggered: boolean
+  reopened: boolean
+  previewReady: boolean
+  selectFileEmptyStateSamples: number
+  bodyBeforeShellSamples: number
+  bodyVisibleSamples: number
+  shellVisibleSamples: number
+  totalSamples: number
+  reopenRestore: ProjectEditorReopenRestore
+  nonIdlePhaseSamplesDuringReopen: number
+  opacityFadedSamplesDuringReopen: number
+  observedPhasesDuringReopen: string[]
+  htmlLengthAfterReopen: number
+  overlayMidOpacitySamples: number
+  overlayMinOpacityDuringReopen: number
+  overlayMaxOpacityDuringReopen: number
+}
 
 function buildFallbackMarkdownContent(): string {
   const lines: string[] = [
@@ -43,7 +73,7 @@ function buildFallbackMarkdownContent(): string {
 }
 
 export async function testProjectEditorMarkdownSessionRestore(ctx: AutotestContext): Promise<TestResult[]> {
-  const { assert, cancelled, log, reopenProjectEditor, rootPath, sleep, waitFor } = ctx
+  const { assert, cancelled, log, rootPath, sleep, waitFor } = ctx
   const results: TestResult[] = []
   const record = (name: string, ok: boolean, detail?: Record<string, unknown>) => {
     assert(name, ok, detail)
@@ -96,6 +126,118 @@ export async function testProjectEditorMarkdownSessionRestore(ctx: AutotestConte
       8000,
       100
     )
+  }
+  const sampleShortcutReopenFrames = async (durationMs: number) => {
+    const samples: Array<{
+      selectFileEmptyStateVisible: boolean
+      shellVisible: boolean
+      bodyVisible: boolean
+      htmlLength: number
+      previewRestorePhase: string | null
+      previewContentOpacityZero: boolean
+      overlayOpacity: number
+    }> = []
+    const waitForSampleTick = () => new Promise<void>((resolve) => {
+      let resolved = false
+      const finish = () => {
+        if (resolved) return
+        resolved = true
+        resolve()
+      }
+      requestAnimationFrame(finish)
+      window.setTimeout(finish, 32)
+    })
+    const startedAt = performance.now()
+    while (performance.now() - startedAt < durationMs) {
+      const host = document.querySelector('.terminal-grid-subpage-host.is-open')
+      const shellVisible = Boolean(host?.querySelector('[data-subpage-panel-shell="true"]'))
+      const bodyVisible = Boolean(host?.querySelector('.project-editor-overlay.panel.is-open .project-editor-body'))
+      const previewBody = host?.querySelector('.project-editor-preview-body') as HTMLElement | null
+      const previewContent = previewBody?.querySelector('.project-editor-preview-content') as HTMLElement | null
+      const opacity = previewContent ? Number(window.getComputedStyle(previewContent).opacity) : 1
+      // The panel overlay (`.project-editor-overlay.panel`) used to fade in/out
+      // over 0.16s — that produced the user-visible "afterimage" on every
+      // shortcut toggle. We now sample its computed opacity directly: with the
+      // fade removed, every frame must read either 0 (closed) or 1 (open),
+      // never a fractional value.
+      const overlay = document.querySelector('.project-editor-overlay.panel') as HTMLElement | null
+      const overlayOpacity = overlay ? Number(window.getComputedStyle(overlay).opacity) : 0
+      samples.push({
+        selectFileEmptyStateVisible: Boolean(getApi()?.isSelectFileEmptyStateVisible?.()),
+        shellVisible,
+        bodyVisible,
+        htmlLength: getApi()?.getMarkdownRenderedHtml?.().length ?? -1,
+        previewRestorePhase: getApi()?.getPreviewRestorePhase?.() ?? null,
+        previewContentOpacityZero: opacity < 0.99,
+        overlayOpacity
+      })
+      await waitForSampleTick()
+    }
+    return samples
+  }
+  const reopenProjectEditorViaShortcut = async (trial: number): Promise<ShortcutReopenObservation> => {
+    const samplesPromise = sampleShortcutReopenFrames(SHORTCUT_REOPEN_SAMPLE_MS)
+    const triggered = window.__onwardAppDebug?.triggerShortcutAction?.({ type: 'terminalProjectEditor' }) === true
+    const reopened = await waitFor(
+      `pmsr-project-editor-shortcut-reopen-${trial}`,
+      () => Boolean(getApi()?.isOpen?.()),
+      8000,
+      80
+    )
+    const samples = await samplesPromise
+    const previewReady = reopened
+      ? await waitForPreviewReady(`pmsr-preview-ready-after-shortcut-reopen-${trial}`, targetPath)
+      : false
+    const selectFileEmptyStateSamples = samples.filter(sample => sample.selectFileEmptyStateVisible).length
+    const bodyBeforeShellSamples = samples.filter(sample => sample.bodyVisible && !sample.shellVisible).length
+    const bodyVisibleSamples = samples.filter(sample => sample.bodyVisible).length
+    const shellVisibleSamples = samples.filter(sample => sample.shellVisible).length
+    // Track preview-restore phase inside the reopen window. Pre-fix the
+    // owner-switch effect clears `markdownRenderedHtmlRef` so the reopen
+    // path falls into `applyMarkdownSessionCacheHit` → `beginPreviewRestore`,
+    // toggling phase to 'waiting-html' / 'restoring-layout'. Those phases
+    // drive `.project-editor-preview-content` to `opacity: 0` (CSS rule in
+    // ProjectEditor.css ~L1324), giving the user-visible "screen refreshes
+    // again" effect even though the rendered HTML is identical. Post-fix the
+    // ref is mirrored on capture, the cache-hit branch is skipped, and the
+    // phase remains 'idle' for the entire reopen.
+    const reopenIndex = samples.findIndex((sample) => sample.bodyVisible)
+    const reopenWindowSamples = reopenIndex === -1 ? [] : samples.slice(reopenIndex)
+    const phasesDuringReopen = reopenWindowSamples
+      .map((sample) => sample.previewRestorePhase)
+      .filter((phase): phase is string => Boolean(phase))
+    const nonIdlePhaseSamplesDuringReopen = phasesDuringReopen.filter((phase) => phase !== 'idle').length
+    const opacityFadedSamplesDuringReopen = reopenWindowSamples.filter((sample) => sample.previewContentOpacityZero).length
+    const observedPhasesDuringReopen = Array.from(new Set(phasesDuringReopen))
+    // PMSR-13b: across the whole sampling window (close-frames included)
+    // every overlay opacity reading must be exactly 0 (closed) or exactly 1
+    // (open). Pre-fix the panel overlay had `transition: opacity 0.16s ease`
+    // which guarantees that an rAF-paced sampler catches at least one frame
+    // with `0 < opacity < 1` during a 160ms ease curve. Post-fix the
+    // transition is removed and opacity flips instantly.
+    const overlayOpacities = samples.map((sample) => sample.overlayOpacity)
+    const overlayMidOpacitySamples = overlayOpacities.filter((opacity) => opacity > 0 && opacity < 1).length
+    const overlayMinOpacityDuringReopen = overlayOpacities.length === 0 ? -1 : Math.min(...overlayOpacities)
+    const overlayMaxOpacityDuringReopen = overlayOpacities.length === 0 ? -1 : Math.max(...overlayOpacities)
+    return {
+      trial,
+      triggered,
+      reopened,
+      previewReady,
+      selectFileEmptyStateSamples,
+      bodyBeforeShellSamples,
+      bodyVisibleSamples,
+      shellVisibleSamples,
+      totalSamples: samples.length,
+      reopenRestore: getApi()?.getLastProjectEditorReopenRestore?.() ?? null,
+      nonIdlePhaseSamplesDuringReopen,
+      opacityFadedSamplesDuringReopen,
+      observedPhasesDuringReopen,
+      htmlLengthAfterReopen: getApi()?.getMarkdownRenderedHtml?.().length ?? 0,
+      overlayMidOpacitySamples,
+      overlayMinOpacityDuringReopen,
+      overlayMaxOpacityDuringReopen
+    }
   }
 
   let targetPath = HARNESS_MARKDOWN_PATH
@@ -214,11 +356,38 @@ export async function testProjectEditorMarkdownSessionRestore(ctx: AutotestConte
     })
     if (!closed || cancelled()) return results
 
-    const reopened = await reopenProjectEditor('pmsr-project-editor-reopen')
-    record('PMSR-08-project-editor-reopened', reopened, {
-      isOpen: getApi()?.isOpen?.() ?? false
+    const canUseShortcutDebug = Boolean(window.__onwardAppDebug?.triggerShortcutAction)
+    record('PMSR-07a-shortcut-debug-api-available', canUseShortcutDebug, {
+      hasAppDebug: Boolean(window.__onwardAppDebug),
+      hasTriggerShortcutAction: Boolean(window.__onwardAppDebug?.triggerShortcutAction)
     })
-    if (!reopened || cancelled()) return results
+    if (!canUseShortcutDebug || cancelled()) return results
+
+    const shortcutReopenObservations: ShortcutReopenObservation[] = []
+    const firstShortcutReopen = await reopenProjectEditorViaShortcut(1)
+    shortcutReopenObservations.push(firstShortcutReopen)
+    record('PMSR-08-project-editor-reopened-by-shortcut', firstShortcutReopen.triggered && firstShortcutReopen.reopened, {
+      isOpen: getApi()?.isOpen?.() ?? false,
+      observation: firstShortcutReopen
+    })
+    if (!firstShortcutReopen.reopened || cancelled()) return results
+    const reopenRestore = firstShortcutReopen.reopenRestore
+    record('PMSR-08a-no-select-file-empty-state-during-shortcut-reopen', firstShortcutReopen.selectFileEmptyStateSamples === 0, {
+      selectFileEmptyStateSamples: firstShortcutReopen.selectFileEmptyStateSamples,
+      totalSamples: firstShortcutReopen.totalSamples,
+      activeFilePath: getApi()?.getActiveFilePath?.() ?? null,
+      reopenRestore
+    })
+    record('PMSR-08b-shortcut-reopen-used-retained-markdown-view', reopenRestore?.cause === 'retained-view' && reopenRestore.filePath === targetPath, {
+      reopenRestore,
+      expectedFilePath: targetPath
+    })
+    record('PMSR-08c-shortcut-reopen-shell-before-body', firstShortcutReopen.bodyVisibleSamples > 0 && firstShortcutReopen.bodyBeforeShellSamples === 0, {
+      bodyBeforeShellSamples: firstShortcutReopen.bodyBeforeShellSamples,
+      bodyVisibleSamples: firstShortcutReopen.bodyVisibleSamples,
+      shellVisibleSamples: firstShortcutReopen.shellVisibleSamples,
+      totalSamples: firstShortcutReopen.totalSamples
+    })
 
     const restoredPreview = await waitForPreviewReady('pmsr-preview-restored-after-reopen', targetPath)
     record('PMSR-09-target-file-and-mode-restored', restoredPreview && getApi()?.isMarkdownEditorVisible?.() === true, {
@@ -265,6 +434,104 @@ export async function testProjectEditorMarkdownSessionRestore(ctx: AutotestConte
       cacheEntry,
       cacheSize: cacheState?.size ?? null,
       cacheLimit: cacheState?.limit ?? null
+    })
+
+    for (let trial = 2; trial <= SHORTCUT_REOPEN_TRIALS; trial += 1) {
+      if (cancelled()) return results
+      const closedForTrial = await closeProjectEditor(`pmsr-project-editor-closed-shortcut-repeat-${trial}`)
+      if (!closedForTrial) {
+        shortcutReopenObservations.push({
+          trial,
+          triggered: false,
+          reopened: false,
+          previewReady: false,
+          selectFileEmptyStateSamples: -1,
+          bodyBeforeShellSamples: -1,
+          bodyVisibleSamples: 0,
+          shellVisibleSamples: 0,
+          totalSamples: 0,
+          reopenRestore: null,
+          nonIdlePhaseSamplesDuringReopen: -1,
+          opacityFadedSamplesDuringReopen: -1,
+          observedPhasesDuringReopen: [],
+          htmlLengthAfterReopen: 0,
+          overlayMidOpacitySamples: -1,
+          overlayMinOpacityDuringReopen: -1,
+          overlayMaxOpacityDuringReopen: -1
+        })
+        break
+      }
+      const observation = await reopenProjectEditorViaShortcut(trial)
+      shortcutReopenObservations.push(observation)
+      if (!observation.reopened || !observation.previewReady) break
+    }
+    const repeatedShortcutPathOk =
+      shortcutReopenObservations.length === SHORTCUT_REOPEN_TRIALS &&
+      shortcutReopenObservations.every((observation) =>
+        observation.triggered &&
+        observation.reopened &&
+        observation.previewReady &&
+        observation.selectFileEmptyStateSamples === 0 &&
+        observation.bodyVisibleSamples > 0 &&
+        observation.bodyBeforeShellSamples === 0 &&
+        observation.reopenRestore?.cause === 'retained-view' &&
+        observation.reopenRestore.filePath === targetPath
+      )
+    record('PMSR-13-escape-and-shortcut-reopen-repeat', repeatedShortcutPathOk, {
+      trials: shortcutReopenObservations
+    })
+
+    // PMSR-13a guards against the silent "reopen reflash" the user reported.
+    // The visible refresh comes from `previewRestorePhase` toggling through
+    // 'waiting-html' / 'restoring-layout' on every reopen, which CSS rule
+    // `.project-editor-preview-body.preview-phase-waiting-html
+    //  .project-editor-preview-content { opacity: 0; ... }` drives. Pre-fix
+    // the owner-switch effect clears `markdownRenderedHtmlRef`, the reopen
+    // path falls into `applyMarkdownSessionCacheHit` → `beginPreviewRestore`,
+    // phase momentarily becomes non-'idle', and the preview content fades
+    // to opacity 0 before fading back in. Post-fix the cache mirror keeps
+    // `shouldPreserveCachedRender` true, the cache-hit branch is skipped,
+    // and the phase stays 'idle' across the reopen so the content never fades.
+    const reopenSurvivedTrials = shortcutReopenObservations.filter((obs) => obs.reopened && obs.previewReady)
+    const noReflashOk =
+      reopenSurvivedTrials.length === SHORTCUT_REOPEN_TRIALS &&
+      reopenSurvivedTrials.every((obs) =>
+        obs.nonIdlePhaseSamplesDuringReopen === 0 &&
+        obs.opacityFadedSamplesDuringReopen === 0 &&
+        obs.htmlLengthAfterReopen > 0
+      )
+    record('PMSR-13a-shortcut-reopen-no-preview-phase-flash', noReflashOk, {
+      expectedTrials: SHORTCUT_REOPEN_TRIALS,
+      observedTrials: reopenSurvivedTrials.length,
+      perTrial: shortcutReopenObservations.map((obs) => ({
+        trial: obs.trial,
+        nonIdlePhaseSamplesDuringReopen: obs.nonIdlePhaseSamplesDuringReopen,
+        opacityFadedSamplesDuringReopen: obs.opacityFadedSamplesDuringReopen,
+        observedPhasesDuringReopen: obs.observedPhasesDuringReopen,
+        htmlLengthAfterReopen: obs.htmlLengthAfterReopen
+      }))
+    })
+
+    // PMSR-13b guards against the panel overlay fade returning. Each toggle
+    // (open or close) of `.project-editor-overlay.panel` must read its
+    // computed opacity as exactly 0 or exactly 1 — never a fractional value
+    // mid-transition. A 0.16s `transition: opacity` curve will, with
+    // certainty under a ~16ms rAF-paced sampler, produce at least one frame
+    // with `0 < opacity < 1`. Removing the transition in
+    // `ProjectEditor.css` makes the toggle instant and this assertion
+    // trivially pass.
+    const noOverlayFadeOk =
+      reopenSurvivedTrials.length === SHORTCUT_REOPEN_TRIALS &&
+      reopenSurvivedTrials.every((obs) => obs.overlayMidOpacitySamples === 0)
+    record('PMSR-13b-shortcut-toggle-no-overlay-fade', noOverlayFadeOk, {
+      expectedTrials: SHORTCUT_REOPEN_TRIALS,
+      observedTrials: reopenSurvivedTrials.length,
+      perTrial: shortcutReopenObservations.map((obs) => ({
+        trial: obs.trial,
+        overlayMidOpacitySamples: obs.overlayMidOpacitySamples,
+        overlayMinOpacityDuringReopen: obs.overlayMinOpacityDuringReopen,
+        overlayMaxOpacityDuringReopen: obs.overlayMaxOpacityDuringReopen
+      }))
     })
   } finally {
     for (const cleanupPath of cleanupPaths) {

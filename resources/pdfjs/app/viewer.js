@@ -104,6 +104,7 @@ function init() {
   bindUiEvents();
   bindViewerEvents();
   bindHostMessages();
+  bindResizeObserver();
   updatePageControls(1, 0);
   updateZoomUi({ scale: 1, presetValue: DEFAULT_SCALE_VALUE });
   applyI18nToDom();
@@ -270,8 +271,58 @@ function bindUiEvents() {
       event.preventDefault();
       els.searchInput.focus();
       els.searchInput.select();
+      return;
+    }
+    // Forward host-level shortcuts so the iframe boundary doesn't swallow them.
+    // Only Cmd/Ctrl+P (project Quick Open) and Escape (close subpage) — these
+    // are the keys the host actually handles. Cmd+F stays local (above).
+    if (isCmd && event.key.toLowerCase() === "p") {
+      event.preventDefault();
+      forwardHostKey(event);
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      forwardHostKey(event);
+      return;
     }
   });
+}
+
+function forwardHostKey(event) {
+  try {
+    window.parent.postMessage({
+      type: "onward:pdf:hostKey",
+      key: event.key,
+      code: event.code,
+      metaKey: event.metaKey,
+      ctrlKey: event.ctrlKey,
+      shiftKey: event.shiftKey,
+      altKey: event.altKey
+    }, "*");
+  } catch (_err) {
+    // Parent gone or postMessage blocked; nothing useful to do.
+  }
+}
+
+function bindResizeObserver() {
+  if (typeof ResizeObserver === "undefined") return;
+  let timer = null;
+  const observer = new ResizeObserver(() => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = null;
+      if (!currentDocument) return;
+      try {
+        // Self-assignment retriggers pdf.js's page-width / page-fit recompute
+        // against the new container width. Numeric scales become a no-op.
+        pdfViewer.currentScaleValue = pdfViewer.currentScaleValue;
+      } catch (_err) {
+        /* ignore */
+      }
+    }, 120);
+  });
+  observer.observe(els.viewerContainer);
 }
 
 function bindViewerEvents() {
@@ -690,3 +741,23 @@ function basenameFromUrl(url) {
     return "";
   }
 }
+
+// Test-only hook. Autotests cannot reliably trigger this iframe's window-level
+// keydown listener via cross-realm dispatchEvent on iframe.contentWindow
+// (Chromium does not propagate parent-realm synthetic KeyboardEvents to window
+// listeners in a sandboxed iframe). Exposing a direct helper lets the autotest
+// exercise the postMessage forwarding path from the iframe's own realm. Real
+// keyboard input still goes through the keydown listener unchanged.
+window.__onwardPdfTest = {
+  forwardHostKey: function (key, opts) {
+    opts = opts || {};
+    forwardHostKey({
+      key: key,
+      code: key === "Escape" ? "Escape" : "Key" + String(key).toUpperCase(),
+      metaKey: Boolean(opts.metaKey),
+      ctrlKey: Boolean(opts.ctrlKey),
+      shiftKey: Boolean(opts.shiftKey),
+      altKey: Boolean(opts.altKey)
+    });
+  }
+};

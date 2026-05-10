@@ -4,9 +4,11 @@
  */
 
 import { useEffect, useMemo, useRef } from 'react'
+import { redispatchPdfHostKey } from '../../utils/pdfHostKey'
+import { computePaneVisibility, type GitPdfStatus } from './computePaneVisibility'
 import './GitPdfCompare.css'
 
-export type GitPdfStatus = 'added' | 'deleted' | 'modified'
+export type { GitPdfStatus }
 
 export interface GitPdfCompareLabels {
   statusAdded: string
@@ -106,7 +108,10 @@ export function GitPdfCompare({
   const originalFrameRef = useRef<HTMLIFrameElement | null>(null)
   const modifiedFrameRef = useRef<HTMLIFrameElement | null>(null)
 
-  // Forward theme CSS vars to both viewer iframes once they're ready.
+  // Forward theme CSS vars to both viewer iframes once they're ready, and
+  // re-dispatch host-level shortcuts (Cmd/Ctrl+P, Escape) that the iframe
+  // forwarded via postMessage so the host's existing keyboard handlers see
+  // them as if the user pressed the key outside the iframe.
   useEffect(() => {
     const vars = (() => {
       const style = window.getComputedStyle(document.documentElement)
@@ -130,11 +135,14 @@ export function GitPdfCompare({
     })()
     const handler = (event: MessageEvent) => {
       if (!event.data || typeof event.data !== 'object') return
-      if (event.data.type !== 'onward:pdf:ready') return
-      if (event.source === originalFrameRef.current?.contentWindow) {
-        originalFrameRef.current?.contentWindow?.postMessage({ type: 'onward:pdf:theme', vars }, '*')
-      } else if (event.source === modifiedFrameRef.current?.contentWindow) {
-        modifiedFrameRef.current?.contentWindow?.postMessage({ type: 'onward:pdf:theme', vars }, '*')
+      const fromOriginal = event.source === originalFrameRef.current?.contentWindow
+      const fromModified = event.source === modifiedFrameRef.current?.contentWindow
+      if (!fromOriginal && !fromModified) return
+      if (event.data.type === 'onward:pdf:ready') {
+        const target = fromOriginal ? originalFrameRef.current : modifiedFrameRef.current
+        target?.contentWindow?.postMessage({ type: 'onward:pdf:theme', vars }, '*')
+      } else if (event.data.type === 'onward:pdf:hostKey') {
+        redispatchPdfHostKey(event.data as Record<string, unknown>)
       }
     }
     window.addEventListener('message', handler)
@@ -147,51 +155,55 @@ export function GitPdfCompare({
         : labels.statusModified
   const statusClass = `git-pdf-compare-status git-pdf-compare-status-${status}`
 
+  const { showOriginalPane, showModifiedPane, isSinglePane } = computePaneVisibility(status)
+
   return (
     <div className="git-pdf-compare">
       <div className="git-pdf-compare-header">
         <span className={statusClass}>{statusLabel}</span>
         <span className="git-pdf-compare-filename" title={filename}>{filename}</span>
       </div>
-      <div className="git-pdf-compare-panes">
-        <div className="git-pdf-compare-pane">
-          <div className="git-pdf-compare-pane-header">
-            <span className="git-pdf-compare-pane-label">
-              {status === 'added' ? labels.labelOriginal : labels.labelOriginal}
-            </span>
-            <span className="git-pdf-compare-pane-size">{formatFileSize(originalSize)}</span>
+      <div className={`git-pdf-compare-panes${isSinglePane ? ' is-single' : ''}`}>
+        {showOriginalPane && (
+          <div className="git-pdf-compare-pane" data-side="original">
+            <div className="git-pdf-compare-pane-header">
+              <span className="git-pdf-compare-pane-label">{labels.labelOriginal}</span>
+              <span className="git-pdf-compare-pane-size">{formatFileSize(originalSize)}</span>
+            </div>
+            {originalSrc ? (
+              <iframe
+                ref={originalFrameRef}
+                className="git-pdf-compare-frame"
+                src={originalSrc}
+                title={`${filename} (original)`}
+                sandbox="allow-same-origin allow-scripts"
+              />
+            ) : (
+              <div className="git-pdf-compare-empty">{labels.noOriginal}</div>
+            )}
           </div>
-          {originalSrc ? (
-            <iframe
-              ref={originalFrameRef}
-              className="git-pdf-compare-frame"
-              src={originalSrc}
-              title={`${filename} (original)`}
-              sandbox="allow-same-origin allow-scripts"
-            />
-          ) : (
-            <div className="git-pdf-compare-empty">{labels.noOriginal}</div>
-          )}
-        </div>
-        <div className="git-pdf-compare-pane">
-          <div className="git-pdf-compare-pane-header">
-            <span className="git-pdf-compare-pane-label">
-              {status === 'deleted' ? labels.labelModified : status === 'added' ? labels.labelAdded : labels.labelModified}
-            </span>
-            <span className="git-pdf-compare-pane-size">{formatFileSize(modifiedSize)}</span>
+        )}
+        {showModifiedPane && (
+          <div className="git-pdf-compare-pane" data-side="modified">
+            <div className="git-pdf-compare-pane-header">
+              <span className="git-pdf-compare-pane-label">
+                {status === 'added' ? labels.labelAdded : labels.labelModified}
+              </span>
+              <span className="git-pdf-compare-pane-size">{formatFileSize(modifiedSize)}</span>
+            </div>
+            {modifiedSrc ? (
+              <iframe
+                ref={modifiedFrameRef}
+                className="git-pdf-compare-frame"
+                src={modifiedSrc}
+                title={`${filename} (modified)`}
+                sandbox="allow-same-origin allow-scripts"
+              />
+            ) : (
+              <div className="git-pdf-compare-empty">{labels.noModified}</div>
+            )}
           </div>
-          {modifiedSrc ? (
-            <iframe
-              ref={modifiedFrameRef}
-              className="git-pdf-compare-frame"
-              src={modifiedSrc}
-              title={`${filename} (modified)`}
-              sandbox="allow-same-origin allow-scripts"
-            />
-          ) : (
-            <div className="git-pdf-compare-empty">{labels.noModified}</div>
-          )}
-        </div>
+        )}
       </div>
     </div>
   )
