@@ -542,7 +542,6 @@ export interface ProjectReadResult {
   isPdf?: boolean
   isEpub?: boolean
   previewUrl?: string
-  previewData?: string
   previewPath?: string
   sizeBytes?: number
   openMode?: ProjectFileResolvedOpenMode

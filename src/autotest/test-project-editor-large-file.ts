@@ -63,6 +63,7 @@ export async function testProjectEditorLargeFile(ctx: AutotestContext): Promise<
   const binaryTextPath = `${suiteDir}/unknown-text.rawbin`
   const supportedPngPath = 'resources/test-preview.png'
   const supportedPdfPath = 'test/autotest/fixtures/pdf-epub/onward-autotest.pdf'
+  const supportedEpubPath = 'test/autotest/fixtures/pdf-epub/onward-autotest.epub'
   const largeGifPath = 'test/autotest/results/project-editor-large-file/large-preview.gif'
 
   log('project-editor-large-file:setup', {
@@ -75,6 +76,7 @@ export async function testProjectEditorLargeFile(ctx: AutotestContext): Promise<
     binaryTextPath,
     supportedPngPath,
     supportedPdfPath,
+    supportedEpubPath,
     largeGifPath
   })
 
@@ -321,6 +323,37 @@ export async function testProjectEditorLargeFile(ctx: AutotestContext): Promise<
     })
     record('PLF-20-large-gif-preview-uses-file-url', Boolean(largeGifState?.src.startsWith('file:')), {
       srcPrefix: largeGifState?.src.slice(0, 32) ?? null
+    })
+
+    const epubOpen = api()!.openFileByPathAsUser(supportedEpubPath)
+    const epubReady = await waitFor(
+      'plf-supported-epub-reader',
+      () => api()?.getActiveFilePath?.() === supportedEpubPath &&
+        api()?.getOpenChoiceDialogState?.()?.visible === false &&
+        Boolean(api()?.isEpubReaderVisible?.()),
+      12000
+    )
+    if (!epubReady && api()?.getOpenChoiceDialogState?.()?.visible) {
+      api()?.chooseOpenChoice?.('cancel')
+    }
+    await epubOpen
+    record('PLF-21-supported-epub-bypasses-binary-choice', epubReady, {
+      active: api()?.getActiveFilePath?.(),
+      choice: api()?.getOpenChoiceDialogState?.(),
+      epubState: api()?.getEpubReaderState?.()
+    })
+    if (cancelled()) return results
+
+    // Probe the IPC contract directly: EPUB previews must hand the renderer
+    // a file:// URL so epub.js streams via Chromium's file loader instead of
+    // the main process slurping the whole archive into a base64 string.
+    const epubProbe = await window.electronAPI.project.readFile(rootPath, supportedEpubPath, { openMode: 'auto' })
+    const probeFields = epubProbe as unknown as Record<string, unknown>
+    const previewUrl = typeof probeFields.previewUrl === 'string' ? probeFields.previewUrl : ''
+    record('PLF-22-supported-epub-preview-uses-file-url', Boolean(epubProbe.success && previewUrl.startsWith('file:') && !('previewData' in probeFields)), {
+      success: epubProbe.success,
+      previewUrlPrefix: previewUrl.slice(0, 32),
+      hasPreviewData: 'previewData' in probeFields
     })
   } catch (error) {
     record('PLF-99-unhandled-error', false, { error: String(error) })

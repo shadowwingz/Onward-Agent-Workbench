@@ -11,8 +11,6 @@ import { isSupportedImageFile } from './image-utils'
 export const PROJECT_TEXT_WARNING_SIZE = 3 * 1024 * 1024
 export const PROJECT_TEXT_EAGER_LIMIT = 30 * 1024 * 1024
 export const PROJECT_FILE_CHUNK_SIZE = 512 * 1024
-const MAX_PDF_FILE_SIZE = 256 * 1024 * 1024
-const MAX_EPUB_FILE_SIZE = 64 * 1024 * 1024
 const BINARY_SNIFF_BYTES = 64 * 1024
 const SQLITE_DEFAULT_LIMIT = 100
 const SQLITE_MAX_LIMIT = 500
@@ -479,18 +477,6 @@ export async function readProjectFile(root: string, path: string, options: Proje
     const isImageByExt = isSupportedImageFile(fullPath)
     const isPdfByExt = isPdfExtension(fullPath)
     const isEpubByExt = isEpubExtension(fullPath)
-    const sizeLimit = isPdfByExt
-      ? MAX_PDF_FILE_SIZE
-      : isEpubByExt
-        ? MAX_EPUB_FILE_SIZE
-        : PROJECT_TEXT_EAGER_LIMIT
-    if ((isPdfByExt || isEpubByExt) && fileStat.size > sizeLimit && !isSqliteByExt) {
-      return {
-        success: false,
-        ...baseProjectReadResult(rootPath, path, fileStat.size),
-        error: `File is too large to load (>${Math.floor(sizeLimit / 1024)}KB).`
-      }
-    }
 
     if (isSqliteByExt) {
       return {
@@ -523,7 +509,12 @@ export async function readProjectFile(root: string, path: string, options: Proje
     }
 
     if (isEpubByExt) {
-      const buffer = await readFile(fullPath)
+      // Hand the raw .epub bytes to epub.js via Chromium's file loader.
+      // Avoids pulling the whole archive into the main process (the previous
+      // base64 path inflated bytes by ~33% and capped at 64 MB). The
+      // host-side fetch lives in ProjectEditor so EpubReader's mount stays
+      // synchronous — see the queue.tick / reportLocation rAF patches in
+      // EpubReader.tsx for the matching rAF-stall workaround.
       return {
         success: true,
         root: rootPath,
@@ -533,7 +524,7 @@ export async function readProjectFile(root: string, path: string, options: Proje
         isImage: false,
         isSqlite: false,
         isEpub: true,
-        previewData: buffer.toString('base64'),
+        previewUrl: `${toFileUrl(fullPath)}?mtime=${Math.trunc(fileStat.mtimeMs)}`,
         previewPath: fullPath,
         sizeBytes: fileStat.size
       }

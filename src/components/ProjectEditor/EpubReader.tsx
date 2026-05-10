@@ -11,8 +11,14 @@ import type { OutlineItem } from './Outline/types'
 import { OutlineSymbolKind } from './Outline/types'
 
 interface EpubReaderProps {
-  /** Base64-encoded EPUB bytes delivered by the main process. */
-  previewData: string
+  /**
+   * .epub bytes already fetched by ProjectEditor (host-side `fetch(file://...)`).
+   * Passed in as ArrayBuffer so this component's mount path is purely
+   * synchronous — async work inside the useEffect was observed to widen the
+   * layout-race window around epub.js's first display(). Replaces the
+   * previous main-process base64 path and removes the 64 MB cap.
+   */
+  previewBuffer: ArrayBuffer
   filePath: string
   /** Optional per-file memory restored by the host. */
   initialFontPct?: number
@@ -48,15 +54,6 @@ type EpubSearchHit = {
 const MIN_FONT_PCT = 70
 const MAX_FONT_PCT = 200
 const FONT_STEP = 10
-
-function base64ToArrayBuffer(base64: string): ArrayBuffer {
-  const binary = atob(base64)
-  const bytes = new Uint8Array(binary.length)
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i)
-  }
-  return bytes.buffer
-}
 
 function collectHostTheme(): { background: string; foreground: string; accent: string; muted: string; panel: string } {
   const style = window.getComputedStyle(document.documentElement)
@@ -110,7 +107,7 @@ function flattenNavItems(items: NavItem[], depth = 0): OutlineItem[] {
 }
 
 export const EpubReader = forwardRef<EpubReaderHandle, EpubReaderProps>(function EpubReader(
-  { previewData, filePath, initialFontPct, initialLocation, initialScrollTop, onMemoryChange, onOutlineLoaded, onLocationChange },
+  { previewBuffer, filePath, initialFontPct, initialLocation, initialScrollTop, onMemoryChange, onOutlineLoaded, onLocationChange },
   ref
 ) {
   const { t } = useI18n()
@@ -119,7 +116,7 @@ export const EpubReader = forwardRef<EpubReaderHandle, EpubReaderProps>(function
   const renditionRef = useRef<Rendition | null>(null)
   // Keep initialLocation / initialScrollTop fresh across file switches. These
   // refs are snapshotted at the start of the main mount effect (which re-runs
-  // whenever previewData changes — i.e. per file open). Updating them on
+  // whenever previewBuffer changes — i.e. per file open). Updating them on
   // prop change keeps them ready for the next effect run without triggering
   // a re-mount of the book.
   const initialLocationRef = useRef<string | null>(initialLocation ?? null)
@@ -209,8 +206,7 @@ export const EpubReader = forwardRef<EpubReaderHandle, EpubReaderProps>(function
     let handleScroll: (() => void) | null = null
 
     try {
-      const buffer = base64ToArrayBuffer(previewData)
-      book = ePub(buffer) as Book
+      book = ePub(previewBuffer) as Book
       bookRef.current = book
 
       rendition = book.renderTo(container, {
@@ -220,6 +216,61 @@ export const EpubReader = forwardRef<EpubReaderHandle, EpubReaderProps>(function
         allowScriptedContent: false
       })
       renditionRef.current = rendition
+
+      // epub.js 0.3.93 captures `window.requestAnimationFrame` ONCE at module
+      // load (utils/core.js#12) and reuses that const in two critical hot
+      // paths:
+      //   1. Queue.tick (rendition.q.tick) — drives every dequeue (attachTo,
+      //      start, display).
+      //   2. Rendition.reportLocation — the inline `requestAnimationFrame(...)`
+      //      that emits the `relocated` / `locationChanged` events.
+      // When the EPUB mounts during a layout transition (PDF teardown, modal
+      // opening, hidden parent), the browser can defer or skip rAF — both
+      // paths stall: queue → `paneDescendants: 0`; reportLocation →
+      // `currentLocationHref: null`. Replacing rAF on `window` doesn't help
+      // because epub.js holds its own captured reference.
+      //
+      // Patch the two paths on the per-instance properties / methods so we
+      // bypass the captured const without touching epub.js source.
+      const renditionAny = rendition as unknown as {
+        q: { tick: (cb: () => void) => void; run: () => void; enqueue: (task: unknown) => unknown }
+        manager: { currentLocation: () => unknown }
+        located: (result: unknown) => { start?: { index?: number; href?: string; cfi?: string; percentage?: number }; end?: { cfi?: string } } | null
+        location: unknown
+        emit: (event: string, payload?: unknown) => void
+        reportLocation: () => unknown
+      }
+
+      // Patch 1: queue.tick — replace rAF with setTimeout(0) and force-call
+      // run() once to swap out any rAF the constructor already enqueued.
+      renditionAny.q.tick = (cb: () => void) => window.setTimeout(cb, 0)
+      renditionAny.q.run()
+
+      // Patch 2: reportLocation — re-implement without the inline rAF so
+      // `relocated` / `locationChanged` fire even if rAF stalls.
+      renditionAny.reportLocation = function patchedReportLocation() {
+        return renditionAny.q.enqueue(function reportedLocation(this: typeof renditionAny) {
+          const location = this.manager.currentLocation()
+          const settle = (result: unknown) => {
+            const located = this.located(result)
+            if (!located || !located.start || !located.end) return
+            this.location = located
+            this.emit('locationChanged', {
+              index: located.start.index,
+              href: located.start.href,
+              start: located.start.cfi,
+              end: located.end.cfi,
+              percentage: located.start.percentage
+            })
+            this.emit('relocated', this.location)
+          }
+          if (location && typeof (location as { then?: unknown }).then === 'function') {
+            ;(location as Promise<unknown>).then(settle)
+          } else if (location) {
+            settle(location)
+          }
+        }.bind(renditionAny))
+      }
 
       // Apply the theme and start display once the book is ready so we don't
       // race with epub.js's internal startup sequence (which touches
@@ -417,7 +468,7 @@ export const EpubReader = forwardRef<EpubReaderHandle, EpubReaderProps>(function
       }
       bookRef.current = null
     }
-  }, [previewData, applyTheme])
+  }, [previewBuffer, applyTheme])
 
   // Re-apply theme when host theme changes (class / data-theme mutations).
   useEffect(() => {

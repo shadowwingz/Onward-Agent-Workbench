@@ -1019,7 +1019,13 @@ export function ProjectEditor({
   const [epubActiveHref, setEpubActiveHref] = useState<string | null>(null)
   const [imagePreviewUrl, setImagePreviewUrl] = useState<string | null>(null)
   const [pdfPreviewUrl, setPdfPreviewUrl] = useState<string | null>(null)
-  const [epubPreviewData, setEpubPreviewData] = useState<string | null>(null)
+  const [epubPreviewUrl, setEpubPreviewUrl] = useState<string | null>(null)
+  // EPUB bytes are fetched from `epubPreviewUrl` in a follow-on effect so that
+  // EpubReader's mount stays purely synchronous — async work inside its own
+  // useEffect was observed to widen the layout-race window around epub.js's
+  // first display(). See the rAF queue.tick / reportLocation patches in
+  // EpubReader.tsx for the matching workaround on the rendering side.
+  const [epubPreviewBuffer, setEpubPreviewBuffer] = useState<ArrayBuffer | null>(null)
   const [isMarkdownPreviewOpen, setIsMarkdownPreviewOpen] = useState(true)
   const isMarkdownPreviewOpenRef = useRef(true)
   const [isMarkdownEditorVisible, setIsMarkdownEditorVisible] = useState(() => {
@@ -2500,7 +2506,7 @@ export function ProjectEditor({
     setEpubActiveHref(null)
     setImagePreviewUrl(null)
     setPdfPreviewUrl(null)
-    setEpubPreviewData(null)
+    setEpubPreviewUrl(null)
     setIsDirty(false)
     setIsLoadingFile(false)
     setIsMarkdownRenderEnabled(false)
@@ -2567,7 +2573,7 @@ export function ProjectEditor({
     setEpubActiveHref(null)
     setImagePreviewUrl(null)
     setPdfPreviewUrl(null)
-    setEpubPreviewData(null)
+    setEpubPreviewUrl(null)
     setIsDirty(false)
     setIsLoadingFile(false)
     setIsMarkdownRenderEnabled(false)
@@ -3459,6 +3465,43 @@ export function ProjectEditor({
     return { left: Math.max(0, left), top: Math.min(top, window.innerHeight - 300) }
   }, [])
 
+  // Pull EPUB bytes via fetch as soon as the URL changes, then publish a
+  // fresh ArrayBuffer downstream. Keeping the async hop here (rather than
+  // inside EpubReader's own useEffect) means EpubReader sees a buffer prop
+  // and runs its book / rendition setup synchronously — async work inside
+  // the reader was observed to widen the layout-race window around epub.js's
+  // first display() and trip the rAF stall paths even with the in-component
+  // patches (see queue.tick / reportLocation overrides in EpubReader.tsx).
+  useEffect(() => {
+    if (!epubPreviewUrl) {
+      setEpubPreviewBuffer(null)
+      return
+    }
+    const controller = new AbortController()
+    let cancelled = false
+    void (async () => {
+      try {
+        const response = await fetch(epubPreviewUrl, { signal: controller.signal })
+        if (cancelled) return
+        if (!response.ok) {
+          showStatus('error', t('projectEditor.error.readFile'))
+          return
+        }
+        const buffer = await response.arrayBuffer()
+        if (cancelled) return
+        setEpubPreviewBuffer(buffer)
+      } catch (err) {
+        if (cancelled) return
+        if ((err as { name?: string })?.name === 'AbortError') return
+        showStatus('error', String((err as { message?: string })?.message ?? err))
+      }
+    })()
+    return () => {
+      cancelled = true
+      controller.abort()
+    }
+  }, [epubPreviewUrl, showStatus, t])
+
   // Close overflow dropdown on click outside (Escape is handled by handleEscape → useSubpageEscape)
   useEffect(() => {
     if (!pinOverflowOpen && !recentOverflowOpen) return
@@ -3914,7 +3957,7 @@ export function ProjectEditor({
           setEpubActiveHref(null)
           setImagePreviewUrl(null)
           setPdfPreviewUrl(null)
-          setEpubPreviewData(null)
+          setEpubPreviewUrl(null)
           setFileContent('')
           fileContentRef.current = ''
           originalContentRef.current = ''
@@ -3989,7 +4032,7 @@ export function ProjectEditor({
     setEpubActiveHref(null)
     setImagePreviewUrl(result.isImage ? (result.previewUrl ?? null) : null)
     setPdfPreviewUrl(pdfFile ? (result.previewUrl ?? null) : null)
-    setEpubPreviewData(epubFile ? (result.previewData ?? null) : null)
+    setEpubPreviewUrl(epubFile ? (result.previewUrl ?? null) : null)
     let markdownCacheEntry: MarkdownSessionCacheEntry | null = null
     if (!binaryFile && !result.isImage && !sqliteFile && isMarkdownPath(path)) {
       const cacheRead = readMarkdownSessionCache(root, path, result.content ?? '')
@@ -8172,7 +8215,7 @@ export function ProjectEditor({
                     </div>
                   )
                 })()
-              ) : activeFilePath && isEpub && epubPreviewData ? (
+              ) : activeFilePath && isEpub && epubPreviewBuffer ? (
                 (() => {
                   const normalized = normalizePath(activeFilePath)
                   const memory = fileMemoryRef.current.get(normalized)
@@ -8181,7 +8224,7 @@ export function ProjectEditor({
                       <div className="project-editor-editor-pane" style={{ flex: '1 1 0%' }}>
                         <EpubReader
                           ref={epubReaderRef}
-                          previewData={epubPreviewData}
+                          previewBuffer={epubPreviewBuffer}
                           filePath={activeFilePath}
                           initialFontPct={memory?.epubFontPct}
                           initialLocation={memory?.epubLocation ?? null}

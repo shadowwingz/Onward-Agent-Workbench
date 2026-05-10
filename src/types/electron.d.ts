@@ -437,9 +437,8 @@ export interface ProjectReadResult {
   isSqlite: boolean
   isPdf?: boolean
   isEpub?: boolean
+  /** file:// URL with mtime cache buster. PDF: pdf.js viewer URL. Image / EPUB: direct file URL. */
   previewUrl?: string
-  /** Base64-encoded file bytes for preview formats that load in-memory (EPUB). */
-  previewData?: string
   /** Absolute filesystem path of the previewed file (PDF/EPUB). */
   previewPath?: string
   sizeBytes?: number
