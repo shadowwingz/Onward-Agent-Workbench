@@ -1,0 +1,108 @@
+/*
+ * SPDX-FileCopyrightText: 2026 OPPO
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
+ * Shared types for the GitStateMirror refactor.
+ *
+ * The mirror is the single source of truth for branch / repo name / status
+ * colour / file list / per-file diff body. Lives in a Worker Thread (so
+ * `git status --porcelain=v2 -z` and `@parcel/watcher` callbacks never run
+ * on main / renderer), and reaches consumers via a thin pub/sub router on
+ * main.
+ *
+ * Wire shape:
+ *   Renderer ── (subscribe/unsubscribe/push-cwd) ──→ Main router
+ *                                                      │
+ *   Renderer ←── (mirror-update broadcast) ────────────┘
+ *                       ▲
+ *                       │ (delta postMessage)
+ *                       │
+ *                  Worker Thread
+ *                       │ (parcel-watcher fs events)
+ *                       │ (git status reruns)
+ *                       ▼
+ *
+ * Every cross-thread message is one of `MainToMirrorMessage` / `MirrorToMainMessage`.
+ * The two unions stay deliberately small: pub/sub is the only model.
+ */
+
+import type { GitFileStatus, GitRepoContext, TerminalGitStatus } from './git-utils'
+
+/**
+ * Immutable snapshot of a single repo's state. Computed in the worker each
+ * time `git status --porcelain=v2 -z` is run; the renderer renders it
+ * read-only.
+ */
+export interface MirrorState {
+  cwd: string
+  /** Resolved `rev-parse --show-toplevel`; null when cwd is not in a git repo. */
+  repoRoot: string | null
+  /** Last segment of `repoRoot`. Null when not a repo. */
+  repoName: string | null
+  /** Current branch name, or null on detached HEAD / non-repo. */
+  branch: string | null
+  /** Status colour bucket — drives the terminal-grid-branch--{status} className. */
+  status: TerminalGitStatus | null
+  /** File list (unstaged + staged + untracked). Empty array when clean. */
+  files: GitFileStatus[]
+  /** Multi-repo outline (parent + submodules) when present. */
+  repos?: GitRepoContext[]
+  /** Set when submodule discovery is still running (staged load). */
+  submodulesLoading?: boolean
+  /** Captured `Date.now()` when the worker generated this state. */
+  capturedAt: number
+}
+
+/**
+ * Per-file working-tree + index body. Streamed lazily on subscriber
+ * request. The worker keeps a `Map<fileKey, { body, statToken }>` and
+ * skips re-reading when the on-disk stat token matches the cached one.
+ */
+export interface MirrorFileBody {
+  cwd: string
+  fileKey: string
+  filename: string
+  originalContent: string
+  modifiedContent: string
+  isBinary: boolean
+  isImage?: boolean
+  isSvg?: boolean
+  isPdf?: boolean
+  isEpub?: boolean
+  /** `mtime:size` of the working-tree path at read time. */
+  statToken: string
+}
+
+/**
+ * Delta the worker emits when a recompute changes anything. Renderer
+ * merges into its local copy of `MirrorState`.
+ */
+export type MirrorDelta = Partial<Omit<MirrorState, 'cwd' | 'capturedAt'>> & {
+  capturedAt: number
+}
+
+// ---------------------------------------------------------------------------
+// Wire messages
+// ---------------------------------------------------------------------------
+
+export type MainToMirrorMessage =
+  | { kind: 'attach-watch'; cwd: string }
+  | { kind: 'detach-watch'; cwd: string }
+  | { kind: 'switch-cwd'; terminalId: string; newCwd: string | null }
+  | { kind: 'request-file-body'; cwd: string; fileKey: string; force: boolean; replyId: number }
+  | { kind: 'focus-resync'; cwd: string | null }
+  | { kind: 'shutdown' }
+
+export type MirrorToMainMessage =
+  | { kind: 'ready' }
+  | { kind: 'mirror-update'; cwd: string; state: MirrorState; delta: MirrorDelta }
+  | { kind: 'file-body-update'; replyId: number; body: MirrorFileBody | null; error?: string }
+  | { kind: 'log'; level: 'info' | 'warn' | 'error'; message: string; data?: Record<string, unknown> }
+
+/**
+ * Renderer-facing snapshot type. Same shape as `MirrorState` — exported
+ * separately so renderer code never imports from `electron/main/*`.
+ */
+export type RendererMirrorSnapshot = MirrorState

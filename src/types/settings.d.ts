@@ -86,6 +86,8 @@ export interface SettingsState {
    * git repository. Default true.
    */
   autoFollowGitBranchForTaskName: boolean
+  /** Global switch for opt-in performance diagnostics panels. */
+  performanceDiagnosticsEnabled: boolean
   updatedAt: number
 }
 

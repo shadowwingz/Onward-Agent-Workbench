@@ -85,6 +85,8 @@ interface SettingsState {
   telemetryInstanceId: string | null
   /** Auto-follow Git branch for Task name (default true). Added in v6. */
   autoFollowGitBranchForTaskName: boolean
+  /** Global switch for opt-in performance diagnostics panels. Added in v7. */
+  performanceDiagnosticsEnabled: boolean
   updatedAt: number
 }
 
@@ -111,7 +113,8 @@ const MIGRATION_THEME: ThemeSettings = {
 
 // Current version number
 // v6: introduces autoFollowGitBranchForTaskName (default true).
-const CURRENT_VERSION = 6
+// v7: introduces performanceDiagnosticsEnabled (default false; legacy values reset on upgrade).
+const CURRENT_VERSION = 7
 
 /** Settings panel default width */
 const DEFAULT_SETTINGS_PANEL_WIDTH = 400
@@ -176,6 +179,7 @@ function createDefaultSettingsState(): SettingsState {
     telemetryConsent: null,
     telemetryInstanceId: null,
     autoFollowGitBranchForTaskName: true,
+    performanceDiagnosticsEnabled: false,
     updatedAt: Date.now()
   }
 }
@@ -283,6 +287,13 @@ class SettingsStorage {
     const telemetryInstanceId = typeof state.telemetryInstanceId === 'string' && state.telemetryInstanceId.length > 0
       ? state.telemetryInstanceId
       : null
+    // v7: force-reset performanceDiagnosticsEnabled to false on upgrade so users
+    // who toggled it ON in earlier versions land on the documented default; the
+    // toggle is respected normally on subsequent loads.
+    const isLegacyPerfDiagState = typeof state.version === 'number' && state.version < 7
+    const performanceDiagnosticsEnabled = isLegacyPerfDiagState
+      ? false
+      : state.performanceDiagnosticsEnabled === true
 
     // autoFollowGitBranchForTaskName (v6): default true for fresh installs and
     // for existing users upgrading from < v6 (the rule needs to take effect
@@ -303,6 +314,7 @@ class SettingsStorage {
       telemetryConsent,
       telemetryInstanceId,
       autoFollowGitBranchForTaskName,
+      performanceDiagnosticsEnabled,
       updatedAt: state.updatedAt ?? Date.now()
     }
   }
@@ -491,6 +503,9 @@ class SettingsStorage {
       }
       if (typeof partial.autoFollowGitBranchForTaskName === 'boolean') {
         this.state.autoFollowGitBranchForTaskName = partial.autoFollowGitBranchForTaskName
+      }
+      if (typeof partial.performanceDiagnosticsEnabled === 'boolean') {
+        this.state.performanceDiagnosticsEnabled = partial.performanceDiagnosticsEnabled
       }
       this.state.updatedAt = Date.now()
       this.persist()

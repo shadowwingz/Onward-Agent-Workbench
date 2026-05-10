@@ -357,8 +357,10 @@ export interface AppStateAPI {
   onFlushPendingState: (callback: () => void | Promise<void>) => void
 }
 
-export type GitChangeType = 'unstaged' | 'staged' | 'untracked'
-export type GitStatusCode = 'M' | 'A' | 'D' | 'R' | 'C' | '?'
+export type GitChangeType = 'unstaged' | 'staged' | 'untracked' | 'conflict'
+export type GitResourceGroup = 'workingTree' | 'index' | 'untracked' | 'merge'
+export type GitResourceRef = 'HEAD' | 'index' | 'workingTree' | 'empty'
+export type GitStatusCode = 'M' | 'A' | 'D' | 'R' | 'C' | '?' | '!'
 
 export interface GitSubmoduleInfo {
   name: string
@@ -385,6 +387,9 @@ export interface GitFileStatus {
   additions: number
   deletions: number
   changeType: GitChangeType
+  resourceGroup: GitResourceGroup
+  originalRef: GitResourceRef | null
+  modifiedRef: GitResourceRef | null
   repoRoot?: string
   repoLabel?: string
   isSubmoduleEntry?: boolean
@@ -478,6 +483,39 @@ export interface TerminalGitInfo {
   status: TerminalGitStatus | null
 }
 
+export type GitDiffContentCacheMissReason =
+  | 'first-load'
+  | 'invalidated-mutation'
+  | 'invalidated-watch'
+  | 'invalidated-mirror'
+  | 'invalidated-refresh'
+  | 'renderer-force-refresh'
+  | 'project-queue-evicted'
+  | 'single-file-too-large'
+  | 'precompute-pending'
+  | 'entry-not-warmed'
+  | 'worker-error'
+
+export type GitDiffContentCacheSource =
+  | 'renderer-memory'
+  | 'main-content-cache'
+  | 'worker-rebuild'
+
+export interface GitDiffContentCacheInfo {
+  state: 'hit' | 'miss'
+  source: GitDiffContentCacheSource
+  missReason?: GitDiffContentCacheMissReason
+  project?: string
+  key?: string
+  stored?: boolean
+  bytes?: number
+}
+
+export interface GitFileContentRequestOptions {
+  force?: boolean
+  missReason?: GitDiffContentCacheMissReason
+}
+
 export interface GitFileContentResult {
   success: boolean
   cwd: string
@@ -491,6 +529,7 @@ export interface GitFileContentResult {
   modifiedImageUrl?: string
   originalImageSize?: number
   modifiedImageSize?: number
+  cacheInfo?: GitDiffContentCacheInfo
   error?: string
 }
 
@@ -706,7 +745,7 @@ export interface GitAPI {
   getHistory: (cwd: string, options?: { limit?: number; skip?: number }) => Promise<GitHistoryResult>
   getHistoryDiff: (cwd: string, options: GitHistoryDiffOptions) => Promise<GitHistoryDiffResult>
   getHistoryFileContent: (cwd: string, options: GitHistoryFileContentOptions) => Promise<GitHistoryFileContentResult>
-  getFileContent: (cwd: string, file: Pick<GitFileStatus, 'filename' | 'status' | 'originalFilename' | 'changeType' | 'isSubmoduleEntry'>, repoRoot?: string) => Promise<GitFileContentResult>
+  getFileContent: (cwd: string, file: Pick<GitFileStatus, 'filename' | 'status' | 'originalFilename' | 'changeType' | 'isSubmoduleEntry'>, repoRoot?: string, options?: GitFileContentRequestOptions) => Promise<GitFileContentResult>
   saveFileContent: (cwd: string, filename: string, content: string) => Promise<GitFileSaveResult>
   stageFile: (cwd: string, filename: string, repoRoot?: string) => Promise<GitFileActionResult>
   unstageFile: (cwd: string, filename: string, repoRoot?: string) => Promise<GitFileActionResult>
@@ -727,7 +766,35 @@ export interface GitAPI {
   // under a watched cwd debounces (180 ms window), or when a force=true
   // request lands. Use this to refetch an open Git Diff view rather than
   // polling. Returns an unsubscribe function.
-  onDiffCacheInvalidated: (callback: (cwd: string, reason: 'watcher' | 'force' | 'lru' | 'manual') => void) => () => void
+  onDiffCacheInvalidated: (callback: (cwd: string, reason: 'watcher' | 'watcher-error' | 'force' | 'lru' | 'manual' | 'mirror') => void) => () => void
+
+  // ─── GitStateMirror (worker-thread mirror, pub/sub) ──────────────────
+  // Renderer code typically goes through `useGitStateMirror(cwd)` (commit 6)
+  // rather than calling these directly, but the raw surface is here so any
+  // consumer that doesn't fit the React hook pattern (debug API, autotest)
+  // can subscribe + listen explicitly.
+  /**
+   * Subscribe to mirror updates for `cwd`. The first await resolves to
+   * the current snapshot (or null if the mirror hasn't computed it yet).
+   * Subsequent state changes arrive via `onMirrorUpdate(cwd)`.
+   */
+  subscribeMirror: (cwd: string) => Promise<unknown | null>
+  unsubscribeMirror: (cwd: string) => void
+  /** Imperative one-shot read of the current snapshot (no subscription). */
+  getMirror: (cwd: string) => Promise<unknown | null>
+  /**
+   * Listen to mirror deltas. Returns an unsubscribe function. The callback
+   * receives `(cwd, delta)` where `delta` is a partial `MirrorState`.
+   */
+  onMirrorUpdate: (callback: (cwd: string, delta: unknown) => void) => () => void
+  /**
+   * Push a cwd-changed notification (e.g. parsed from an OSC 633 / 7
+   * sequence in the renderer's xterm.js). Fire-and-forget — the mirror
+   * router routes to the worker.
+   */
+  pushCwd: (terminalId: string, newCwd: string | null) => void
+  /** Request the diff body for a single file via the mirror's stat-token cache. */
+  requestFileBody: (cwd: string, fileKey: string, force: boolean) => Promise<unknown | null>
 }
 
 // Project Editor API
@@ -819,6 +886,7 @@ export interface SettingsState {
   gitDiffFontSize: number | null
   settingsPanelWidth: number
   language: 'en' | 'zh-CN'
+  performanceDiagnosticsEnabled: boolean
   updatedAt: number
 }
 
@@ -992,9 +1060,82 @@ export interface PerfTraceInfo {
   eventLoop: EventLoopStallMetrics
 }
 
+export interface GitDiffDebugStats {
+  cache: {
+    projects: Array<{
+      project: string
+      bytes: number
+      entries: number
+      entryDetails: Array<{
+        key: string
+        bytes: number
+      }>
+    }>
+    totalBytes: number
+    totalEntries: number
+    projectByteLimit: number
+    maxProjects: number
+    singleFileByteLimit: number
+  }
+  scheduler: {
+    totalBursts: number
+    totalCancelled: number
+    totalCompleted: number
+    totalSkipped: number
+    pendingProjects: string[]
+    inFlightProjects: string[]
+    perProject: Record<string, {
+      pendingSince: number | null
+      inFlightSince: number | null
+      lastBurst: {
+        finishedAt: number
+        durationMs: number
+        workingSetSize: number
+        eligibleCount: number
+        candidateCount: number
+        completed: number
+        skipped: number
+      } | null
+    }>
+  }
+  listCache: {
+    entries: number
+    inFlight: number
+    hits: number
+    misses: number
+    forces: number
+    ttlMs: number
+    maxEntries: number
+    lastEvent: {
+      kind: 'hit' | 'miss' | 'force' | null
+      key: string | null
+      at: number | null
+      ageMs: number | null
+      entriesCleared: number | null
+    }
+  }
+  watcher: {
+    backend: 'parcel'
+    active: number
+    maxProjects: number
+    projects: Array<{
+      cwd: string
+      status: 'starting' | 'watching' | 'error' | 'disposed'
+      eventCount: number
+      resyncCount: number
+      lastEventAt: number | null
+      lastError: string | null
+      pending: boolean
+    }>
+  }
+}
+
 export interface DebugAPI {
   enabled: boolean
   perfTraceEnabled: boolean
+  featureFlags: {
+    gitDiffPerformanceDiagnostics: boolean
+  }
   profile: boolean
   profileCwd: string | null
   autotest: boolean
@@ -1017,6 +1158,7 @@ export interface DebugAPI {
   getGitRuntimeMetrics: () => Promise<GitRuntimeMetrics>
   getMainWorkMetrics: () => Promise<Record<string, unknown>>
   getPerfTraceInfo: () => Promise<PerfTraceInfo>
+  getGitDiffDebugStats: () => Promise<GitDiffDebugStats>
   resetPerfTraceMetrics: () => Promise<EventLoopStallMetrics>
   perfTrace: (event: string, data?: Record<string, unknown>, terminalId?: string) => void
   getApiServerPort: () => Promise<number>
@@ -1415,8 +1557,8 @@ const gitAPI: GitAPI = {
     return ipcRenderer.invoke(IPC.GIT_GET_HISTORY_FILE_CONTENT, cwd, options)
   },
 
-  getFileContent: (cwd: string, file: Pick<GitFileStatus, 'filename' | 'status' | 'originalFilename' | 'changeType' | 'isSubmoduleEntry'>, repoRoot?: string) => {
-    return ipcRenderer.invoke(IPC.GIT_GET_FILE_CONTENT, cwd, file, repoRoot)
+  getFileContent: (cwd: string, file: Pick<GitFileStatus, 'filename' | 'status' | 'originalFilename' | 'changeType' | 'isSubmoduleEntry'>, repoRoot?: string, options?: GitFileContentRequestOptions) => {
+    return ipcRenderer.invoke(IPC.GIT_GET_FILE_CONTENT, cwd, file, repoRoot, options)
   },
 
   saveFileContent: (cwd: string, filename: string, content: string) => {
@@ -1489,14 +1631,45 @@ const gitAPI: GitAPI = {
     }
   },
 
-  onDiffCacheInvalidated: (callback: (cwd: string, reason: 'watcher' | 'force' | 'lru' | 'manual') => void) => {
-    const listener = (_: Electron.IpcRendererEvent, cwd: string, reason: 'watcher' | 'force' | 'lru' | 'manual') => {
+  onDiffCacheInvalidated: (callback: (cwd: string, reason: 'watcher' | 'watcher-error' | 'force' | 'lru' | 'manual' | 'mirror') => void) => {
+    const listener = (_: Electron.IpcRendererEvent, cwd: string, reason: 'watcher' | 'watcher-error' | 'force' | 'lru' | 'manual' | 'mirror') => {
       callback(cwd, reason)
     }
     ipcRenderer.on(IPC.GIT_DIFF_CACHE_INVALIDATED, listener)
     return () => {
       ipcRenderer.removeListener(IPC.GIT_DIFF_CACHE_INVALIDATED, listener)
     }
+  },
+
+  // ─── GitStateMirror bridges ──────────────────────────────────────────
+  subscribeMirror: (cwd: string) => {
+    return ipcRenderer.invoke(IPC.GIT_STATE_MIRROR_SUBSCRIBE, cwd)
+  },
+
+  unsubscribeMirror: (cwd: string) => {
+    ipcRenderer.send(IPC.GIT_STATE_MIRROR_UNSUBSCRIBE, cwd)
+  },
+
+  getMirror: (cwd: string) => {
+    return ipcRenderer.invoke(IPC.GIT_STATE_MIRROR_GET, cwd)
+  },
+
+  onMirrorUpdate: (callback: (cwd: string, delta: unknown) => void) => {
+    const listener = (_: Electron.IpcRendererEvent, cwd: string, delta: unknown) => {
+      callback(cwd, delta)
+    }
+    ipcRenderer.on(IPC.GIT_STATE_MIRROR_UPDATE, listener)
+    return () => {
+      ipcRenderer.removeListener(IPC.GIT_STATE_MIRROR_UPDATE, listener)
+    }
+  },
+
+  pushCwd: (terminalId: string, newCwd: string | null) => {
+    ipcRenderer.send(IPC.GIT_STATE_PUSH_CWD, terminalId, newCwd)
+  },
+
+  requestFileBody: (cwd: string, fileKey: string, force: boolean) => {
+    return ipcRenderer.invoke(IPC.GIT_STATE_MIRROR_REQUEST_FILE_BODY, cwd, fileKey, force)
   }
 }
 
@@ -1787,10 +1960,19 @@ const debugAutotestExit = process.env.ONWARD_AUTOTEST_EXIT === '1'
 const debugAutotestFixtureExtra = process.env.ONWARD_AUTOTEST_FIXTURE_EXTRA || null
 const perfTraceCaptureContent = process.env.ONWARD_PERF_TRACE_CAPTURE_CONTENT === '1'
 const virtualCursorDisabled = process.env.ONWARD_DISABLE_VIRTUAL_CURSOR === '1'
+const gitDiffPerformanceDiagnosticsEnabled =
+  process.env.ONWARD_FEATURE_GIT_DIFF_PERFORMANCE_DIAGNOSTICS !== '0'
+
+if (!gitDiffPerformanceDiagnosticsEnabled) {
+  console.log('[FeatureFlags] Git Diff performance diagnostics disabled (ONWARD_FEATURE_GIT_DIFF_PERFORMANCE_DIAGNOSTICS=0)')
+}
 
 const debugAPI: DebugAPI = {
   enabled: debugEnabled,
   perfTraceEnabled,
+  featureFlags: {
+    gitDiffPerformanceDiagnostics: gitDiffPerformanceDiagnosticsEnabled
+  },
   profile: debugProfileEnabled,
   profileCwd: debugProfileCwd,
   autotest: debugAutotestEnabled,
@@ -1818,6 +2000,9 @@ const debugAPI: DebugAPI = {
   },
   getPerfTraceInfo: () => {
     return ipcRenderer.invoke(IPC.DEBUG_GET_PERF_TRACE_INFO)
+  },
+  getGitDiffDebugStats: () => {
+    return ipcRenderer.invoke(IPC.DEBUG_GIT_DIFF_GET_DEBUG_STATS)
   },
   resetPerfTraceMetrics: () => {
     return ipcRenderer.invoke(IPC.DEBUG_RESET_PERF_TRACE_METRICS)

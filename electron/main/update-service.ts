@@ -77,7 +77,8 @@ const RELAUNCH_ENV_KEYS = [
   'ONWARD_AUTOTEST',
   'ONWARD_AUTOTEST_CWD',
   'ONWARD_AUTOTEST_EXIT',
-  'ONWARD_DEBUG_CAPTURE'
+  'ONWARD_DEBUG_CAPTURE',
+  'ONWARD_FEATURE_GIT_DIFF_PERFORMANCE_DIAGNOSTICS'
 ] as const
 
 /** Pending update marker written before launching the installer script. */

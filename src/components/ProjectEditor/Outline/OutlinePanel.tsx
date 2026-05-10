@@ -281,6 +281,11 @@ export function OutlinePanel({
       if (performance.now() >= programmaticScrollUntilRef.current) {
         lastUserScrollAtRef.current = performance.now()
       }
+      const initialRestorePending =
+        !initialScrollAppliedRef.current &&
+        typeof initialScrollTargetRef.current === 'number' &&
+        initialScrollTargetRef.current > 0
+      if (initialRestorePending) return
       onScrollCapture?.(tree.scrollTop)
     }
     tree.addEventListener('scroll', handleScroll, { passive: true })
@@ -316,7 +321,7 @@ export function OutlinePanel({
     let frameId = 0
     let attempts = 0
     const targetScrollTop = Math.max(0, snapshot)
-    const maxAttempts = 60
+    const maxAttempts = 300
 
     const applyInitialScroll = () => {
       const tree = treeRef.current

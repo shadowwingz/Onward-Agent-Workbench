@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { CLICK_PHASE_EVENT_NAMES } from './click-phase-event-names.ts'
+
 /**
  * Single source of truth for perf-trace event names.
  *
@@ -59,6 +61,7 @@ export const PERF_TRACE_EVENT = {
   MAIN_IPC_PROJECT_READ_FILE_CHUNK: 'main:ipc.project.read-file-chunk',
   MAIN_IPC_PROJECT_SAVE_FILE: 'main:ipc.project.save-file',
   MAIN_IPC_GIT_GET_DIFF: 'main:ipc.git.get-diff',
+  MAIN_IPC_GIT_GET_FILE_CONTENT: 'main:ipc.git.get-file-content',
   MAIN_IPC_GIT_GET_HISTORY: 'main:ipc.git.get-history',
   MAIN_IPC_TERMINAL_SPAWN: 'main:ipc.terminal.spawn',
 
@@ -87,7 +90,7 @@ export const PERF_TRACE_EVENT = {
 
   // ───────── Workers — ripgrep process lifecycle (inside rg worker) ─────────
   // Runs on the ripgrep Node Worker Thread; forwarded to the main
-  // trace file through parentPort -> perfTraceLogger.
+  // trace file through parentPort -> performanceTrace.
   WORKER_RIPGREP_PROCESS_SPAWN: 'worker.ripgrep:process.spawn',
   WORKER_RIPGREP_PROCESS_EXIT: 'worker.ripgrep:process.exit',
 
@@ -98,7 +101,7 @@ export const PERF_TRACE_EVENT = {
 
   // ───────── PTY data flow — per-Task tid lane ─────────
   // Every event in this block is emitted on the per-terminal virtual
-  // tid managed by `perf-trace-logger::assignTaskTid`. Main-side task
+  // tid managed by `performance-trace::assignTaskTid`. Main-side task
   // lanes are `pid=1 tid>=10000`; renderer-side are `pid=2 tid>=20000`.
   // The first emission for a terminalId auto-writes a thread_name
   // metadata packet `task-<shortId>` so Perfetto UI shows each Task
@@ -273,6 +276,12 @@ export const PERF_TRACE_EVENT = {
   MAIN_GIT_DIFF_CACHE_INVALIDATE: 'main:git.diff.cache-invalidate',
   MAIN_GIT_DIFF_FS_WATCH_EVENT: 'main:git.diff.fs-watch-event',
   MAIN_GIT_DIFF_SUBMODULE_FILTER: 'main:git.diff.submodule-filter',
+  MAIN_GIT_DIFF_CONTENT_CACHE_HIT: 'main:git.diff.content-cache.hit',
+  MAIN_GIT_DIFF_CONTENT_CACHE_MISS: 'main:git.diff.content-cache.miss',
+  MAIN_GIT_DIFF_CONTENT_CACHE_INVALIDATE_PROJECT: 'main:git.diff.content-cache.invalidate-project',
+  MAIN_GIT_DIFF_CONTENT_CACHE_INVALIDATE_LRU: 'main:git.diff.content-cache.invalidate-lru',
+  MAIN_GIT_DIFF_PRECOMPUTE_SCHEDULE: 'main:git.diff.precompute.schedule',
+  MAIN_GIT_DIFF_PRECOMPUTE_SKIP_TOO_LARGE: 'main:git.diff.precompute.skip-too-large',
   RENDERER_SUBPAGE_FRESHNESS_CHECK: 'renderer:subpage.freshness-check',
 
   // ───────── Main process — Git Repository Snapshot Service ─────────
@@ -337,7 +346,74 @@ export const PERF_TRACE_EVENT = {
   // `electron/main/diagnostic-bundle.ts::AUTOTEST_BUNDLE_MARKER_NAME`
   // so the bundler stays decoupled from the registry; if you rename
   // here, also update there (and forever after — registry contract).
-  AUTOTEST_BUNDLE_MARKER: 'autotest:bundle-marker'
+  AUTOTEST_BUNDLE_MARKER: 'autotest:bundle-marker',
+
+  // ────────────────────────────────────────────────────────────────────
+  // GitStateMirror refactor (worker-thread mirror + pub/sub IPC).
+  //
+  // The mirror is the single source of truth for branch / repo name /
+  // status colour / file list / per-file diff body. These events bracket
+  // the four critical paths the GSM autotest suite asserts on:
+  //
+  //   1. cwd switch:
+  //        renderer:terminal.osc-cwd-detected   (xterm.js parses OSC)
+  //          → main:git-state-mirror.cwd-switched   (router routes to worker)
+  //          → worker:git-state-mirror.recompute-status-done   (git status)
+  //          → main:git-state-mirror.fanout   (delta to subscribers)
+  //          → renderer:terminal-title.{branch,color}-rendered   (DOM)
+  //
+  //   2. file mutation:
+  //        worker:git-state-mirror.watcher-fire (or .watcher-filtered)
+  //          → worker:git-state-mirror.recompute-status-done
+  //          → main:git-state-mirror.fanout
+  //          → renderer:git-diff.body-rendered (or terminal-title.*)
+  //
+  // The two `renderer:terminal-title.*` markers feed the GSM-01..09 latency
+  // assertions; `worker:git-state-mirror.watcher-filtered` lets GDS-39
+  // assert the .git whitelist is doing its job.
+  RENDERER_TERMINAL_OSC_CWD_DETECTED: 'renderer:terminal.osc-cwd-detected',
+  MAIN_GIT_STATE_MIRROR_CWD_SWITCHED: 'main:git-state-mirror.cwd-switched',
+  WORKER_GIT_STATE_MIRROR_WATCHER_FIRE: 'worker:git-state-mirror.watcher-fire',
+  WORKER_GIT_STATE_MIRROR_WATCHER_FILTERED: 'worker:git-state-mirror.watcher-filtered',
+  WORKER_GIT_STATE_MIRROR_RECOMPUTE_DONE: 'worker:git-state-mirror.recompute-status-done',
+  MAIN_GIT_STATE_MIRROR_FANOUT: 'main:git-state-mirror.fanout',
+  RENDERER_TERMINAL_TITLE_BRANCH_RENDERED: 'renderer:terminal-title.branch-rendered',
+  RENDERER_TERMINAL_TITLE_COLOR_RENDERED: 'renderer:terminal-title.color-rendered',
+  RENDERER_GIT_DIFF_MANUAL_REFRESH: 'renderer:git-diff.manual-refresh',
+  RENDERER_GIT_DIFF_HUNK_NAVIGATE: 'renderer:git-diff.hunk-navigate',
+  RENDERER_GIT_DIFF_HUNK_ACTION: 'renderer:git-diff.hunk-action',
+  RENDERER_GIT_DIFF_HUNK_WIDGET_INSTALL: 'renderer:git-diff.hunk-widget-install',
+  RENDERER_GIT_DIFF_BODY_PREFETCH: 'renderer:git-diff.body-prefetch',
+  RENDERER_GIT_DIFF_FILE_LOAD: 'renderer:git-diff.file-load',
+  RENDERER_GIT_DIFF_BODY_RENDERED: 'renderer:git-diff.body-rendered',
+  RENDERER_GIT_DIFF_CACHE_INVALIDATION: 'renderer:git-diff.cache-invalidation',
+  RENDERER_GIT_DIFF_FILE_LIST_MODE_CHANGE: 'renderer:git-diff.file-list-mode-change',
+  RENDERER_GIT_DIFF_JUMP_TO_EDITOR: 'renderer:git-diff.jump-to-editor',
+  RENDERER_GIT_DIFF_SPLIT_MODE_TOGGLE: 'renderer:git-diff.split-mode-toggle',
+  RENDERER_PROJECT_EDITOR_JUMP_TO_DIFF: 'renderer:project-editor.jump-to-diff',
+
+  // ───────── Renderer — Git Diff click → paint phase chain ─────────
+  // Settled spans (ph='X') emitted once a click measurement seals. They
+  // reproduce the JadeTree phase decomposition the in-app debug panel
+  // surfaces, so a Perfetto trace contains the same diagnostic chain
+  // without extracting it from `__onwardGitDiffDebug.getHistory()`.
+  // Payload always carries `durationMs` (auto-routed to ph='X' by
+  // performance-trace::resolvePhase) plus `fileKey` / `filename` /
+  // `cacheState` / `totalMs` for joinability. The literal strings live
+  // in `./click-phase-event-names.ts` (a leaf module imported by the
+  // emitter and the registry alike) so renaming an event only happens
+  // in one place.
+  RENDERER_GIT_DIFF_CLICK_PHASE_IPC: CLICK_PHASE_EVENT_NAMES.IPC,
+  RENDERER_GIT_DIFF_CLICK_PHASE_STATE_SET: CLICK_PHASE_EVENT_NAMES.STATE_SET,
+  RENDERER_GIT_DIFF_CLICK_PHASE_MODEL_BIND: CLICK_PHASE_EVENT_NAMES.MODEL_BIND,
+  RENDERER_GIT_DIFF_CLICK_PHASE_MOUNT: CLICK_PHASE_EVENT_NAMES.MOUNT,
+  RENDERER_GIT_DIFF_CLICK_PHASE_DIFF_COMPUTE: CLICK_PHASE_EVENT_NAMES.DIFF_COMPUTE,
+  RENDERER_GIT_DIFF_CLICK_PHASE_DOM_COMMIT: CLICK_PHASE_EVENT_NAMES.DOM_COMMIT,
+  RENDERER_GIT_DIFF_CLICK_PHASE_PAINT: CLICK_PHASE_EVENT_NAMES.PAINT,
+  RENDERER_GIT_DIFF_CLICK_PHASE_TOKENIZE_SETTLE: CLICK_PHASE_EVENT_NAMES.TOKENIZE_SETTLE,
+  RENDERER_GIT_DIFF_CLICK_PHASE_COLD_MOUNT: CLICK_PHASE_EVENT_NAMES.COLD_MOUNT,
+  RENDERER_GIT_DIFF_CLICK_PHASE_REVEAL_TIMEOUT: CLICK_PHASE_EVENT_NAMES.REVEAL_TIMEOUT,
+  RENDERER_GIT_DIFF_CLICK_TOTAL: CLICK_PHASE_EVENT_NAMES.TOTAL
 } as const
 
 export type PerfTraceEventName = typeof PERF_TRACE_EVENT[keyof typeof PERF_TRACE_EVENT]

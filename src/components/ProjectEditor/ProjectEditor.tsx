@@ -8,7 +8,7 @@ import { createPortal } from 'react-dom'
 import { Editor } from '@monaco-editor/react'
 import DOMPurify from 'dompurify'
 import { hexy } from 'hexy'
-import type { ProjectEntry, ProjectFileOpenMode } from '../../types/electron'
+import type { GitDiffResult, ProjectEntry, ProjectFileOpenMode } from '../../types/electron'
 import type { FileViewMemory, ProjectEditorState } from '../../types/tab.d.ts'
 import { useSettings } from '../../contexts/SettingsContext'
 import { useAppState } from '../../hooks/useAppState'
@@ -79,6 +79,12 @@ import {
   getParentPath
 } from './quickFileUtils'
 import { createThemedSetiFileIconResolver, sanitizeSetiSvgOnce } from './setiFileIconTheme'
+import {
+  buildDiffReturnBarState,
+  findDiffFileForEditorPath,
+  resolveNavigationFilePath,
+  type DiffJumpTarget
+} from './diffJumpState'
 import { performanceTrace } from '../../utils/performance-trace'
 import './ProjectEditor.css'
 
@@ -321,34 +327,18 @@ function normalizeComparablePath(value: string): string {
     : normalized
 }
 
-function resolveNavigationFilePath(params: {
-  editorRoot: string
-  filePath: string
-  repoRoot: string | null
-}): string | null {
-  const normalizedRoot = trimTrailingPathSeparators(normalizePath(params.editorRoot))
-  const normalizedFilePath = normalizePath(params.filePath).replace(/^\/+/, '')
-  const normalizedRepoRoot = params.repoRoot
-    ? trimTrailingPathSeparators(normalizePath(params.repoRoot))
-    : normalizedRoot
-  if (!normalizedRoot || !normalizedFilePath || !normalizedRepoRoot) return null
-
-  const absoluteTargetPath = trimTrailingPathSeparators(`${normalizedRepoRoot}/${normalizedFilePath}`)
-  const comparableRoot = normalizeComparablePath(normalizedRoot)
-  const comparableTarget = normalizeComparablePath(absoluteTargetPath)
-
-  if (comparableTarget === comparableRoot) return null
-  if (!comparableTarget.startsWith(`${comparableRoot}/`)) return null
-
-  const relativePath = absoluteTargetPath.slice(normalizedRoot.length + 1)
-  return relativePath || null
-}
-
 // Quick-file pure functions imported from ./quickFileUtils
 
 type ProjectEditorScope = {
   terminalId: string
   cwd: string | null
+}
+
+type DiffReturnContext = {
+  terminalId: string
+  filePath: string | null
+  repoRoot: string | null
+  createdAt: number
 }
 
 type PreviewScrollMemory = {
@@ -1117,8 +1107,23 @@ export function ProjectEditor({
   const markdownPurifyLogCountRef = useRef(0)
   const profileRunRef = useRef(false)
   const autotestRunRef = useRef(false)
-  const openGitDiffRef = useRef<(source?: 'user' | 'debug') => Promise<void>>(async () => {})
+  const autotestBootstrapLogRef = useRef<string | null>(null)
+  const openGitDiffRef = useRef<(source?: 'user' | 'debug', target?: { filePath?: string | null; repoRoot?: string | null }) => Promise<void>>(async () => {})
   const lastHandledOpenRequestRef = useRef<number | null>(null)
+  const [diffReturnContext, setDiffReturnContext] = useState<DiffReturnContext | null>(null)
+  const diffReturnContextRef = useRef<DiffReturnContext | null>(null)
+  const [diffJumpTarget, setDiffJumpTarget] = useState<DiffJumpTarget | null>(null)
+  const diffJumpTargetRef = useRef<DiffJumpTarget | null>(null)
+  const setDiffJumpTargetValue = useCallback((nextTarget: DiffJumpTarget | null) => {
+    diffJumpTargetRef.current = nextTarget
+    setDiffJumpTarget(nextTarget)
+  }, [])
+  const [diffJumpChecking, setDiffJumpChecking] = useState(false)
+  const diffJumpCheckTokenRef = useRef(0)
+
+  useEffect(() => {
+    diffReturnContextRef.current = diffReturnContext
+  }, [diffReturnContext])
 
   const originalContentRef = useRef('')
   const originalModelVersionRef = useRef<number | null>(null)
@@ -1164,6 +1169,10 @@ export function ProjectEditor({
   const largeFileChunkTokenRef = useRef(0)
   const largeFileStateRef = useRef<LargeFileState | null>(null)
   const activeFilePathRef = useRef<string | null>(null)
+  const setActiveFilePathValue = useCallback((nextPath: string | null) => {
+    activeFilePathRef.current = nextPath
+    setActiveFilePath(nextPath)
+  }, [])
   const isBinaryRef = useRef(false)
   const isImageRef = useRef(false)
   const isSqliteRef = useRef(false)
@@ -2624,9 +2633,6 @@ export function ProjectEditor({
       setOutlineContentSnapshot({ filePath: null, content: '' })
     }
     openFileTokenRef.current += 1
-    if (!preserveContent) {
-      activeFilePathRef.current = null
-    }
     isBinaryRef.current = false
     isImageRef.current = false
     isSqliteRef.current = false
@@ -2637,7 +2643,7 @@ export function ProjectEditor({
     markdownWorkerQueuedRef.current = false
     setSelectedPath(null)
     if (!preserveContent) {
-      setActiveFilePath(null)
+      setActiveFilePathValue(null)
     }
     // NOTE: pinnedFiles and recentFiles are persistent metadata scoped to the
     // editor session — they must NOT be cleared here.  Callers that genuinely
@@ -2679,7 +2685,7 @@ export function ProjectEditor({
     if (DEBUG_PROJECT_EDITOR) {
       debugLog('reset:done', { activeFilePath: null })
     }
-  }, [cancelFileTreeRestoreFrame, cancelMarkdownIdle, resetPreviewRestoreState, updatePreviewActiveSlug])
+  }, [cancelFileTreeRestoreFrame, cancelMarkdownIdle, resetPreviewRestoreState, setActiveFilePathValue, updatePreviewActiveSlug])
 
   const clearActiveFileState = useCallback((options?: { preserveMissingNotice?: boolean }) => {
     cancelFileTreeRestoreFrame()
@@ -2706,7 +2712,6 @@ export function ProjectEditor({
     fileContentRef.current = ''
     setOutlineContentSnapshot({ filePath: null, content: '' })
     openFileTokenRef.current += 1
-    activeFilePathRef.current = null
     isBinaryRef.current = false
     isImageRef.current = false
     isSqliteRef.current = false
@@ -2716,7 +2721,7 @@ export function ProjectEditor({
     markdownWorkerInFlightRef.current = false
     markdownWorkerQueuedRef.current = false
     setSelectedPath(null)
-    setActiveFilePath(null)
+    setActiveFilePathValue(null)
     setFileContent('')
     setIsBinary(false)
     setIsImage(false)
@@ -2990,10 +2995,6 @@ export function ProjectEditor({
   useEffect(() => {
     markdownRenderAllowedRef.current = isMarkdownRenderAllowed
   }, [isMarkdownRenderAllowed])
-
-  useEffect(() => {
-    activeFilePathRef.current = activeFilePath
-  }, [activeFilePath])
 
   useEffect(() => {
     isBinaryRef.current = isBinary
@@ -4012,6 +4013,10 @@ export function ProjectEditor({
       return
     }
 
+    if (diffReturnContextRef.current) {
+      setDiffJumpTargetValue(null)
+    }
+
     // Save ALL state for the old file in one call
     if (currentActiveFilePath) {
       saveCurrentFileMemory()
@@ -4113,8 +4118,7 @@ export function ProjectEditor({
         if (options?.missingBehavior === 'empty-state') {
           clearActiveFileState({ preserveMissingNotice: true })
         } else {
-          setActiveFilePath(path)
-          activeFilePathRef.current = path
+          setActiveFilePathValue(path)
           setSelectedPath(path)
           setIsBinary(false)
           isBinaryRef.current = false
@@ -4181,8 +4185,7 @@ export function ProjectEditor({
     if (options?.suppressFileBrowserReveal || source === 'restore') {
       suppressNextRevealRef.current = true
     }
-    setActiveFilePath(path)
-    activeFilePathRef.current = path
+    setActiveFilePathValue(path)
     setSelectedPath(path)
     if (source === 'user' && options?.trackRecent) {
       touchRecentFile(path)
@@ -4390,6 +4393,8 @@ export function ProjectEditor({
     requestFileOpenChoice,
     resetPreviewRestoreState,
     scheduleProjectStateSave,
+    setActiveFilePathValue,
+    setDiffJumpTargetValue,
     showStatus,
     syncOriginalVersion,
     applyMarkdownSessionCacheHit,
@@ -4550,14 +4555,13 @@ export function ProjectEditor({
       }
       setTree([])
       setSelectedPath(null)
-      setActiveFilePath(null)
+      setActiveFilePathValue(null)
       setPinnedFiles([])
       setRecentFiles([])
       setDraggingPinnedPath(null)
       setDraggingQuickPath(null)
       setDraggingQuickSource(null)
       setDragOverPinnedPath(null)
-      activeFilePathRef.current = null
       setFileContent('')
       fileContentRef.current = ''
       setOutlineContentSnapshot({ filePath: null, content: '' })
@@ -4629,7 +4633,7 @@ export function ProjectEditor({
     rootRef.current = effectiveCwd
     setSearchResults([])
     void loadRoot(effectiveCwd)
-  }, [cwd, isOpen, loadRoot, resetActiveFileState, t])
+  }, [cwd, isOpen, loadRoot, resetActiveFileState, setActiveFilePathValue, t])
 
   useEffect(() => {
     if (!isOpen || !rootPath) return
@@ -4649,13 +4653,24 @@ export function ProjectEditor({
     if (cwd && normalizeComparablePath(rootPath) !== normalizeComparablePath(cwd)) return
 
     lastHandledOpenRequestRef.current = openRequest.id
+    if (openRequest.source === 'diff' || openRequest.returnTarget === 'diff') {
+      setDiffReturnContext({
+        terminalId: openRequest.terminalId,
+        filePath: openRequest.diffFilePath ?? openRequest.filePath ?? null,
+        repoRoot: openRequest.diffRepoRoot ?? openRequest.repoRoot ?? null,
+        createdAt: Date.now()
+      })
+    } else {
+      setDiffReturnContext(null)
+    }
 
     if (!openRequest.filePath) return
 
     const navigationPath = resolveNavigationFilePath({
       editorRoot: rootPath,
       filePath: openRequest.filePath,
-      repoRoot: openRequest.repoRoot
+      repoRoot: openRequest.repoRoot,
+      platform: window.electronAPI.platform
     })
 
     if (!navigationPath) {
@@ -4674,6 +4689,52 @@ export function ProjectEditor({
       missingBehavior: 'empty-state'
     })
   }, [clearActiveFileState, cwd, isOpen, locale, openFile, openRequest, rootPath, showStatus, _terminalId])
+
+  useEffect(() => {
+    if (isOpen) return
+    setDiffReturnContext(null)
+    setDiffJumpTargetValue(null)
+    setDiffJumpChecking(false)
+  }, [isOpen, setDiffJumpTargetValue])
+
+  useEffect(() => {
+    if (!isOpen || !diffReturnContext || !rootPath || !activeFilePath) {
+      setDiffJumpTargetValue(null)
+      setDiffJumpChecking(false)
+      return
+    }
+
+    const token = diffJumpCheckTokenRef.current + 1
+    diffJumpCheckTokenRef.current = token
+    setDiffJumpChecking(true)
+    void window.electronAPI.git.getDiff(rootPath, { scope: 'full' })
+      .then((result) => {
+        if (diffJumpCheckTokenRef.current !== token) return
+        const match = findDiffFileForEditorPath({
+          diff: result as GitDiffResult,
+          editorRoot: rootPath,
+          editorFilePath: activeFilePath,
+          platform: window.electronAPI.platform
+        })
+        setDiffJumpTargetValue(match
+          ? {
+              filename: match.filename,
+              repoRoot: match.repoRoot || (result as GitDiffResult).cwd || rootPath,
+              changeType: match.changeType
+            }
+          : null)
+      })
+      .catch(() => {
+        if (diffJumpCheckTokenRef.current === token) {
+          setDiffJumpTargetValue(null)
+        }
+      })
+      .finally(() => {
+        if (diffJumpCheckTokenRef.current === token) {
+          setDiffJumpChecking(false)
+        }
+      })
+  }, [activeFilePath, diffReturnContext, isOpen, rootPath, setDiffJumpTargetValue])
 
   useEffect(() => {
     const currentScope = buildProjectEditorScope(_terminalId, cwd ?? rootRef.current ?? null)
@@ -4712,8 +4773,7 @@ export function ProjectEditor({
       const subpageReturn = subpageReturnFileRef.current
       if (subpageReturn && isSameProjectEditorScope(subpageReturn.scope, currentScope)) {
         subpageReturnFileRef.current = null
-        activeFilePathRef.current = subpageReturn.path
-        setActiveFilePath(subpageReturn.path)
+        setActiveFilePathValue(subpageReturn.path)
         fileContentRef.current = subpageReturn.content
         setFileContent(subpageReturn.content)
         setOutlineContentSnapshot({ filePath: subpageReturn.path, content: subpageReturn.content })
@@ -4803,6 +4863,7 @@ export function ProjectEditor({
     isOpen,
     persistProjectEditorState,
     resetPreviewRestoreState,
+    setActiveFilePathValue,
     validateRetainedActiveFileFreshness,
     _terminalId
   ])
@@ -6303,7 +6364,10 @@ export function ProjectEditor({
     void handleRequestClose()
   }, [dialog, handleDialogCancel, searchOpen, handleCloseSearch, previewSearchOpen, handleRequestClose, sidebarMode, pinOverflowOpen, recentOverflowOpen])
 
-  const handleOpenGitDiff = useCallback(async (source: 'user' | 'debug' = 'user') => {
+  const handleOpenGitDiff = useCallback(async (
+    source: 'user' | 'debug' = 'user',
+    targetFile?: { filePath?: string | null; repoRoot?: string | null }
+  ) => {
     if (!_terminalId) return
     if (gitDiffOpenRef.current) {
       if (DEBUG_PROJECT_EDITOR) {
@@ -6360,10 +6424,17 @@ export function ProjectEditor({
     if (DEBUG_PROJECT_EDITOR) {
       debugLog('gitdiff:open:dispatch', { terminalId })
     }
-    const detail: SubpageNavigateEventDetail = { terminalId, target: 'diff' }
+    const detail: SubpageNavigateEventDetail = {
+      terminalId,
+      target: 'diff',
+      source: 'editor',
+      filePath: targetFile?.filePath ?? null,
+      repoRoot: targetFile?.repoRoot ?? null
+    }
     perfTrace(PERF_TRACE_EVENT.RENDERER_PROJECT_SUBPAGE_NAVIGATE, {
       target: 'diff',
-      hasTerminalId: Boolean(terminalId)
+      hasTerminalId: Boolean(terminalId),
+      hasFileTarget: Boolean(targetFile?.filePath)
     })
     window.dispatchEvent(new CustomEvent('subpage:navigate', { detail }))
   }, [
@@ -6377,6 +6448,28 @@ export function ProjectEditor({
     persistProjectEditorState,
     resetActiveFileState
   ])
+
+  const handleBackToDiff = useCallback(async () => {
+    if (!diffReturnContextRef.current) return false
+    await handleOpenGitDiff('user')
+    return true
+  }, [handleOpenGitDiff])
+
+  const handleJumpToDiff = useCallback(async () => {
+    const target = diffJumpTargetRef.current
+    if (!target) return false
+    perfTrace(PERF_TRACE_EVENT.RENDERER_PROJECT_EDITOR_JUMP_TO_DIFF, {
+      terminalId: _terminalId,
+      filename: target.filename,
+      repoRoot: target.repoRoot,
+      changeType: target.changeType
+    })
+    await handleOpenGitDiff('user', {
+      filePath: target.filename,
+      repoRoot: target.repoRoot
+    })
+    return true
+  }, [_terminalId, handleOpenGitDiff])
 
   const handleOpenGitHistory = useCallback(async (source: 'user' | 'debug' = 'user') => {
     if (!_terminalId) return
@@ -6455,6 +6548,14 @@ export function ProjectEditor({
         )
       },
       getLastProjectEditorReopenRestore: () => lastProjectEditorReopenRestoreRef.current,
+      getDiffReturnBarState: () => buildDiffReturnBarState({
+        hasDiffReturnContext: Boolean(diffReturnContextRef.current),
+        diffJumpTarget: diffJumpTargetRef.current,
+        diffJumpChecking,
+        activeFilePath: activeFilePathRef.current
+      }),
+      triggerDiffReturnBack: async () => handleBackToDiff(),
+      triggerJumpToDiff: async () => handleJumpToDiff(),
       getSidebarMode: () => sidebarModeRef.current,
       setSidebarMode: (mode: 'files' | 'search') => {
         setSidebarMode(mode)
@@ -6985,11 +7086,14 @@ export function ProjectEditor({
     getImageFilePreviewState,
     getMermaidPreviewState,
     getMarkdownCodeWrapDebugState,
+    handleBackToDiff,
     handleDialogCancel,
     handleDialogConfirm,
     handleFileOpenChoiceCancel,
+    handleJumpToDiff,
     handleOutlineScrollCapture,
     isPreviewContentVisibleNow,
+    diffJumpChecking,
     loadLargeFileChunk,
     resolveFileOpenChoice,
     scanPreviewNearestSlug,
@@ -7023,11 +7127,14 @@ export function ProjectEditor({
     getOutlineScrollContainer,
     getImageFilePreviewState,
     getMarkdownCodeWrapDebugState,
+    handleBackToDiff,
     handleDialogCancel,
     handleDialogConfirm,
     handleFileOpenChoiceCancel,
+    handleJumpToDiff,
     handleOutlineScrollCapture,
     isPreviewContentVisibleNow,
+    diffJumpChecking,
     loadLargeFileChunk,
     resolveFileOpenChoice,
     scanPreviewNearestSlug,
@@ -7044,9 +7151,33 @@ export function ProjectEditor({
 
   useEffect(() => {
     if (!window.electronAPI?.debug?.autotest) return
-    if (!isOpen || !rootPath || rootError) return
-    if (tree.length === 0) return
+    const logBootstrap = (reason: string) => {
+      const payload = {
+        reason,
+        isOpen,
+        hasRootPath: Boolean(rootPath),
+        rootError: rootError ?? null,
+        treeLength: tree.length,
+        alreadyRan: autotestRunRef.current,
+        suite: window.electronAPI.debug.autotestSuite ?? null,
+        cwd: window.electronAPI.debug.autotestCwd ?? null
+      }
+      const signature = JSON.stringify(payload)
+      if (autotestBootstrapLogRef.current === signature) return
+      autotestBootstrapLogRef.current = signature
+      console.log('[AutoTest] bootstrap', payload)
+      window.electronAPI.debug.log('[AutoTest] bootstrap', payload)
+    }
+    if (!isOpen || !rootPath || rootError) {
+      logBootstrap('waiting-for-open-root')
+      return
+    }
+    if (tree.length === 0) {
+      logBootstrap('waiting-for-tree')
+      return
+    }
     if (autotestRunRef.current) return
+    logBootstrap('starting')
     autotestRunRef.current = true
 
     const log = (message: string, data?: unknown) => {
@@ -7066,10 +7197,13 @@ export function ProjectEditor({
       intervalMs = 80
     ) => {
       const start = performance.now()
-      while (performance.now() - start < timeoutMs) {
+      while (true) {
         if (predicate()) return true
-        await sleep(intervalMs)
+        const elapsed = performance.now() - start
+        if (elapsed >= timeoutMs) break
+        await sleep(Math.min(intervalMs, Math.max(0, timeoutMs - elapsed)))
       }
+      if (predicate()) return true
       log('timeout', { label, timeoutMs })
       return false
     }
@@ -7499,12 +7633,10 @@ export function ProjectEditor({
 
     if (activeFilePath) {
       if (activeFilePath === sourcePath) {
-        setActiveFilePath(nextPath)
-        activeFilePathRef.current = nextPath
+        setActiveFilePathValue(nextPath)
       } else if (activeFilePath.startsWith(`${sourcePath}/`)) {
         const replacedPath = activeFilePath.replace(sourcePath, nextPath)
-        setActiveFilePath(replacedPath)
-        activeFilePathRef.current = replacedPath
+        setActiveFilePathValue(replacedPath)
       }
     }
     replaceQuickFileEntries(sourcePath, nextPath)
@@ -7513,7 +7645,7 @@ export function ProjectEditor({
     fileIndexRenameFile(root, sourcePath, nextPath)
     void window.electronAPI.project.invalidateFileIndex(root)
     showStatus('success', t('projectEditor.renameSuccess'))
-  }, [activeFilePath, refreshDirectory, replaceQuickFileEntries, requestPrompt, selectedPath, showStatus, t, tree])
+  }, [activeFilePath, refreshDirectory, replaceQuickFileEntries, requestPrompt, selectedPath, setActiveFilePathValue, showStatus, t, tree])
 
   const handleDelete = useCallback(async (targetPathOverride?: string) => {
     const root = rootRef.current
@@ -7543,8 +7675,7 @@ export function ProjectEditor({
 
     if (activeFilePath) {
       if (activeFilePath === targetPath || activeFilePath.startsWith(`${targetPath}/`)) {
-        setActiveFilePath(null)
-        activeFilePathRef.current = null
+        setActiveFilePathValue(null)
         setFileContent('')
         fileContentRef.current = ''
         setOutlineContentSnapshot({ filePath: null, content: '' })
@@ -7568,7 +7699,7 @@ export function ProjectEditor({
     fileIndexRemoveFile(root, targetPath)
     void window.electronAPI.project.invalidateFileIndex(root)
     showStatus('success', t('projectEditor.deleteSuccess'))
-  }, [activeFilePath, refreshDirectory, removeQuickFileEntries, requestConfirm, selectedPath, showStatus, t, tree])
+  }, [activeFilePath, refreshDirectory, removeQuickFileEntries, requestConfirm, selectedPath, setActiveFilePathValue, showStatus, t, tree])
 
   const handleResizeMouseDown = useCallback((event: React.MouseEvent) => {
     event.preventDefault()
@@ -8892,6 +9023,29 @@ export function ProjectEditor({
             </div>
           </div>
         </div>
+
+        {diffReturnContext && (
+          <div className="project-editor-diff-return-bar">
+            <button
+              type="button"
+              className="project-editor-diff-return-button"
+              onClick={() => void handleBackToDiff()}
+            >
+              {t('projectEditor.diffReturn.back')}
+            </button>
+            <button
+              type="button"
+              className="project-editor-diff-return-button primary"
+              onClick={() => void handleJumpToDiff()}
+              disabled={!diffJumpTarget || diffJumpChecking}
+              title={diffJumpTarget
+                ? t('projectEditor.diffReturn.jumpTitle')
+                : t('projectEditor.diffReturn.jumpDisabled')}
+            >
+              {diffJumpChecking ? t('projectEditor.diffReturn.checking') : t('projectEditor.diffReturn.jump')}
+            </button>
+          </div>
+        )}
 
         {searchOpen && (
           <div className="project-editor-search-overlay" onClick={handleCloseSearch}>

@@ -68,6 +68,7 @@ export const IPC = {
   DEBUG_GET_GIT_RUNTIME_METRICS: 'debug:get-git-runtime-metrics',
   DEBUG_GET_MAIN_WORK_METRICS: 'debug:get-main-work-metrics',
   DEBUG_GET_PERF_TRACE_INFO: 'debug:get-perf-trace-info',
+  DEBUG_GIT_DIFF_GET_DEBUG_STATS: 'debug:git-diff.get-debug-stats',
   DEBUG_LOG: 'debug:log',
   DEBUG_PERF_TRACE: 'debug:perf-trace',
   DEBUG_QUIT: 'debug:quit',
@@ -110,6 +111,15 @@ export const IPC = {
   GIT_UNSUBSCRIBE_TERMINAL_INFO: 'git:unsubscribe-terminal-info',
   GIT_UPDATE_INDEX_CONTENT: 'git:update-index-content',
   GIT_WARM_DIFF_CACHE: 'git:warm-diff-cache',
+
+  // git-state-mirror (worker-thread single-source-of-truth, pub/sub)
+  GIT_STATE_MIRROR_SUBSCRIBE: 'git-state-mirror:subscribe',
+  GIT_STATE_MIRROR_UNSUBSCRIBE: 'git-state-mirror:unsubscribe',
+  GIT_STATE_MIRROR_GET: 'git-state-mirror:get',
+  GIT_STATE_MIRROR_UPDATE: 'git-state-mirror:update',
+  GIT_STATE_MIRROR_REQUEST_FILE_BODY: 'git-state-mirror:request-file-body',
+  GIT_STATE_MIRROR_FILE_BODY_UPDATE: 'git-state-mirror:file-body-update',
+  GIT_STATE_PUSH_CWD: 'git-state-mirror:push-cwd',
 
   // project
   PROJECT_BUILD_FILE_INDEX: 'project:build-file-index',

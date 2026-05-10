@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: 2026 OPPO
+# SPDX-License-Identifier: Apache-2.0
+#
+# Onward PowerShell shell integration. Loaded via `-NoExit -Command ". ..."`
+# at terminal spawn. Wraps the user's existing prompt function so the
+# original prompt text is preserved and our OSC emission happens on every
+# new prompt, matching VS Code's strategy.
+
+if ($env:ONWARD_SHELL_INTEGRATION -eq '0') { return }
+
+# Capture the user's current prompt so we can call into it.
+$Global:__OnwardOriginalPrompt = $function:Prompt
+
+function global:Prompt {
+    $cwd = $PWD.Path
+    # Build a well-formed `file://<host>/<path>` URI:
+    #   1. Backslashes → forward slashes (Windows paths use `\`; the URI form
+    #      requires `/`). Without this the parser sees `file://HOSTC:\...`
+    #      and reads back a malformed path that overwrites the OSC 633 cwd
+    #      we just emitted with garbage.
+    #   2. Percent-encode characters that are unsafe in a URI path — at minimum
+    #      space → `%20`. We deliberately keep `:` (drive letter) and `/`
+    #      readable; full RFC 3986 encoding is overkill for our parser.
+    #   3. Insert a `/` between host and path so a Windows drive `C:\foo`
+    #      becomes `file://localhost/C:/foo`, not `file://localhostC:/foo`.
+    $cwdForUri = $cwd -replace '\\', '/'
+    $cwdForUri = $cwdForUri -replace ' ', '%20'
+    $host = if ($env:COMPUTERNAME) { $env:COMPUTERNAME } else { 'localhost' }
+    $esc = [char]0x1b
+    $bel = [char]0x07
+    Write-Host -NoNewline ($esc + ']633;P;Cwd=' + $cwd + $bel)
+    Write-Host -NoNewline ($esc + ']7;file://' + $host + '/' + $cwdForUri + $esc + '\')
+    & $Global:__OnwardOriginalPrompt
+}

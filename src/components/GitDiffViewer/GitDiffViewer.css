@@ -236,20 +236,111 @@ body.git-diff-modal-resizing {
   margin-left: auto;
 }
 
+.git-diff-change-nav {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.git-diff-nav-button {
+  width: 32px;
+  padding: 0;
+  font-size: 14px;
+}
+
+.git-diff-jump-editor,
+.git-diff-refresh-changes,
+.git-diff-terms-button {
+  gap: 6px;
+}
+
+.git-diff-jump-editor svg,
+.git-diff-refresh-changes svg,
+.git-diff-terms-button svg {
+  flex: 0 0 auto;
+}
+
+.git-diff-refresh-changes:disabled svg {
+  animation: git-diff-refresh-spin 0.9s linear infinite;
+}
+
+.git-diff-terms-help {
+  position: relative;
+  display: inline-flex;
+}
+
+.git-diff-terms-popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 40;
+  width: min(360px, calc(100vw - 32px));
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: var(--shadow-1);
+  color: var(--text-2);
+}
+
+.git-diff-terms-title {
+  margin-bottom: 8px;
+  font-size: var(--font-sm);
+  font-weight: 600;
+  color: var(--text-1);
+}
+
+.git-diff-terms-popover dl {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+}
+
+.git-diff-terms-popover dt {
+  font-size: var(--font-xs);
+  font-weight: 600;
+  color: var(--text-1);
+}
+
+.git-diff-terms-popover dd {
+  margin: -3px 0 4px;
+  font-size: var(--font-xs);
+  line-height: 1.45;
+  color: var(--text-3);
+}
+
+@keyframes git-diff-refresh-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
 @media (max-width: 900px) {
   .git-diff-header-actions {
     width: 100%;
     margin-left: 0;
     justify-content: flex-end;
   }
+
+  .git-diff-jump-editor span,
+  .git-diff-refresh-changes span,
+  .git-diff-terms-button span {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
 }
 
-/* working directory column */
+/* working directory column. Hosts the cwd path on the left and the
+ * diff-session action cluster (view-mode toggle, hunk navigation,
+ * jump-to-editor, refresh-changes) on the right. */
 .git-diff-cwd-bar {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 16px;
+  gap: 12px;
+  padding: 6px 16px;
   background-color: var(--bg-1);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
@@ -273,6 +364,29 @@ body.git-diff-modal-resizing {
   white-space: nowrap;
   cursor: text;
   user-select: text;
+}
+
+.git-diff-cwd-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+@media (max-width: 900px) {
+  .git-diff-cwd-bar {
+    flex-wrap: wrap;
+    padding-top: 8px;
+    padding-bottom: 8px;
+  }
+
+  .git-diff-cwd-bar-actions {
+    width: 100%;
+    margin-left: 0;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+  }
 }
 
 /* main body */
@@ -301,25 +415,37 @@ body.git-diff-modal-resizing {
   background-color: var(--bg-1);
 }
 
-/* Width adjustment drag bar */
+/* Width adjustment drag bar (file list <-> diff details).
+ * Always renders a faint 1px guide so users can locate the drag affordance
+ * at a glance; widens to a 2px accent bar on hover or while dragging. The
+ * 12px hit area lets the cursor latch onto the bar without pixel-precise
+ * aiming. */
 .git-diff-resizer {
   position: absolute;
-  right: -3px;
+  right: -6px;
   top: 0;
-  width: 6px;
+  width: 12px;
   height: 100%;
   cursor: col-resize;
   z-index: 10;
 }
 
-.git-diff-resizer:hover::after,
-body.git-diff-resizing .git-diff-resizer::after {
+.git-diff-resizer::after {
   content: '';
   position: absolute;
-  left: 2px;
+  left: 5px;
   top: 0;
-  width: 2px;
+  width: 1px;
   height: 100%;
+  background-color: color-mix(in srgb, var(--border-strong) 55%, transparent);
+  transition: background-color 0.12s ease, width 0.12s ease, left 0.12s ease;
+  pointer-events: none;
+}
+
+.git-diff-resizer:hover::after,
+body.git-diff-resizing .git-diff-resizer::after {
+  left: 5px;
+  width: 2px;
   background-color: var(--accent);
 }
 
@@ -332,13 +458,90 @@ body.git-diff-resizing * {
   cursor: col-resize !important;
 }
 
+/* Monaco-internal split view divider between original and modified panes.
+ * Monaco renders a transparent .monaco-sash by default which is invisible
+ * unless hovered. We force a faint 1px guide to always show, then upgrade
+ * to a 2px accent bar on hover/active for parity with .git-diff-resizer. */
+.git-diff-monaco .monaco-sash.vertical {
+  background: transparent !important;
+}
+
+.git-diff-monaco .monaco-sash.vertical::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 0;
+  width: 1px;
+  height: 100%;
+  margin-left: -0.5px;
+  background-color: color-mix(in srgb, var(--border-strong) 55%, transparent);
+  transition: background-color 0.12s ease, width 0.12s ease, margin-left 0.12s ease;
+  pointer-events: none;
+}
+
+.git-diff-monaco .monaco-sash.vertical:hover::after,
+.git-diff-monaco .monaco-sash.vertical.active::after {
+  width: 2px;
+  margin-left: -1px;
+  background-color: var(--accent);
+}
+
 .git-diff-file-list-header {
-  padding: 8px 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 8px 7px 10px;
   font-size: var(--font-xs);
   color: var(--text-3);
   background-color: var(--bg-1);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
+}
+
+.git-diff-file-list-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-diff-file-list-view-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-2);
+  flex-shrink: 0;
+}
+
+.git-diff-view-mode-button {
+  appearance: none;
+  -webkit-appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  font: inherit;
+  line-height: 1;
+}
+
+.git-diff-view-mode-button:hover {
+  color: var(--text-1);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.git-diff-view-mode-button.active {
+  color: var(--text-1);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
 }
 
 .git-diff-file-list-content {
@@ -411,6 +614,11 @@ body.git-diff-resizing * {
   line-height: 1.4;
 }
 
+.git-diff-file-item.tree-leaf {
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+
 .git-diff-file-item:hover {
   background-color: var(--bg-2);
 }
@@ -449,6 +657,100 @@ body.git-diff-resizing * {
   flex-shrink: 0;
   align-items: center;
   margin-top: 1px;
+}
+
+.git-diff-tree-node {
+  min-width: 0;
+}
+
+.git-diff-tree-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 6px 8px;
+  color: var(--text-2);
+  cursor: pointer;
+  line-height: 1.4;
+}
+
+.git-diff-tree-item:hover {
+  background-color: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.git-diff-tree-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1em;
+  height: 1em;
+  flex-shrink: 0;
+  margin-top: 0.1em;
+  color: var(--text-3);
+  transition: transform 0.15s ease;
+}
+
+.git-diff-tree-toggle svg {
+  width: 0.72em;
+  height: 0.72em;
+}
+
+.git-diff-tree-toggle.open {
+  transform: rotate(180deg);
+}
+
+.git-diff-tree-spacer {
+  width: 1em;
+  height: 1em;
+  flex-shrink: 0;
+  margin-top: 0.1em;
+}
+
+.git-diff-tree-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  margin-top: 0.12em;
+  color: var(--text-3);
+}
+
+.git-diff-tree-icon.dir {
+  color: color-mix(in srgb, var(--accent) 52%, var(--text-2));
+}
+
+.git-diff-tree-icon.dir svg,
+.git-diff-tree-icon.file.git-diff-tree-seti-icon svg {
+  width: 1.22em;
+  height: 1.22em;
+  display: block;
+  flex-shrink: 0;
+}
+
+.git-diff-tree-icon.file.git-diff-tree-seti-icon svg {
+  fill: currentColor;
+  color: inherit;
+}
+
+.git-diff-tree-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-sm);
+  color: var(--text-2);
+}
+
+.git-diff-tree-count {
+  flex-shrink: 0;
+  min-width: 18px;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  line-height: 16px;
+  text-align: center;
+  color: var(--text-3);
+  background-color: var(--bg-2);
 }
 
 .git-diff-stat-add {
@@ -601,8 +903,7 @@ body.git-diff-resizing * {
   transition: opacity 0.15s ease-out;
 }
 
-/* Render-then-reveal: hide editor during diff computation and scroll restoration */
-.diff-phase-waiting-diff .git-diff-editor-container,
+/* Render-then-reveal: only hide during synchronous scroll restoration. */
 .diff-phase-restoring-scroll .git-diff-editor-container {
   opacity: 0;
   pointer-events: none;
@@ -618,6 +919,79 @@ body.git-diff-resizing * {
   background-color: color-mix(in srgb, var(--accent) 20%, transparent) !important;
 }
 
+/* Per-hunk action toolbar — Monaco content widget anchored near each hunk and
+ * revealed while the hunk or toolbar is hovered. */
+.git-diff-hunk-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  box-shadow: var(--shadow-1);
+  white-space: nowrap;
+  z-index: 4;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(2px);
+  transition: opacity 0.08s ease, border-color 0.12s ease;
+}
+
+.git-diff-hunk-actions.is-visible,
+.git-diff-hunk-actions:hover,
+.git-diff-hunk-actions:focus-within {
+  opacity: 1;
+  pointer-events: auto;
+  border-color: var(--border-strong);
+}
+
+.git-diff-hunk-action-button {
+  appearance: none;
+  -webkit-appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+
+.git-diff-hunk-action-button svg {
+  flex: 0 0 auto;
+}
+
+.git-diff-hunk-action-button.success {
+  color: var(--success);
+}
+
+.git-diff-hunk-action-button.danger {
+  color: var(--danger);
+}
+
+.git-diff-hunk-action-button:hover {
+  border-color: currentColor;
+  background: color-mix(in srgb, currentColor 14%, transparent);
+}
+
+.git-diff-hunk-action-button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);
+  outline-offset: 1px;
+}
+
+.git-diff-hunk-action-label {
+  white-space: nowrap;
+}
+
 /* Tag not saved */
 .git-diff-file-dirty {
   color: var(--warning);
@@ -631,88 +1005,63 @@ body.git-diff-resizing * {
 .git-diff-detail-actions-row {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  justify-content: flex-end;
+  gap: 6px;
   flex-wrap: wrap;
 }
 
-.git-diff-action-panel {
-  flex: 1 1 420px;
-  display: flex;
-  flex-direction: row;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 8px;
-  min-height: 40px;
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border);
-  background-color: var(--bg-2);
-  flex-wrap: nowrap;
-}
-
-.git-diff-action-panel.line {
-  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-  background-color: color-mix(in srgb, var(--accent) 8%, transparent);
-}
-
-.git-diff-action-panel.file {
-  border-color: rgba(245, 158, 11, 0.5);
-  background-color: rgba(245, 158, 11, 0.08);
-}
-
-.git-diff-action-panel.edit {
-  border-color: rgba(16, 185, 129, 0.5);
-  background-color: rgba(16, 185, 129, 0.08);
-}
-
-.git-diff-action-label {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-2);
-  border-radius: 999px;
-  padding: 2px 8px;
-  white-space: nowrap;
-  border: 1px solid transparent;
-}
-
-.git-diff-action-label.line {
-  color: color-mix(in srgb, var(--accent) 80%, white);
-  border-color: color-mix(in srgb, var(--accent) 60%, transparent);
-  background-color: color-mix(in srgb, var(--accent) 18%, transparent);
-}
-
-.git-diff-action-label.file {
-  color: #fde68a;
-  border-color: rgba(245, 158, 11, 0.65);
-  background-color: rgba(245, 158, 11, 0.2);
-}
-
-.git-diff-action-label.edit {
-  color: #a7f3d0;
-  border-color: rgba(16, 185, 129, 0.65);
-  background-color: rgba(16, 185, 129, 0.2);
-}
-
-.git-diff-action-hint {
-  font-size: 11px;
-  color: var(--text-3);
-  white-space: nowrap;
-  flex: 1 1 auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.git-diff-action-meta {
+/* Side-by-side / Inline / Auto toggle — segmented control in the top
+ * git-diff header, sitting alongside prev/next change nav, jump-to-editor,
+ * and refresh-changes. Mirrors the file-list view-toggle for visual
+ * consistency. */
+.git-diff-split-mode-toggle {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  flex: 0 0 auto;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-2);
+  flex-shrink: 0;
 }
 
-.git-diff-action-buttons {
+.git-diff-split-mode-button {
+  appearance: none;
+  -webkit-appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+}
+
+.git-diff-split-mode-button:hover {
+  color: var(--text-1);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.git-diff-split-mode-button.active {
+  color: var(--text-1);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.git-diff-action-bar,
+.git-diff-action-button-group {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
+}
+
+.git-diff-action-bar {
+  min-width: 0;
   flex-wrap: wrap;
 }
 
@@ -732,86 +1081,102 @@ body.git-diff-resizing * {
   background-color: rgba(245, 158, 11, 0.12);
 }
 
-.git-diff-action-buttons button {
-  height: 28px;
-  padding: 0 12px;
-  border: 1px solid var(--border-strong);
-  border-radius: 8px;
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.2px;
+.git-diff-action-button {
+  height: 26px;
+  min-width: 0;
+  padding: 0 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  font-size: 11px;
+  line-height: 1;
+  font-weight: 500;
   cursor: pointer;
   color: var(--text-2);
-  background-color: var(--bg-2);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
-  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+  background-color: transparent;
+  transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease;
 }
 
-.git-diff-action-buttons button:hover {
-  background-color: var(--bg-1);
+.git-diff-action-button svg {
+  flex: 0 0 auto;
 }
 
-.git-diff-action-buttons button:disabled {
-  background-color: var(--bg-2);
+.git-diff-action-button:hover {
+  background-color: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.git-diff-action-button:disabled {
   color: var(--text-3);
-  border-color: var(--border);
-  box-shadow: none;
+  background-color: transparent;
+  border-color: transparent;
   cursor: not-allowed;
+  opacity: 0.55;
 }
 
-.git-diff-line-keep-btn,
-.git-diff-keep-btn {
+.git-diff-action-button.success {
   color: var(--success);
-  background-color: rgba(34, 197, 94, 0.14);
-  border-color: rgba(34, 197, 94, 0.45);
 }
 
-.git-diff-line-keep-btn:hover,
-.git-diff-keep-btn:hover {
-  background-color: rgba(34, 197, 94, 0.24);
+.git-diff-action-button.success:hover:not(:disabled) {
+  background-color: rgba(34, 197, 94, 0.12);
+  border-color: rgba(34, 197, 94, 0.28);
 }
 
-.git-diff-line-deny-btn,
-.git-diff-deny-btn,
-.git-diff-discard-btn {
+.git-diff-action-button.danger {
   color: var(--danger);
-  background-color: rgba(239, 68, 68, 0.14);
-  border-color: rgba(239, 68, 68, 0.45);
 }
 
-.git-diff-line-deny-btn:hover,
-.git-diff-deny-btn:hover,
-.git-diff-discard-btn:hover {
-  background-color: rgba(239, 68, 68, 0.24);
+.git-diff-action-button.danger:hover:not(:disabled) {
+  background-color: rgba(239, 68, 68, 0.12);
+  border-color: rgba(239, 68, 68, 0.28);
 }
 
-.git-diff-line-clear-btn,
-.git-diff-edit-btn {
+.git-diff-action-button.neutral {
   color: var(--text-2);
-  background-color: rgba(148, 163, 184, 0.08);
-  border-color: var(--border);
 }
 
-.git-diff-line-clear-btn:hover,
-.git-diff-edit-btn:hover {
-  background-color: rgba(148, 163, 184, 0.16);
+.git-diff-action-button.neutral:hover:not(:disabled) {
+  background-color: rgba(148, 163, 184, 0.12);
+  border-color: rgba(148, 163, 184, 0.24);
 }
 
-.git-diff-save-btn {
+.git-diff-action-button.primary {
   color: color-mix(in srgb, var(--accent) 90%, white);
-  background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 45%, transparent), color-mix(in srgb, var(--accent) 22%, transparent));
-  border-color: color-mix(in srgb, var(--accent) 60%, transparent);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12), 0 6px 16px color-mix(in srgb, var(--accent-strong) 18%, transparent);
+  background-color: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 32%, transparent);
 }
 
-.git-diff-save-btn:hover {
-  background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 60%, transparent), color-mix(in srgb, var(--accent) 26%, transparent));
+.git-diff-action-button.primary:hover:not(:disabled) {
+  background-color: color-mix(in srgb, var(--accent) 22%, transparent);
 }
 
-.git-diff-line-hint {
-  font-size: 11px;
-  color: var(--text-3);
+.git-diff-action-button-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+@media (max-width: 920px) {
+  .git-diff-action-button {
+    width: 28px;
+    padding: 0;
+  }
+
+  .git-diff-action-button-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
 }
 
 .git-diff-unsaved {
@@ -909,18 +1274,35 @@ body.git-diff-resizing * {
   flex-shrink: 0;
 }
 
-.git-diff-spinner {
-  width: 32px;
-  height: 32px;
-  border: 3px solid var(--border);
-  border-top-color: var(--accent);
-  border-radius: 50%;
-  animation: git-diff-spin 0.8s linear infinite;
+.git-diff-loading-dots {
+  display: flex;
+  gap: 6px;
 }
 
-@keyframes git-diff-spin {
-  to {
-    transform: rotate(360deg);
+.git-diff-loading-dots span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-3);
+  animation: git-diff-dot-bounce 1.2s ease-in-out infinite;
+}
+
+.git-diff-loading-dots span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.git-diff-loading-dots span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes git-diff-dot-bounce {
+  0%, 80%, 100% {
+    opacity: 0.2;
+    transform: translateY(0);
+  }
+  40% {
+    opacity: 0.8;
+    transform: translateY(-8px);
   }
 }
 

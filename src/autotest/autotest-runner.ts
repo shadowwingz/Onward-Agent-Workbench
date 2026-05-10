@@ -32,6 +32,8 @@ import { testGitDiffSubdir } from './test-git-diff-subdir'
 import { testGitDiffSubmodules } from './test-git-diff-submodules'
 import { testGitDiffRecursiveSubmodules } from './test-git-diff-recursive-submodules'
 import { testGitDiffStalenessAndSubmodule } from './test-git-diff-staleness-and-submodule'
+import { testGitDiffClickLatency } from './test-git-diff-click-latency'
+import { testGitStateMirrorLatency } from './test-git-state-mirror-latency'
 import { testGitNestedSubmodules } from './test-git-nested-submodules'
 import { testGitCrossPlatform } from './test-git-cross-platform'
 import { testProjectEditorMultiTerminalScope } from './test-project-editor-multi-terminal-scope'
@@ -86,6 +88,17 @@ function normalizeRuntimeMessage(value: unknown): string {
   return String(value ?? 'unknown error')
 }
 
+function normalizeRuntimeStack(value: unknown): string | null {
+  if (value instanceof Error && typeof value.stack === 'string') {
+    return value.stack
+  }
+  if (value && typeof value === 'object' && 'stack' in value) {
+    const stack = (value as { stack?: unknown }).stack
+    return typeof stack === 'string' && stack.trim() ? stack : null
+  }
+  return null
+}
+
 function isIgnorableRuntimeIssue(type: 'error' | 'unhandledrejection', message: string): boolean {
   const normalized = message.trim().toLowerCase()
   if (type === 'error' && normalized.includes('resizeobserver loop completed with undelivered notifications')) {
@@ -114,25 +127,35 @@ export async function runAllTests(ctx: AutotestContext): Promise<void> {
   // Accept comma-separated suite names (e.g. "pdf-epub-preview,pdf-epub-diff")
   // so a single autotest run can exercise multiple cooperating suites.
   const suiteAllowList = runSingleSuite
-    ? new Set(suiteFilter.split(',').map(s => s.trim()).filter(Boolean))
+    ? new Set(
+        suiteFilter
+          .split(',')
+          .map(s => s.trim().split(';')[0]?.trim() ?? '')
+          .filter(Boolean)
+      )
     : null
   const shouldRun = (suiteId: string) => !suiteAllowList || suiteAllowList.has(suiteId)
-  const runtimeErrors: Array<{ type: 'error' | 'unhandledrejection'; message: string }> = []
+  const runtimeErrors: Array<{ type: 'error' | 'unhandledrejection'; message: string; stack: string | null }> = []
   const handleWindowError = (event: ErrorEvent) => {
-    const message = normalizeRuntimeMessage(event.error ?? event.message)
+    const issue = event.error ?? event.message
+    const message = normalizeRuntimeMessage(issue)
+    const stack = normalizeRuntimeStack(issue)
     if (isIgnorableRuntimeIssue('error', message)) {
-      log('runtime-issue-ignored', { type: 'error', message })
+      log('runtime-issue-ignored', { type: 'error', message, stack })
       return
     }
-    runtimeErrors.push({ type: 'error', message })
+    log('runtime-issue-captured', { type: 'error', message, stack })
+    runtimeErrors.push({ type: 'error', message, stack })
   }
   const handleUnhandledRejection = (event: PromiseRejectionEvent) => {
     const message = normalizeRuntimeMessage(event.reason)
+    const stack = normalizeRuntimeStack(event.reason)
     if (isIgnorableRuntimeIssue('unhandledrejection', message)) {
-      log('runtime-issue-ignored', { type: 'unhandledrejection', message })
+      log('runtime-issue-ignored', { type: 'unhandledrejection', message, stack })
       return
     }
-    runtimeErrors.push({ type: 'unhandledrejection', message })
+    log('runtime-issue-captured', { type: 'unhandledrejection', message, stack })
+    runtimeErrors.push({ type: 'unhandledrejection', message, stack })
   }
 
   window.addEventListener('error', handleWindowError)
@@ -554,6 +577,26 @@ export async function runAllTests(ctx: AutotestContext): Promise<void> {
       const results = await testGitDiffStalenessAndSubmodule(ctx)
       collectSuiteResults('GitDiffStalenessAndSubmodule', results)
       await ctx.reopenProjectEditor('phase5.49-cleanup')
+      await sleep(500)
+    }
+
+    if (!ctx.cancelled() && shouldRun('git-diff-click-latency')) {
+      log('phase5.493:begin')
+      await ctx.reopenProjectEditor('phase5.493-setup')
+      await sleep(300)
+      const results = await testGitDiffClickLatency(ctx)
+      collectSuiteResults('GitDiffClickLatency', results)
+      await ctx.reopenProjectEditor('phase5.493-cleanup')
+      await sleep(500)
+    }
+
+    if (!ctx.cancelled() && shouldRun('git-state-mirror-latency')) {
+      log('phase5.495:begin')
+      await ctx.reopenProjectEditor('phase5.495-setup')
+      await sleep(300)
+      const results = await testGitStateMirrorLatency(ctx)
+      collectSuiteResults('GitStateMirrorLatency', results)
+      await ctx.reopenProjectEditor('phase5.495-cleanup')
       await sleep(500)
     }
 

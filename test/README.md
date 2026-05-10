@@ -21,6 +21,12 @@ when you add or modify a runner.
 python3 test/autotest/run-full-regression.py
 ```
 
+Unit-only checks can be run without launching Electron:
+
+```bash
+pnpm test:unit
+```
+
 Output lands in `test/full-regression-results/<local-timestamp>/`
 (host's local time, format `YYYYMMDDTHHMMSS`):
 
@@ -391,3 +397,8 @@ The hard rules live in `CLAUDE.md` § "Automated tests". Quick reference:
 
 `test/` top level holds **only** this `README.md` plus the four
 directories above. Do not create new files at `test/` top level.
+
+The full test-iteration loop convention (run → exit → read → fix →
+rebuild → repeat, plus forbidden polling patterns) lives in
+`CLAUDE.md` § *Hard rule — Test execution loop*. Follow it on every
+fix-and-verify cycle.

@@ -8,6 +8,7 @@ import {
   checkGitInstalled,
   discardGitFile,
   getGitDiff,
+  getGitDiffRequestCacheStats,
   getGitFileContent,
   getGitHistory,
   getGitHistoryDiff,
@@ -43,6 +44,7 @@ type GitIpcWorkerMethod =
   | 'getSubmodules'
   | 'updateIndexContent'
   | 'warmDiffCache'
+  | 'inspectListCacheStats'
 
 type WorkerRequest = {
   id: number
@@ -129,6 +131,11 @@ async function dispatch(method: GitIpcWorkerMethod, payload: Record<string, unkn
       } catch {
         return { success: false }
       }
+    case 'inspectListCacheStats':
+      // Stats live in the worker's module instance because getGitDiff runs
+      // here. Main reads them through this method so the diagnostics panel
+      // sees the actual counters, not the empty main-process controller.
+      return getGitDiffRequestCacheStats()
     default:
       throw new Error(`Unsupported Git IPC worker method: ${method}`)
   }

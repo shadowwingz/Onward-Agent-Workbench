@@ -517,7 +517,7 @@ function createWindow(displayName: string): void {
   }
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   // Reuse the userData / displayName work we already did at top level so
   // the single-instance lock and appInfo agree on identity. Module-scope
   // call already invoked initializeAppIdentity(); no need to repeat.
@@ -541,6 +541,44 @@ app.whenReady().then(() => {
     // shutdown ordering.
     setTimeout(() => app.quit(), 50)
     return
+  }
+
+  // Windows: PowerShell is a hard runtime requirement. The terminal /
+  // shell-integration / cwd-detection pipeline assumes either pwsh.exe
+  // (PowerShell 7+) or powershell.exe (5.1) is on PATH. Without it the
+  // OSC 633 / 7 emitter cannot install and cwd updates would silently fall
+  // back to a much slower lsof-style polling path that we removed in this
+  // refactor. Fail loud at startup with an install link rather than ship a
+  // half-functional UI.
+  if (process.platform === 'win32') {
+    const { spawnSync } = await import('node:child_process')
+    const probeShell = (cmd: string): boolean => {
+      try {
+        const result = spawnSync('where.exe', [cmd], { stdio: ['ignore', 'pipe', 'pipe'] })
+        return result.status === 0 && result.stdout && result.stdout.toString().trim().length > 0
+      } catch {
+        return false
+      }
+    }
+    const hasPwsh = probeShell('pwsh.exe')
+    const hasPs5 = probeShell('powershell.exe')
+    if (!hasPwsh && !hasPs5) {
+      const { dialog, shell } = await import('electron')
+      const choice = await dialog.showMessageBox({
+        type: 'error',
+        title: 'PowerShell required',
+        message: 'Onward requires PowerShell on Windows.',
+        detail: 'Install PowerShell 7+ from https://aka.ms/powershell, then relaunch Onward. Windows PowerShell 5.1 (preinstalled on Windows 10/11) also works.',
+        buttons: ['Open install guide', 'Quit'],
+        defaultId: 0,
+        cancelId: 1
+      })
+      if (choice.response === 0) {
+        try { await shell.openExternal('https://aka.ms/powershell') } catch { /* ignore */ }
+      }
+      app.exit(1)
+      return
+    }
   }
 
   // Windows: check for a pending update that wasn't applied during the

@@ -96,6 +96,7 @@ function createDefaultSettings(): SettingsState {
     telemetryConsent: null,
     telemetryInstanceId: null,
     autoFollowGitBranchForTaskName: true,
+    performanceDiagnosticsEnabled: false,
     updatedAt: Date.now()
   }
 }
@@ -133,6 +134,8 @@ interface SettingsContextValue {
   // Auto-follow Git branch for Task name (default true)
   getAutoFollowGitBranchForTaskName: () => boolean
   setAutoFollowGitBranchForTaskName: (enabled: boolean) => void
+
+  updatePerformanceDiagnosticsEnabled: (enabled: boolean) => void
 }
 
 const SettingsContext = createContext<SettingsContextValue | null>(null)
@@ -354,6 +357,13 @@ export function SettingsProvider({ children, onShortcutAction }: SettingsProvide
     }))
   }, [updateSettings])
 
+  const updatePerformanceDiagnosticsEnabled = useCallback((enabled: boolean) => {
+    updateSettings(prev => ({
+      ...prev,
+      performanceDiagnosticsEnabled: enabled
+    }))
+  }, [updateSettings])
+
   const value: SettingsContextValue = {
     settings,
     isLoaded,
@@ -371,7 +381,8 @@ export function SettingsProvider({ children, onShortcutAction }: SettingsProvide
     updateTheme,
     updateLanguage,
     getAutoFollowGitBranchForTaskName,
-    setAutoFollowGitBranchForTaskName
+    setAutoFollowGitBranchForTaskName,
+    updatePerformanceDiagnosticsEnabled
   }
 
   return (

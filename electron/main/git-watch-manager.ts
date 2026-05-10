@@ -470,7 +470,7 @@ export class GitWatchManager {
       priority,
       repoKey: repoRoot,
       repoConcurrencyLimit: 1,
-      includeUntracked: false,
+      includeUntracked: true,
       dedupeKey: `gitwatch:branch-status:${key}`,
       label: 'gitwatch worker branch status'
     })

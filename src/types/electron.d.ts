@@ -228,8 +228,10 @@ export interface AppStateAPI {
   onFlushPendingState: (callback: () => void | Promise<void>) => void
 }
 
-export type GitChangeType = 'unstaged' | 'staged' | 'untracked'
-export type GitStatusCode = 'M' | 'A' | 'D' | 'R' | 'C' | '?'
+export type GitChangeType = 'unstaged' | 'staged' | 'untracked' | 'conflict'
+export type GitResourceGroup = 'workingTree' | 'index' | 'untracked' | 'merge'
+export type GitResourceRef = 'HEAD' | 'index' | 'workingTree' | 'empty'
+export type GitStatusCode = 'M' | 'A' | 'D' | 'R' | 'C' | '?' | '!'
 
 export interface GitSubmoduleInfo {
   name: string
@@ -257,6 +259,9 @@ export interface GitFileStatus {
   additions: number
   deletions: number
   changeType: GitChangeType
+  resourceGroup: GitResourceGroup
+  originalRef: GitResourceRef | null
+  modifiedRef: GitResourceRef | null
   repoRoot?: string
   repoLabel?: string
   isSubmoduleEntry?: boolean
@@ -354,12 +359,71 @@ export interface GitHistoryFileContentOptions {
 
 export type TerminalGitStatus = 'clean' | 'modified' | 'added' | 'unknown'
 
+export type GitDiffContentCacheMissReason =
+  | 'first-load'
+  | 'invalidated-mutation'
+  | 'invalidated-watch'
+  | 'invalidated-mirror'
+  | 'invalidated-refresh'
+  | 'renderer-force-refresh'
+  | 'project-queue-evicted'
+  | 'single-file-too-large'
+  | 'precompute-pending'
+  | 'entry-not-warmed'
+  | 'worker-error'
+
+export type GitDiffContentCacheSource =
+  | 'renderer-memory'
+  | 'main-content-cache'
+  | 'worker-rebuild'
+
+export interface GitDiffContentCacheInfo {
+  state: 'hit' | 'miss'
+  source: GitDiffContentCacheSource
+  missReason?: GitDiffContentCacheMissReason
+  project?: string
+  key?: string
+  stored?: boolean
+  bytes?: number
+}
+
+export interface GitFileContentRequestOptions {
+  force?: boolean
+  missReason?: GitDiffContentCacheMissReason
+}
+
 export interface TerminalGitInfo {
   cwd: string | null
   repoRoot: string | null
   branch: string | null
   repoName: string | null
   status: TerminalGitStatus | null
+}
+
+/**
+ * Renderer-facing snapshot of the GitStateMirror. Same shape as
+ * `MirrorState` in `electron/main/git-state-mirror-types.ts` — duplicated
+ * here so renderer code never reaches into electron/main.
+ */
+export interface GitStateMirrorSnapshot {
+  cwd: string
+  repoRoot: string | null
+  repoName: string | null
+  branch: string | null
+  status: TerminalGitStatus | null
+  files: GitFileStatus[]
+  repos?: GitRepoContext[]
+  submodulesLoading?: boolean
+  capturedAt: number
+}
+
+/**
+ * Partial-update payload broadcast on `git-state-mirror:update`. Renderer
+ * merges these into its local copy of `GitStateMirrorSnapshot`. Always
+ * carries `capturedAt` for ordering.
+ */
+export type GitStateMirrorDelta = Partial<Omit<GitStateMirrorSnapshot, 'cwd' | 'capturedAt'>> & {
+  capturedAt: number
 }
 
 export interface GitFileContentResult {
@@ -382,6 +446,7 @@ export interface GitFileContentResult {
   modifiedPreviewData?: string
   originalPreviewSize?: number
   modifiedPreviewSize?: number
+  cacheInfo?: GitDiffContentCacheInfo
   error?: string
 }
 
@@ -599,7 +664,7 @@ export interface GitAPI {
   getHistory: (cwd: string, options?: { limit?: number; skip?: number }) => Promise<GitHistoryResult>
   getHistoryDiff: (cwd: string, options: GitHistoryDiffOptions) => Promise<GitHistoryDiffResult>
   getHistoryFileContent: (cwd: string, options: GitHistoryFileContentOptions) => Promise<GitHistoryFileContentResult>
-  getFileContent: (cwd: string, file: Pick<GitFileStatus, 'filename' | 'status' | 'originalFilename' | 'changeType' | 'isSubmoduleEntry'>, repoRoot?: string) => Promise<GitFileContentResult>
+  getFileContent: (cwd: string, file: Pick<GitFileStatus, 'filename' | 'status' | 'originalFilename' | 'changeType' | 'isSubmoduleEntry'>, repoRoot?: string, options?: GitFileContentRequestOptions) => Promise<GitFileContentResult>
   saveFileContent: (cwd: string, filename: string, content: string) => Promise<GitFileSaveResult>
   stageFile: (cwd: string, filename: string, repoRoot?: string) => Promise<GitFileActionResult>
   unstageFile: (cwd: string, filename: string, repoRoot?: string) => Promise<GitFileActionResult>
@@ -616,7 +681,17 @@ export interface GitAPI {
   notifyTerminalGitUpdate: (terminalId: string) => Promise<{ success: true }>
   warmDiffCache: (cwd: string) => Promise<{ success: boolean }>
   onTerminalInfo: (callback: (terminalId: string, info: TerminalGitInfo) => void) => () => void
-  onDiffCacheInvalidated: (callback: (cwd: string, reason: 'watcher' | 'force' | 'lru' | 'manual') => void) => () => void
+  onDiffCacheInvalidated: (callback: (cwd: string, reason: 'watcher' | 'watcher-error' | 'force' | 'lru' | 'manual' | 'mirror') => void) => () => void
+
+  // GitStateMirror surface — single-source-of-truth subscriptions wired
+  // through the worker-thread mirror. See `src/hooks/useGitStateMirror.ts`
+  // for the React hook every consumer should prefer over these raw bridges.
+  subscribeMirror: (cwd: string) => Promise<GitStateMirrorSnapshot | null>
+  unsubscribeMirror: (cwd: string) => void
+  getMirror: (cwd: string) => Promise<GitStateMirrorSnapshot | null>
+  onMirrorUpdate: (callback: (cwd: string, delta: GitStateMirrorDelta) => void) => () => void
+  pushCwd: (terminalId: string, newCwd: string | null) => void
+  requestFileBody: (cwd: string, fileKey: string, force: boolean) => Promise<GitFileContentResult | null>
 }
 
 // Project Editor API
@@ -818,9 +893,82 @@ export interface PerfTraceInfo {
   eventLoop: EventLoopStallMetrics
 }
 
+export interface GitDiffDebugStats {
+  cache: {
+    projects: Array<{
+      project: string
+      bytes: number
+      entries: number
+      entryDetails: Array<{
+        key: string
+        bytes: number
+      }>
+    }>
+    totalBytes: number
+    totalEntries: number
+    projectByteLimit: number
+    maxProjects: number
+    singleFileByteLimit: number
+  }
+  scheduler: {
+    totalBursts: number
+    totalCancelled: number
+    totalCompleted: number
+    totalSkipped: number
+    pendingProjects: string[]
+    inFlightProjects: string[]
+    perProject: Record<string, {
+      pendingSince: number | null
+      inFlightSince: number | null
+      lastBurst: {
+        finishedAt: number
+        durationMs: number
+        workingSetSize: number
+        eligibleCount: number
+        candidateCount: number
+        completed: number
+        skipped: number
+      } | null
+    }>
+  }
+  listCache: {
+    entries: number
+    inFlight: number
+    hits: number
+    misses: number
+    forces: number
+    ttlMs: number
+    maxEntries: number
+    lastEvent: {
+      kind: 'hit' | 'miss' | 'force' | null
+      key: string | null
+      at: number | null
+      ageMs: number | null
+      entriesCleared: number | null
+    }
+  }
+  watcher: {
+    backend: 'parcel'
+    active: number
+    maxProjects: number
+    projects: Array<{
+      cwd: string
+      status: 'starting' | 'watching' | 'error' | 'disposed'
+      eventCount: number
+      resyncCount: number
+      lastEventAt: number | null
+      lastError: string | null
+      pending: boolean
+    }>
+  }
+}
+
 export interface DebugAPI {
   enabled: boolean
   perfTraceEnabled: boolean
+  featureFlags: {
+    gitDiffPerformanceDiagnostics: boolean
+  }
   profile: boolean
   profileCwd: string | null
   autotest: boolean
@@ -836,6 +984,7 @@ export interface DebugAPI {
   getGitRuntimeMetrics: () => Promise<GitRuntimeMetrics>
   getMainWorkMetrics: () => Promise<Record<string, unknown>>
   getPerfTraceInfo: () => Promise<PerfTraceInfo>
+  getGitDiffDebugStats: () => Promise<GitDiffDebugStats>
   resetPerfTraceMetrics: () => Promise<EventLoopStallMetrics>
   perfTrace: (event: string, data?: Record<string, unknown>, terminalId?: string) => void
   getApiServerPort: () => Promise<number>

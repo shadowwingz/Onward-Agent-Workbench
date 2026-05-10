@@ -6,6 +6,7 @@
 import { join, resolve } from 'path'
 import { Worker } from 'worker_threads'
 import { gitRuntimeManager, type GitTaskPriority } from './git-runtime-manager'
+import type { GitDiffRequestCacheStats } from './git-diff-request-cache'
 import type {
   GitDiffLoadOptions,
   GitDiffResult,
@@ -43,6 +44,7 @@ type GitIpcWorkerMethod =
   | 'getSubmodules'
   | 'updateIndexContent'
   | 'warmDiffCache'
+  | 'inspectListCacheStats'
 
 type WorkerRequest = {
   id: number
@@ -230,6 +232,23 @@ class GitIpcWorkerClient {
       repoConcurrencyLimit: 1,
       dedupeKey: `git-ipc:warm-diff:${resolve(cwd)}`,
       label: 'worker warm git diff cache'
+    })
+  }
+
+  /**
+   * Read the list-cache hit/miss/force counters from the worker. The
+   * `gitDiffRequestCache` is owned by the worker because that is where
+   * `getGitDiff` runs, so the main-process module instance's controller
+   * is always empty. The diagnostics panel must come through this path
+   * to see the real numbers.
+   */
+  inspectListCacheStats(): Promise<GitDiffRequestCacheStats> {
+    return this.enqueueWorkerTask<GitDiffRequestCacheStats>('inspectListCacheStats', {}, {
+      priority: 'low',
+      repoKey: null,
+      repoConcurrencyLimit: 1,
+      dedupeKey: 'git-ipc:inspect-list-cache-stats',
+      label: 'worker inspect list cache stats'
     })
   }
 

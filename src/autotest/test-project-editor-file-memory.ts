@@ -98,10 +98,12 @@ export async function testProjectEditorFileMemory(ctx: AutotestContext): Promise
 
   const runId = Date.now()
   const anchorFile = `onward-autotest-file-memory-anchor-${runId}.md`
+  const textStateFile = `onward-autotest-file-memory-text-state-${runId}.txt`
   const recentEvictionFillerCount = 12
   const fillerFiles = Array.from({ length: recentEvictionFillerCount }, (_, index) => `onward-autotest-file-memory-filler-${runId}-${index + 1}.txt`)
   const browserFiles = Array.from({ length: 32 }, (_, index) => `onward-autotest-file-memory-browser-${runId}-${index + 1}.txt`)
   const anchorContent = buildMarkdownContent('anchor', 30, 12)
+  const textStateContent = buildTextContent('text-state', 180)
   const fillerContent = buildTextContent('filler', 80)
   const browserContent = buildTextContent('browser', 12)
   const normalizedRoot = normalizePath(rootPath)
@@ -180,6 +182,12 @@ export async function testProjectEditorFileMemory(ctx: AutotestContext): Promise
     const anchorCreated = await window.electronAPI.project.createFile(rootPath, anchorFile, anchorContent)
     if (!anchorCreated.success) {
       record('PFM-00-setup-anchor', false, { error: anchorCreated.error })
+      return results
+    }
+
+    const textStateCreated = await window.electronAPI.project.createFile(rootPath, textStateFile, textStateContent)
+    if (!textStateCreated.success) {
+      record('PFM-00-setup-text-state', false, { error: textStateCreated.error })
       return results
     }
 
@@ -563,7 +571,11 @@ export async function testProjectEditorFileMemory(ctx: AutotestContext): Promise
     })
     if (!outlineReadyAfterSwitch || cancelled()) return results
 
-    await sleep(250)
+    await waitFor(
+      'outline-scroll-restored-on-switch',
+      () => Math.abs((api()?.getOutlineScrollTop?.() ?? 0) - expectedOutlineScrollTop) <= restoreTolerance,
+      4000
+    )
     const restoredOutlineAfterSwitch = api()?.getOutlineScrollTop?.() ?? 0
     record(
       'PFM-42-outline-scroll-restored-on-switch',
@@ -600,7 +612,11 @@ export async function testProjectEditorFileMemory(ctx: AutotestContext): Promise
     })
     if (!outlineReadyAfterReopen || cancelled()) return results
 
-    await sleep(250)
+    await waitFor(
+      'outline-scroll-restored-after-reopen',
+      () => Math.abs((api()?.getOutlineScrollTop?.() ?? 0) - expectedOutlineScrollTop) <= restoreTolerance,
+      8000
+    )
     const restoredOutlineAfterReopen = api()?.getOutlineScrollTop?.() ?? 0
     record(
       'PFM-47-outline-scroll-restored-after-reopen',
@@ -636,8 +652,99 @@ export async function testProjectEditorFileMemory(ctx: AutotestContext): Promise
         afterAnchorMemory: finalAfterAnchorMemory
       }
     )
+
+    await api()?.openFileByPathAsUser?.(textStateFile, { trackRecent: true })
+    const textStateOpened = await waitForActiveFile('text-state-open', textStateFile)
+    record('PFM-50-vscode-editor-text-file-opened', textStateOpened, {
+      expected: textStateFile,
+      actual: api()?.getActiveFilePath?.() ?? null
+    })
+    if (!textStateOpened || cancelled()) return results
+
+    const textModelReady = await waitFor(
+      'text-state-model-ready',
+      () => (api()?.getEditorLineCount?.() ?? 0) >= 160,
+      8000
+    )
+    const targetTextLine = 88
+    if (textModelReady) {
+      await sleep(1000)
+    }
+    let cursorSet = false
+    let textScrolled = false
+    const cursorSettled = textModelReady && await waitFor(
+      'text-state-cursor-settled',
+      () => {
+        const currentApi = api()
+        if (!currentApi || (currentApi.getEditorLineCount?.() ?? 0) < 160) return false
+        cursorSet = currentApi.setCursorPosition?.(targetTextLine, 4) ?? false
+        textScrolled = currentApi.scrollToLine?.(targetTextLine) ?? false
+        return currentApi.getCursorPosition?.()?.lineNumber === targetTextLine
+      },
+      8000,
+      80
+    )
+    await sleep(120)
+    const textFirstVisibleBefore = api()?.getFirstVisibleLine?.() ?? 1
+    const textCursorBefore = api()?.getCursorPosition?.() ?? null
+    record('PFM-51-vscode-editor-view-state-captured', Boolean(
+      textModelReady &&
+      cursorSet &&
+      textScrolled &&
+      cursorSettled &&
+      textCursorBefore?.lineNumber === targetTextLine
+    ), {
+      textModelReady,
+      cursorSet,
+      textScrolled,
+      cursorSettled,
+      lineCount: api()?.getEditorLineCount?.() ?? null,
+      targetTextLine,
+      textCursorBefore,
+      textFirstVisibleBefore
+    })
+    if (cancelled()) return results
+
+    const textStateSaved = await waitForSavedState(
+      'text-editor-view-state-persisted',
+      (state) => state.fileStates?.[textStateFile]?.cursorLine === targetTextLine
+        || state.cursorLine === targetTextLine,
+      12000
+    )
+    record('PFM-52-vscode-editor-view-state-persisted', Boolean(textStateSaved), {
+      savedTextState: textStateSaved?.fileStates?.[textStateFile] ?? null,
+      rootCursorLine: textStateSaved?.cursorLine ?? null
+    })
+    if (!textStateSaved || cancelled()) return results
+
+    dispatchEscape()
+    const closedForTextStateRestore = await waitFor('text-state-close-before-reopen', () => !isOpenRef.current, 8000)
+    record('PFM-53-close-before-text-state-restore', closedForTextStateRestore, { closedForTextStateRestore })
+    if (!closedForTextStateRestore || cancelled()) return results
+
+    const reopenedForTextStateRestore = await reopenProjectEditor('project-editor-text-state-restore')
+    record('PFM-54-reopen-for-text-state-restore', reopenedForTextStateRestore, { reopenedForTextStateRestore })
+    if (!reopenedForTextStateRestore || cancelled()) return results
+
+    const activeTextRestored = await waitForActiveFile('text-state-active-after-reopen', textStateFile)
+    await sleep(1000)
+    const textCursorAfter = api()?.getCursorPosition?.() ?? null
+    const textFirstVisibleAfter = api()?.getFirstVisibleLine?.() ?? 1
+    record('PFM-55-vscode-editor-view-state-restored-after-reopen', Boolean(
+      activeTextRestored &&
+      textCursorAfter?.lineNumber === targetTextLine &&
+      Math.abs(textFirstVisibleAfter - textFirstVisibleBefore) <= 20
+    ), {
+      activeTextRestored,
+      targetTextLine,
+      textCursorAfter,
+      textFirstVisibleBefore,
+      textFirstVisibleAfter,
+      tolerance: 20
+    })
   } finally {
     const deletedAnchor = await window.electronAPI.project.deletePath(rootPath, anchorFile)
+    const deletedTextState = await window.electronAPI.project.deletePath(rootPath, textStateFile)
     const deletedFillers = await Promise.all(
       fillerFiles.map(async (fillerFile) => {
         return await window.electronAPI.project.deletePath(rootPath, fillerFile)
@@ -650,9 +757,11 @@ export async function testProjectEditorFileMemory(ctx: AutotestContext): Promise
     )
     log('project-editor-file-memory:cleanup', {
       anchorFile,
+      textStateFile,
       fillerFiles,
       browserFiles,
       deletedAnchor: deletedAnchor.success,
+      deletedTextState: deletedTextState.success,
       deletedFillers: deletedFillers.map((entry) => entry.success),
       deletedBrowserFiles: deletedBrowserFiles.map((entry) => entry.success)
     })

@@ -215,7 +215,8 @@ export const WORKER_TID = {
   PROJECT_FS: 5003,
   SQLITE: 5004,
   APP_STATE: 5005,
-  RIPGREP_SEARCH: 5006
+  RIPGREP_SEARCH: 5006,
+  GIT_STATE_MIRROR: 5007
 } as const
 
 // ---------- Pure helpers ----------

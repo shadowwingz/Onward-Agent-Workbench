@@ -1,0 +1,34 @@
+{
+  "repos": [
+    {
+      "name": "repo-A",
+      "branch": "feature-a",
+      "expectedStatus": "clean"
+    },
+    {
+      "name": "repo-B",
+      "branch": "main",
+      "expectedStatus": "clean"
+    },
+    {
+      "name": "repo-modified",
+      "branch": "dirty-yellow",
+      "expectedStatus": "modified"
+    },
+    {
+      "name": "repo-untracked",
+      "branch": "dirty-purple",
+      "expectedStatus": "added"
+    },
+    {
+      "name": "repo-mixed",
+      "branch": "dirty-mixed",
+      "expectedStatus": "added"
+    },
+    {
+      "name": "non-git-dir",
+      "branch": null,
+      "expectedStatus": "unknown"
+    }
+  ]
+}

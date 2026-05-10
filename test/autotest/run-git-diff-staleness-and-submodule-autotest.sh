@@ -10,6 +10,7 @@ source "$ROOT_DIR/test/autotest/resolve-dev-app-bin.sh"
 APP_BIN="${1:-$(resolve_dev_app_bin "$ROOT_DIR" || true)}"
 LOG_FILE="${2:-$REPO_ROOT/traces/test-logs/git-diff-staleness-and-submodule-autotest.log}"
 mkdir -p "$(dirname "$LOG_FILE")"
+WATCHDOG_SEC="${GDS_WATCHDOG_SEC:-180}"
 
 if [[ -z "$APP_BIN" || ! -x "$APP_BIN" ]]; then
   echo "ERROR: app binary not found or not executable: ${APP_BIN:-<empty>}" >&2
@@ -49,9 +50,11 @@ echo "  Binary:        $APP_BIN"
 echo "  Clean repo:    $CLEAN_ROOT"
 echo "  Manifest:      $MANIFEST_PATH"
 echo "  User data dir: $USER_DATA_DIR"
+echo "  Watchdog:      ${WATCHDOG_SEC}s"
 echo "  Log:           $LOG_FILE"
 echo ""
 
+APP_EXIT=0
 ONWARD_DEBUG=1 \
 ONWARD_PERF_TRACE=1 \
 ONWARD_REPO_ROOT="$REPO_ROOT" \
@@ -61,7 +64,7 @@ ONWARD_AUTOTEST_SUITE=git-diff-staleness-and-submodule \
 ONWARD_AUTOTEST_CWD="$CLEAN_ROOT" \
 ONWARD_AUTOTEST_FIXTURE_EXTRA="$MANIFEST_PATH" \
 ONWARD_AUTOTEST_EXIT=1 \
-"$APP_BIN" > "$LOG_FILE" 2>&1 || true
+node "$REPO_ROOT/test/autotest/run-with-timeout.mjs" "$WATCHDOG_SEC" "$APP_BIN" > "$LOG_FILE" 2>&1 || APP_EXIT=$?
 
 echo ""
 echo "=== Test log (last 80 lines) ==="
@@ -76,6 +79,11 @@ if grep -q "\[AutoTest\] FAIL" "$LOG_FILE"; then
   exit 1
 fi
 
+if [[ "$APP_EXIT" -ne 0 ]]; then
+  echo "Git Diff staleness autotest exited with code $APP_EXIT" >&2
+  exit "$APP_EXIT"
+fi
+
 if ! grep -q "GDS-12-trace-marker-watcher-and-freshness-expected" "$LOG_FILE"; then
   echo "Missing GDS-12 marker; the test may not have executed correctly" >&2
   tail -n 40 "$LOG_FILE" >&2
@@ -84,6 +92,30 @@ fi
 
 if ! grep -q "GDS-16-trace-marker-snapshot-service-expected" "$LOG_FILE"; then
   echo "Missing GDS-16 marker; the snapshot service migration test did not run" >&2
+  tail -n 40 "$LOG_FILE" >&2
+  exit 1
+fi
+
+if ! grep -q "GDS-26-trace-marker-diff-file-load-expected" "$LOG_FILE"; then
+  echo "Missing GDS-26 marker; the diff file-load trace test did not run" >&2
+  tail -n 40 "$LOG_FILE" >&2
+  exit 1
+fi
+
+if ! grep -q "GDS-30-trace-marker-diff-ux-actions-expected" "$LOG_FILE"; then
+  echo "Missing GDS-30 marker; the diff UX action trace test did not run" >&2
+  tail -n 40 "$LOG_FILE" >&2
+  exit 1
+fi
+
+if ! grep -q "GDS-34-trace-marker-diff-body-prefetch-expected" "$LOG_FILE"; then
+  echo "Missing GDS-34 marker; the diff body prefetch trace test did not run" >&2
+  tail -n 40 "$LOG_FILE" >&2
+  exit 1
+fi
+
+if ! grep -q "GDS-42-trace-marker-diff-tree-editor-jumps-expected" "$LOG_FILE"; then
+  echo "Missing GDS-42 marker; the diff tree/editor jump trace test did not run" >&2
   tail -n 40 "$LOG_FILE" >&2
   exit 1
 fi
@@ -133,7 +165,7 @@ expect_event() {
 }
 
 echo ""
-echo "=== Trace event coverage (GDS-11/12/16) ==="
+echo "=== Trace event coverage (GDS-11/12/16/26/30/34/42) ==="
 expect_event "GDS-11"  "main:git.diff.submodule-filter"
 expect_event "GDS-12a" "main:git.diff.fs-watch-event"
 expect_event "GDS-12b" "renderer:subpage.freshness-check"
@@ -145,6 +177,15 @@ expect_event "GDS-12b" "renderer:subpage.freshness-check"
 # snapshot still warm) that is not worth defending against test-runner
 # flake. Cache health can still be inspected post-mortem in the trace.
 expect_event "GDS-16"  "main:git.snapshot.capture"
+expect_event "GDS-26a" "main:ipc.git.get-file-content"
+expect_event "GDS-26b" "renderer:git-diff.file-load"
+expect_event "GDS-30a" "renderer:git-diff.manual-refresh"
+expect_event "GDS-30b" "renderer:git-diff.hunk-navigate"
+expect_event "GDS-30c" "renderer:git-diff.hunk-action"
+expect_event "GDS-34"  "renderer:git-diff.body-prefetch"
+expect_event "GDS-42a" "renderer:git-diff.file-list-mode-change"
+expect_event "GDS-42b" "renderer:git-diff.jump-to-editor"
+expect_event "GDS-42c" "renderer:project-editor.jump-to-diff"
 
 echo ""
 echo "Git Diff staleness + submodule filter autotest passed"

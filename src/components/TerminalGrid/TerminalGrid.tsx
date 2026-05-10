@@ -15,7 +15,7 @@ import { GitHistoryViewer } from '../GitHistoryViewer'
 import { ProjectEditor } from '../ProjectEditor'
 import { SubpagePanelShell, type SubpagePanelShellState } from '../SubpageSwitcher'
 import { CodingAgentModal } from '../CodingAgentModal'
-import type { CodingAgentConfigInput } from '../../types/electron'
+import type { CodingAgentConfigInput, GitStateMirrorSnapshot, GitStateMirrorDelta } from '../../types/electron'
 import { BrowserPanel } from '../BrowserPanel/BrowserPanel'
 import { useSettings } from '../../contexts/SettingsContext'
 import { useAppState } from '../../contexts/AppStateContext'
@@ -68,7 +68,14 @@ interface TerminalGridProps {
    */
   onTerminalAutoRename: (id: string, newCustomName: string | null) => void
   onPersistTerminalCwd: (terminalId: string, cwd: string | null) => void
-  onOpenProjectEditor: (terminalId: string, options?: { filePath?: string | null; repoRoot?: string | null }) => void
+  onOpenProjectEditor: (terminalId: string, options?: {
+    filePath?: string | null
+    repoRoot?: string | null
+    source?: SubpageId | null
+    returnTarget?: SubpageId | null
+    diffFilePath?: string | null
+    diffRepoRoot?: string | null
+  }) => void
   tabId?: string
   hidden?: boolean
   shortcutAction?: TerminalShortcutAction | null
@@ -271,6 +278,11 @@ export const TerminalGrid = memo(function TerminalGrid({
   const [gitDiffCwdPending, setGitDiffCwdPending] = useState(false)
   const [gitDiffOpenRequestedAt, setGitDiffOpenRequestedAt] = useState<number | null>(null)
   const [gitDiffCwdReadyAt, setGitDiffCwdReadyAt] = useState<number | null>(null)
+  const [gitDiffNavigationTarget, setGitDiffNavigationTarget] = useState<{
+    filePath: string
+    repoRoot?: string | null
+    nonce: number
+  } | null>(null)
   const [gitHistoryOpen, setGitHistoryOpen] = useState(false)
   const [gitHistoryTerminalId, setGitHistoryTerminalId] = useState<string | null>(null)
   const [gitHistoryCwd, setGitHistoryCwd] = useState<string | null>(null)
@@ -282,10 +294,35 @@ export const TerminalGrid = memo(function TerminalGrid({
   const [codingAgentTerminalId, setCodingAgentTerminalId] = useState<string | null>(null)
   // codingAgentType state removed — modal handles command selection internally
   const [terminalInfos, setTerminalInfos] = useState<Record<string, TerminalGitInfo>>({})
+  // GitStateMirror parallel-subscription map (cwd → snapshot). Mirror takes
+  // precedence over `terminalInfos` (which still comes from the legacy
+  // GitWatchManager polling) whenever it has a fresh entry. The legacy path
+  // remains as a fallback so no behaviour regresses while commits 5-9 are
+  // still bringing the worker / OSC pipeline online — and so consumers
+  // that haven't migrated yet (Project Editor, Quick Open) keep working.
+  const [mirrorSnapshots, setMirrorSnapshots] = useState<Record<string, GitStateMirrorSnapshot>>({})
+  const lastRenderedGitSignalRef = useRef<Record<string, {
+    cwd: string | null
+    branch: string | null
+    status: 'clean' | 'modified' | 'added' | 'unknown' | null
+  }>>({})
+  // macOS canonicalises `/var/...` to `/private/var/...` (the actual mount
+  // point of the symlink). The mirror worker uses `path.resolve` so its
+  // emitted `cwd` carries the `/private/` prefix; the renderer subscribes
+  // with whatever raw form the OSC parser produced. Normalising both sides
+  // with the same key keeps the `mirrorSnapshots` map consistent without
+  // having to ship a node `path` polyfill into the renderer bundle.
+  // OSC-detected cwd map (terminalId → cwd). Updated synchronously when
+  // xterm.js parses an OSC 7/633/1337/9 sequence inside a session — the
+  // session manager dispatches an 'onward:terminal-cwd-detected' CustomEvent
+  // for that. We prefer this over `terminalInfos[id].cwd` because the legacy
+  // poll path lags 0.4–1.5s while the OSC path is sub-frame.
+  const [oscDetectedCwds, setOscDetectedCwds] = useState<Record<string, string>>({})
   const [copyNotice, setCopyNotice] = useState<{ terminalId: string; type: 'success' | 'error'; text: string } | null>(null)
   const copyNoticeTimerRef = useRef<number | null>(null)
   const lastShortcutTokenRef = useRef<number | null>(null)
   const gitDiffOpenTokenRef = useRef(0)
+  const gitDiffNavigationTargetNonceRef = useRef(0)
   const gitHistoryOpenTokenRef = useRef(0)
   const subpageNavigateTokenRef = useRef(0)
   const [terminalStatuses, setTerminalStatuses] = useState<Record<string, TerminalSessionStatus>>({})
@@ -462,6 +499,130 @@ export const TerminalGrid = memo(function TerminalGrid({
     titleMenuTerminalIdRef.current = titleMenuTerminalId
   }, [titleMenuTerminalId])
 
+  // OSC-detected cwd listener — fires synchronously when the session
+  // manager's xterm OSC handler parses a cwd-bearing escape. Updates the
+  // local terminalId→cwd map; render then prefers it over the legacy
+  // poll-driven `terminalInfos[id].cwd`. Also drives a subscribe to the
+  // mirror for the new cwd so the chip is ready before the watcher fans
+  // out.
+  useEffect(() => {
+    const onOscCwd = (e: Event) => {
+      const detail = (e as CustomEvent<{ terminalId?: string; cwd?: string }>).detail
+      if (!detail || !detail.terminalId || !detail.cwd) return
+      setOscDetectedCwds((prev) => {
+        if (prev[detail.terminalId!] === detail.cwd) return prev
+        return { ...prev, [detail.terminalId!]: detail.cwd! }
+      })
+    }
+    window.addEventListener('onward:terminal-cwd-detected', onOscCwd)
+    return () => window.removeEventListener('onward:terminal-cwd-detected', onOscCwd)
+  }, [])
+
+  // GitStateMirror update listener — global, single subscription. Merges
+  // every incoming delta into mirrorSnapshots keyed by cwd. Subsequent
+  // useEffect manages per-cwd subscribe / unsubscribe lifecycle.
+  useEffect(() => {
+    const dispose = window.electronAPI?.git?.onMirrorUpdate?.((cwd, delta) => {
+      const normalized = normalizeCwd(cwd) ?? cwd
+      const typedDelta = delta as GitStateMirrorDelta
+      setMirrorSnapshots((prev) => {
+        const base: GitStateMirrorSnapshot = prev[normalized] ?? {
+          cwd: normalized,
+          repoRoot: null,
+          repoName: null,
+          branch: null,
+          status: null,
+          files: [],
+          capturedAt: 0
+        }
+        return {
+          ...prev,
+          [normalized]: { ...base, ...typedDelta, cwd: normalized, capturedAt: typedDelta.capturedAt }
+        }
+      })
+    })
+    return () => { dispose?.() }
+  }, [])
+
+  // Per-cwd subscribe / unsubscribe driven by the union of cwds the legacy
+  // poll path knows about AND cwds the OSC parser has just detected. The
+  // worker attaches a watcher on first subscribe and detaches on last.
+  // We deliberately depend on the cwd identity set (not full terminalInfos)
+  // so churn in branch/status doesn't churn subscriptions.
+  //
+  // Unsubscribe uses a 30-second grace period rather than firing on the
+  // same tick the cwd leaves `desired`. The motivation is concrete: the
+  // worker's first watcher-attach + initial git-status pair for a cold
+  // cwd costs hundreds of ms (parcel-watcher ENOENT/realpath, then a
+  // synchronous `git rev-parse` + `git status`). A user `cd`-ing back to
+  // a recently-visited repo within that window — or the GSM autotest's
+  // sample loop, which oscillates between two repos every ~50 ms — would
+  // otherwise pay that cold cost on every flip. With the grace window,
+  // the second visit hits the warm router cache and the chip flips within
+  // a frame. After the window expires, the cwd is genuinely unsubscribed
+  // (worker detaches its parcel-watcher) so per-session memory stays
+  // bounded by the number of distinct repos visited per ~30 s.
+  const subscribedCwdsRef = useRef<Set<string>>(new Set())
+  const pendingUnsubTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
+  const SUBSCRIPTION_GRACE_MS = 30_000
+  useEffect(() => {
+    const desired = new Set<string>()
+    for (const info of Object.values(terminalInfos)) {
+      if (info?.cwd) desired.add(info.cwd)
+    }
+    for (const cwd of Object.values(oscDetectedCwds)) {
+      if (cwd) desired.add(cwd)
+    }
+    const subscribed = subscribedCwdsRef.current
+    const pendingTimers = pendingUnsubTimersRef.current
+    // Newly-desired cwds: cancel any pending unsubscribe and (if not yet
+    // subscribed) issue a fresh subscribe. The IPC handler is idempotent
+    // per webContents.id, so a redundant subscribe is a no-op.
+    for (const cwd of desired) {
+      const pending = pendingTimers.get(cwd)
+      if (pending) {
+        clearTimeout(pending)
+        pendingTimers.delete(cwd)
+      }
+      if (subscribed.has(cwd)) continue
+      subscribed.add(cwd)
+      void window.electronAPI?.git?.subscribeMirror?.(cwd).then((initial) => {
+        if (!initial) return
+        const snapshot = initial as GitStateMirrorSnapshot
+        const normalized = normalizeCwd(snapshot.cwd) ?? snapshot.cwd
+        setMirrorSnapshots((prev) => ({ ...prev, [normalized]: { ...snapshot, cwd: normalized } }))
+      }).catch(() => { /* tolerate */ })
+    }
+    // No-longer-desired cwds: schedule a delayed unsubscribe rather than
+    // tear down immediately (see grace-period rationale above).
+    for (const cwd of subscribed) {
+      if (desired.has(cwd)) continue
+      if (pendingTimers.has(cwd)) continue
+      const t = setTimeout(() => {
+        pendingTimers.delete(cwd)
+        subscribed.delete(cwd)
+        try { window.electronAPI?.git?.unsubscribeMirror?.(cwd) } catch { /* ignore */ }
+      }, SUBSCRIPTION_GRACE_MS)
+      pendingTimers.set(cwd, t)
+    }
+  }, [terminalInfos, oscDetectedCwds])
+
+  // On unmount, cancel pending unsubs and immediately release every cwd we
+  // had open. Without this the worker keeps watchers alive for 30 s after
+  // the renderer goes away, leaking parcel-watcher fds.
+  useEffect(() => {
+    const subscribed = subscribedCwdsRef.current
+    const pendingTimers = pendingUnsubTimersRef.current
+    return () => {
+      for (const t of pendingTimers.values()) clearTimeout(t)
+      pendingTimers.clear()
+      for (const cwd of subscribed) {
+        try { window.electronAPI?.git?.unsubscribeMirror?.(cwd) } catch { /* ignore */ }
+      }
+      subscribed.clear()
+    }
+  }, [])
+
   const terminalInfosRef = useRef<Record<string, TerminalGitInfo>>({})
   useEffect(() => {
     terminalInfosRef.current = terminalInfos
@@ -492,6 +653,25 @@ export const TerminalGrid = memo(function TerminalGrid({
         }
       })
       return next
+    })
+  }, [terminals])
+
+  // Pair the terminalInfos pruning above with an analogous prune for
+  // oscDetectedCwds. Without this, a closed terminal's last-seen cwd
+  // remains in the map indefinitely, so the subscribe useEffect keeps
+  // treating it as "desired" and the 30-second mirror-grace timer below
+  // never fires for that cwd — the worker holds the parcel-watcher open
+  // until the whole TerminalGrid unmounts (effectively until app quit).
+  useEffect(() => {
+    setOscDetectedCwds(prev => {
+      const validIds = new Set(terminals.map(t => t.id))
+      let changed = false
+      const next: Record<string, string> = {}
+      for (const [id, cwd] of Object.entries(prev)) {
+        if (validIds.has(id)) next[id] = cwd
+        else changed = true
+      }
+      return changed ? next : prev
     })
   }, [terminals])
 
@@ -544,6 +724,63 @@ export const TerminalGrid = memo(function TerminalGrid({
       terminalStyle: getTerminalStyle(terminalId)
     }
   }, [theme, fontSize, fontFamily, getTerminalStyle])
+
+  // Normalise cwd so every form a path can take in this app maps to the same
+  // key. The worker stores its mirror state keyed by `path.resolve(cwd)` and
+  // emits `mirror-update` with that resolved form. The renderer receives raw
+  // pushOscCwd / legacy cwd forms that may differ in three ways:
+  //   1. `/var/...` (symlink) vs `/private/var/...` (canonical) on macOS
+  //      tmpdir / Volumes — `path.resolve` does NOT follow this symlink, but
+  //      legacy syscalls (proc_pidinfo) sometimes return the `/private/` form,
+  //      so we strip the prefix to merge the two namespaces.
+  //   2. Embedded `//` from `$TMPDIR` ending with `/` plus a leading `/` in
+  //      the suffix (the GSM autotest's mktemp -d produces this exact shape:
+  //      `/var/folders/.../T//onward-gsm-fixture.X/repo-A`). `path.resolve`
+  //      collapses these, but a raw render-side lookup misses the snapshot
+  //      because the storage key was canonicalised by the worker.
+  //   3. Trailing `/` (except root) — `path.resolve` strips it.
+  // Together, items 2 and 3 reproduce `path.posix.normalize` for the
+  // already-absolute paths this code deals with.
+  const normalizeCwd = useCallback((cwd: string | null): string | null => {
+    if (!cwd) return cwd
+    let normalized = cwd.replace(/\/{2,}/g, '/')
+    if (normalized.startsWith('/private/')) normalized = normalized.slice('/private'.length)
+    if (normalized.length > 1 && normalized.endsWith('/')) normalized = normalized.slice(0, -1)
+    return normalized
+  }, [])
+
+  useEffect(() => {
+    if (hidden) return
+    const nextSignals: typeof lastRenderedGitSignalRef.current = {}
+    for (const termInfo of visibleTerminals) {
+      const terminalInfo = terminalInfos[termInfo.id]
+      const oscCwd = oscDetectedCwds[termInfo.id]
+      const cwd = oscCwd || terminalInfo?.cwd || null
+      const normalizedCwd = normalizeCwd(cwd)
+      const mirror = normalizedCwd ? mirrorSnapshots[normalizedCwd] : null
+      const legacyMatchesCwd = terminalInfo?.cwd === cwd
+      const branch = mirror?.branch ?? (legacyMatchesCwd ? terminalInfo?.branch : null) ?? null
+      const status = mirror?.status ?? (legacyMatchesCwd ? terminalInfo?.status : null) ?? null
+      const signal = { cwd: normalizedCwd ?? cwd, branch, status }
+      const previous = lastRenderedGitSignalRef.current[termInfo.id]
+      if (!previous || previous.branch !== signal.branch) {
+        perfTraceTask(PERF_TRACE_EVENT.RENDERER_TERMINAL_TITLE_BRANCH_RENDERED, {
+          terminalId: termInfo.id,
+          cwd: signal.cwd,
+          branch: signal.branch
+        }, termInfo.id)
+      }
+      if (!previous || previous.status !== signal.status) {
+        perfTraceTask(PERF_TRACE_EVENT.RENDERER_TERMINAL_TITLE_COLOR_RENDERED, {
+          terminalId: termInfo.id,
+          cwd: signal.cwd,
+          status: signal.status ?? 'unknown'
+        }, termInfo.id)
+      }
+      nextSignals[termInfo.id] = signal
+    }
+    lastRenderedGitSignalRef.current = nextSignals
+  }, [hidden, visibleTerminals, terminalInfos, oscDetectedCwds, mirrorSnapshots, normalizeCwd])
 
   const formatCompactPath = useCallback((cwd: string): string => {
     const trimmed = cwd.trim()
@@ -1695,6 +1932,7 @@ export const TerminalGrid = memo(function TerminalGrid({
     setGitDiffCwdPending(false)
     setGitDiffOpenRequestedAt(null)
     setGitDiffCwdReadyAt(null)
+    setGitDiffNavigationTarget(null)
     if (!restoreFocus) return
     requestAnimationFrame(() => {
       const tid = openedFrom ?? activeTerminalIdRef.current
@@ -1879,13 +2117,25 @@ export const TerminalGrid = memo(function TerminalGrid({
       }
 
       if (target === 'diff') {
+        const filePath = customEvent.detail?.filePath
+        setGitDiffNavigationTarget(typeof filePath === 'string' && filePath.trim()
+          ? {
+              filePath,
+              repoRoot: customEvent.detail?.repoRoot ?? null,
+              nonce: ++gitDiffNavigationTargetNonceRef.current
+            }
+          : null)
         void handleViewGitDiff(terminalId, { closeOtherSubpages: false })
       } else if (target === 'history') {
         void handleViewGitHistory(terminalId, { closeOtherSubpages: false })
       } else {
         void onOpenProjectEditor(terminalId, {
           filePath: customEvent.detail?.filePath ?? null,
-          repoRoot: customEvent.detail?.repoRoot ?? null
+          repoRoot: customEvent.detail?.repoRoot ?? null,
+          source: customEvent.detail?.source ?? null,
+          returnTarget: customEvent.detail?.returnTarget ?? null,
+          diffFilePath: customEvent.detail?.diffFilePath ?? null,
+          diffRepoRoot: customEvent.detail?.diffRepoRoot ?? null
         })
       }
 
@@ -2110,10 +2360,25 @@ export const TerminalGrid = memo(function TerminalGrid({
             const terminalInfo = terminalInfos[termInfo.id]
             const terminalStatus = terminalStatuses[termInfo.id] ?? 'idle'
             const showTerminalOverlay = terminalStatus === 'initializing' || terminalStatus === 'error'
-            const cwd = terminalInfo?.cwd || null
-            const branch = terminalInfo?.branch || null
-            const repoName = terminalInfo?.repoName || null
-            const status = terminalInfo?.status ?? null
+            // Effective cwd, in priority order:
+            //   1. OSC-detected cwd (sub-frame, set the moment the user's
+            //      `cd` is processed by the shell's precmd hook).
+            //   2. Legacy poll-driven terminalInfo.cwd (0.4–1.5 s lag).
+            const oscCwd = oscDetectedCwds[termInfo.id]
+            const cwd = oscCwd || terminalInfo?.cwd || null
+            const normalizedCwd = normalizeCwd(cwd)
+            const mirror = normalizedCwd ? mirrorSnapshots[normalizedCwd] : null
+            // Render rule: prefer mirror snapshot. Fall back to legacy
+            // `terminalInfo` ONLY when its cwd matches the effective cwd
+            // (otherwise we'd be showing the previous repo's branch on a
+            // brand-new cwd until the legacy poll catches up — exactly the
+            // bug the OSC path is meant to fix). When neither has fresh
+            // data we display blanks; the chip's colour reverts to the
+            // default green dot, which is at least not misleading.
+            const legacyMatchesCwd = terminalInfo?.cwd === cwd
+            const branch = mirror?.branch ?? (legacyMatchesCwd ? terminalInfo?.branch : null) ?? null
+            const repoName = mirror?.repoName ?? (legacyMatchesCwd ? terminalInfo?.repoName : null) ?? null
+            const status = mirror?.status ?? (legacyMatchesCwd ? terminalInfo?.status : null) ?? null
             const compactCwd = cwd ? formatCompactPath(cwd) : ''
             const branchStatusClass = status && status !== 'clean'
               ? `terminal-grid-branch--${status}`
@@ -2194,8 +2459,8 @@ export const TerminalGrid = memo(function TerminalGrid({
                         })
                         handleStartEdit(termInfo.id, termInfo.customName)
                       }}
-                      onUseBranch={() => handleTitleSnapshotRename(termInfo.id, terminalInfos[termInfo.id]?.branch ?? '', 'branch')}
-                      onUseRepoName={() => handleTitleSnapshotRename(termInfo.id, terminalInfos[termInfo.id]?.repoName ?? '', 'repo')}
+                      onUseBranch={() => handleTitleSnapshotRename(termInfo.id, branch ?? '', 'branch')}
+                      onUseRepoName={() => handleTitleSnapshotRename(termInfo.id, repoName ?? '', 'repo')}
                       autoFollowEnabled={currentAutoFollowEnabled}
                       onToggleAutoFollow={() => {
                         debugLog('titleMenu:autoFollowToggle', {
@@ -2204,8 +2469,8 @@ export const TerminalGrid = memo(function TerminalGrid({
                         })
                         setAutoFollowGitBranchForTaskName(!currentAutoFollowEnabled)
                       }}
-                      branch={terminalInfos[termInfo.id]?.branch ?? null}
-                      repoName={terminalInfos[termInfo.id]?.repoName ?? null}
+                      branch={branch}
+                      repoName={repoName}
                       forceClose={hidden || globalOverlayActive}
                     />
 
@@ -2359,6 +2624,7 @@ export const TerminalGrid = memo(function TerminalGrid({
               panelShellMode="external"
               onPanelShellStateChange={handleDiffPanelShellStateChange}
               taskTitle={terminals.find(t => t.id === gitDiffTerminalId)?.title}
+              navigationTarget={gitDiffNavigationTarget}
             />
             <GitHistoryViewer
               isOpen={gitHistoryOpen}

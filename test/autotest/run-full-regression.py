@@ -12,7 +12,8 @@ silently skipping anything.
 
 Behaviour highlights:
   - Same SCRIPTS list as the bash version, in the same order.
-  - 5-minute hard timeout per runner, enforced via test/autotest/run-with-timeout.mjs.
+  - 3-minute maximum timeout per runner, enforced via test/autotest/run-with-timeout.mjs.
+    Any runner exceeding this wall-clock budget is a failure.
   - 2-second inter-script gap; the dev app is killed by EXACT process name
     before and after every runner (CLAUDE.md hard rule — no wildcards).
   - Per-runner ONWARD_USER_DATA_DIR under the OS temp root, removed at the end.
@@ -71,8 +72,10 @@ SCRIPTS: List[str] = [
     "test/autotest/run-file-index-cache-ui-autotest.sh",
     "test/autotest/run-file-watch-autotest.sh",
     "test/autotest/run-git-cross-platform-autotest.sh",
+    "test/autotest/run-git-diff-click-latency-autotest.sh",
     "test/autotest/run-git-diff-recursive-submodules-autotest.sh",
     "test/autotest/run-git-diff-staleness-and-submodule-autotest.sh",
+    "test/autotest/run-git-state-mirror-latency-autotest.sh",
     "test/autotest/run-git-diff-subdir-autotest.sh",
     "test/autotest/run-git-diff-submodules-autotest.sh",
     "test/autotest/run-git-history-multi-terminal-scope-autotest.sh",
@@ -122,7 +125,8 @@ SCRIPTS: List[str] = [
 
 WINDOWS_ONLY_SKIP = "test/autotest/run-auto-update-windows-e2e.sh"
 
-PER_SCRIPT_TIMEOUT_SEC = 300
+PER_SCRIPT_TIMEOUT_SEC = 180
+PER_SCRIPT_TIMEOUT_OVERRIDES_SEC = {}
 INTER_SCRIPT_SLEEP_SEC = 2
 
 IS_WINDOWS = platform.system() == "Windows"
@@ -324,8 +328,9 @@ def run_one(
     summary_fh,
     extra_args: List[str],
 ) -> "tuple[int, float]":
+    timeout_sec = PER_SCRIPT_TIMEOUT_OVERRIDES_SEC.get(script, PER_SCRIPT_TIMEOUT_SEC)
     cmd = [
-        node, "test/autotest/run-with-timeout.mjs", str(PER_SCRIPT_TIMEOUT_SEC),
+        node, "test/autotest/run-with-timeout.mjs", str(timeout_sec),
         bash, script, str(app_bin),
     ] + extra_args
 
@@ -572,7 +577,11 @@ def main() -> int:
     emit(f"App name: {app_name}")
     emit(f"App binary: {app_bin}")
     emit(f"Output dir: {out_dir}")
-    emit(f"Per-script timeout: {PER_SCRIPT_TIMEOUT_SEC}s, inter-script sleep: {INTER_SCRIPT_SLEEP_SEC}s")
+    emit(f"Per-script timeout: {PER_SCRIPT_TIMEOUT_SEC}s default, inter-script sleep: {INTER_SCRIPT_SLEEP_SEC}s")
+    if PER_SCRIPT_TIMEOUT_OVERRIDES_SEC:
+        emit("Per-script timeout overrides:")
+        for script, timeout_sec in sorted(PER_SCRIPT_TIMEOUT_OVERRIDES_SEC.items()):
+            emit(f"  {script}: {timeout_sec}s")
     emit(f"Bash: {bash}")
     emit(f"Node: {node}")
     emit("")

@@ -83,6 +83,14 @@ set ONWARD_TELEMETRY_RESET_CONSENT=1
 | `ONWARD_DISABLE_VIRTUAL_CURSOR` | `1` to disable (default: enabled) | Disables the Prompt textarea's click-anywhere virtual-cursor feature and falls back to the legacy line-by-line input model. Read once at startup by the preload and exposed to the renderer as `window.electronAPI.debug.virtualCursorDisabled`. The mousedown handler in `PromptNotebook.tsx` short-circuits when this is true. Emergency revert switch only — there is no settings-pane toggle. |
 | `ONWARD_AUTOTEST` (interaction) | (existing flag) | Autotest-only: when set, the FeedbackModal diagnostic-bundle IPC (`feedback:export-diagnostic-bundle`) honors an optional `forceOutputPath` payload, bypassing the native Save As dialog. Production callers always go through the dialog regardless of this flag. Used by `run-feedback-autotest.sh` (FB-DB-01) to drive the export deterministically. |
 
+## Feature Flags
+
+Feature flags use the `ONWARD_FEATURE_*` namespace. They control product surfaces rather than developer-only diagnostics, and may default to enabled while a feature is being validated before release hardening. They are still read once at startup.
+
+| Variable | Default | Disable value | Effect |
+|----------|---------|---------------|--------|
+| `ONWARD_FEATURE_GIT_DIFF_PERFORMANCE_DIAGNOSTICS` | enabled | `0` | Hard-gates the Git Diff Performance Diagnostics surface. The panel is still hidden by default and must be enabled in Settings → Diagnostics → Performance Diagnostics; this flag only removes the feature from the build when set to `0`. |
+
 ## Adding a New Debug Variable
 
 When implementing a new debug switch:

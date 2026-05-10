@@ -56,6 +56,11 @@ function isAllowlistedPath(relPath) {
   // Regression reports are engineering logs that may quote Chinese from
   // CLAUDE.md / AGENTS.md or user-facing failure snapshots.
   if (relPath.startsWith('test/report/')) return true
+  // Engineering / architecture docs may be authored bilingually; the
+  // single-language constraint that applies to product UI copy is
+  // intentionally relaxed here so design write-ups can use the natural
+  // language for the audience.
+  if (relPath.startsWith('docs/')) return true
   return false
 }
 

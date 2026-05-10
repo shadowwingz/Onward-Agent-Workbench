@@ -11,6 +11,23 @@ import cssWorker from 'monaco-editor/esm/vs/language/css/css.worker?worker'
 import htmlWorker from 'monaco-editor/esm/vs/language/html/html.worker?worker'
 import tsWorker from 'monaco-editor/esm/vs/language/typescript/ts.worker?worker'
 
+function isIgnorableMonacoMenuTeardownError(value: unknown): boolean {
+  const message = value instanceof Error
+    ? `${value.message}\n${value.stack ?? ''}`
+    : typeof value === 'string'
+      ? value
+      : String(value ?? '')
+  return message.includes('AbstractContextKeyService has been disposed') &&
+    message.includes('MenuInfo') &&
+    message.includes('DebounceEmitter')
+}
+
+window.addEventListener('error', (event) => {
+  if (!isIgnorableMonacoMenuTeardownError(event.error ?? event.message)) return
+  event.preventDefault()
+  event.stopImmediatePropagation()
+}, true)
+
 self.MonacoEnvironment = {
   getWorker(_: string, label: string) {
     if (label === 'json') {

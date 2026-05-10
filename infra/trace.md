@@ -210,9 +210,10 @@ append new names, never rename existing ones.
 | Constant | Name | Phase | Emitted at |
 |---|---|---|---|
 | `MAIN_GIT_DIFF_CACHE_HIT` | `main:git.diff.cache-hit` | `i` | `electron/main/git-utils.ts::getGitDiff` — request-level cache served without spawning git. Tagged `cwd`, `scope`, `ageMs`. |
-| `MAIN_GIT_DIFF_CACHE_INVALIDATE` | `main:git.diff.cache-invalidate` | `i` | Same file — cleared on watcher debounce, force=true entry, or LRU eviction. Tagged `cwd`, `reason: 'watcher' \| 'force' \| 'lru' \| 'manual'`, `entriesCleared`. |
-| `MAIN_GIT_DIFF_FS_WATCH_EVENT` | `main:git.diff.fs-watch-event` | `i` | `electron/main/git-diff-cache-invalidator.ts` — one event per 180 ms debounce window per watched cwd. Tagged `cwd`, `pendingMs`. |
+| `MAIN_GIT_DIFF_CACHE_INVALIDATE` | `main:git.diff.cache-invalidate` | `i` | Same file — cleared on watcher debounce, force=true entry, or project queue eviction. Tagged `cwd`, `reason: 'watcher' \| 'watcher-error' \| 'force' \| 'lru' \| 'manual' \| 'mirror'`, `entriesCleared`. |
+| `MAIN_GIT_DIFF_FS_WATCH_EVENT` | `main:git.diff.fs-watch-event` | `i` | `electron/main/git-diff-cache-invalidator.ts` — one event per 180 ms debounce window per watched cwd. Tagged `cwd`, `pendingMs`, `backend: 'parcel'`, `eventCount`. |
 | `MAIN_GIT_DIFF_SUBMODULE_FILTER` | `main:git.diff.submodule-filter` | `i` | `electron/main/git-utils.ts::filterMeaninglessSubmoduleEntries` — one event per submodule entry decision (kept iff `<c>=C` OR `changeType==='staged'`). Tagged `repoRoot`, `repoLabel`, `path`, `flags`, `changeType`, `kept`. |
+| `MAIN_IPC_GIT_GET_FILE_CONTENT` | `main:ipc.git.get-file-content` | `X` (duration) | `electron/main/ipc-handlers.ts` — wraps the Git Diff per-file body IPC request, including worker queue + Git read time. Tagged `cwd`, `repoRoot`, `filename`, `status`, `changeType`, `cacheState`, `cacheSource`, `cacheMissReason`, `result`, `durationMs`. |
 
 #### Git Repository Snapshot Service (lesson #13 phase 1)
 
@@ -232,6 +233,69 @@ The snapshot service emits these events from BOTH main and the
 git-ipc-worker — the worker's events forward through the existing
 `PerfTraceWorkerEvent` envelope and land in the main trace on the
 `git-ipc-worker` tid lane (per lesson #10).
+
+#### GitStateMirror (single-source-of-truth refactor)
+
+The mirror replaces the legacy 5-watcher / 11-cache layout with one Worker
+Thread that owns branch / status / file list / per-file diff body for every
+active cwd. The events below bracket the two latency-critical paths the
+GSM autotest suite (`run-git-state-mirror-latency-autotest.sh`) and the
+extended GDS suite assert on.
+
+**Path A — cwd switch** (functional gate + timing trend):
+`renderer:terminal.osc-cwd-detected` → `main:git-state-mirror.cwd-switched` →
+`worker:git-state-mirror.recompute-status-done` →
+`main:git-state-mirror.fanout` → `renderer:terminal-title.{branch,color}-rendered`.
+
+**Path B — fs mutation** (functional gate + timing trend):
+`worker:git-state-mirror.watcher-fire` (or `.watcher-filtered` when the .git
+whitelist drops it) → `recompute-status-done` → `fanout` →
+`renderer:git-diff.body-rendered` and/or the terminal-title render markers.
+
+| Constant | Name | Phase | Emitted at |
+|---|---|---|---|
+| `RENDERER_TERMINAL_OSC_CWD_DETECTED` | `renderer:terminal.osc-cwd-detected` | `i` | `src/components/Terminal/oscCwdAddon.ts` — xterm.js `parser.registerOscHandler(7\|633\|1337\|9, ...)` callback fires after parsing a cwd-bearing OSC. Tagged `terminalId`, `cwd`, `dialect` (`osc7` / `osc633` / `osc1337` / `osc9`). |
+| `MAIN_GIT_STATE_MIRROR_CWD_SWITCHED` | `main:git-state-mirror.cwd-switched` | `i` | `electron/main/git-state-mirror-router.ts` — main forwards the cwd push from renderer to the worker. Tagged `terminalId`, `prevCwd`, `nextCwd`. |
+| `WORKER_GIT_STATE_MIRROR_WATCHER_FIRE` | `worker:git-state-mirror.watcher-fire` | `i` | `electron/main/git-state-mirror-worker-entry.ts` — `@parcel/watcher` event passed the .git whitelist filter. Tagged `cwd`, `path`, `kind` (`update` / `create` / `delete`). |
+| `WORKER_GIT_STATE_MIRROR_WATCHER_FILTERED` | `worker:git-state-mirror.watcher-filtered` | `i` | Same file — event dropped by the .git whitelist. Tagged `cwd`, `path`, `reason` (`gitObjects` / `lockfile` / `tmpfile`). Used by GDS-39 to assert the feedback-loop guard. |
+| `WORKER_GIT_STATE_MIRROR_RECOMPUTE_DONE` | `worker:git-state-mirror.recompute-status-done` | `X` (duration) | `git-state-mirror-worker-entry.ts` — wraps a single `git status --porcelain=v2 -z` run plus delta computation. Payload: `cwd`, `reason` (`watcher` / `osc-switch` / `focus-resync`), `fileCount`, `branch`, `status`, `durationMs`. |
+| `MAIN_GIT_STATE_MIRROR_FANOUT` | `main:git-state-mirror.fanout` | `i` | `git-state-mirror-router.ts` — fanout to N subscribers. Tagged `cwd`, `subscriberCount`, `deltaKeys` (e.g. `['fileList','branch']`). |
+| `RENDERER_TERMINAL_TITLE_BRANCH_RENDERED` | `renderer:terminal-title.branch-rendered` | `i` | `src/components/TerminalGrid/TerminalGrid.tsx` — DOM commit landed with new branch text. Tagged `terminalId`, `cwd`, `branch`. |
+| `RENDERER_TERMINAL_TITLE_COLOR_RENDERED` | `renderer:terminal-title.color-rendered` | `i` | Same file — DOM `terminal-grid-branch--{status}` className committed. Tagged `terminalId`, `status` (`clean` / `modified` / `added` / `unknown`). |
+| `RENDERER_GIT_DIFF_MANUAL_REFRESH` | `renderer:git-diff.manual-refresh` | `X` (duration) | `src/components/GitDiffViewer/GitDiffViewer.tsx` — user invoked Refresh Changes, clearing renderer diff caches and re-reading list/body with `force: true`. Tagged `cwd`, `terminalId`, `result`, `durationMs`. |
+| `RENDERER_GIT_DIFF_HUNK_NAVIGATE` | `renderer:git-diff.hunk-navigate` | `i` | Same file — user jumped to previous/next diff hunk. Tagged `cwd`, `terminalId`, `direction`, `index`, `changeCount`, `line`. |
+| `RENDERER_GIT_DIFF_HUNK_ACTION` | `renderer:git-diff.hunk-action` | `X` (duration) | Same file — user staged, reverted, or unstaged an individual diff hunk from the inline hunk controls. Tagged `cwd`, `terminalId`, `filename`, `changeType`, `action`, `hunkIndex`, `result`, `durationMs`. |
+| `RENDERER_GIT_DIFF_HUNK_WIDGET_INSTALL` | `renderer:git-diff.hunk-widget-install` | `X` (duration) | Same file — renderer installed or retried the always-visible per-hunk action widgets after Monaco model/diff updates. Tagged `cwd`, `terminalId`, `filename`, `changeType`, `result`, `reason`, `attempt`, `lineChangeCount`, `widgetCount`, `durationMs`. |
+| `RENDERER_GIT_DIFF_BODY_PREFETCH` | `renderer:git-diff.body-prefetch` | `i` | Same file — Git Diff scheduled / completed a lightweight 4-file renderer-side prefetch so the first selection lands on a warm `fileContentsRef`. Backed by the main-process per-project content cache, so each call is nearly free. Tagged `cwd`, `terminalId`, `phase`, `candidateCount`, `completed`, `durationMs`. |
+| `RENDERER_GIT_DIFF_FILE_LOAD` | `renderer:git-diff.file-load` | `X` (duration) | `src/components/GitDiffViewer/GitDiffViewer.tsx` — selected file changed and the renderer awaited the per-file body IPC before feeding Monaco. Tagged `cwd`, `terminalId`, `fileKey`, `filename`, `changeType`, `cacheState`, `cacheSource`, `cacheMissReason`, `result`, `durationMs`. |
+| `RENDERER_GIT_DIFF_CACHE_INVALIDATION` | `renderer:git-diff.cache-invalidation` | `i` | Same file — renderer received a backend Git Diff cache invalidation and either marked visible file bodies stale for background refresh or cleared closed-view caches. Tagged `cwd`, `terminalId`, `invalidatedCwd`, `reason`, `isOpen`, `retainedEntries`, `staleEntries`. |
+| `MAIN_GIT_DIFF_CONTENT_CACHE_HIT` | `main:git.diff.content-cache.hit` | `i` | `electron/main/git-diff-content-cache-wiring.ts` — the per-project file content cache served `getFileContent` from memory, no worker round-trip. Tagged `project`, `filename`, `changeType`, `source`. |
+| `MAIN_GIT_DIFF_CONTENT_CACHE_MISS` | `main:git.diff.content-cache.miss` | `i` | Same file — cache lookup missed; the worker IPC was invoked and the result stored back into the cache. Tagged `project`, `filename`, `changeType`, `reason`, `force`. |
+| `MAIN_GIT_DIFF_CONTENT_CACHE_INVALIDATE_PROJECT` | `main:git.diff.content-cache.invalidate-project` | `i` | Same file — `gitDiffCacheInvalidator` fired (Parcel watcher / mirror delta / explicit refresh / mutation), wiping the project bucket. Tagged `project`, `reason`, `droppedEntries`. |
+| `MAIN_GIT_DIFF_CONTENT_CACHE_INVALIDATE_LRU` | `main:git.diff.content-cache.invalidate-lru` | `i` | Same file — the recent-project queue evicted a project, so the corresponding content cache bucket was dropped too. Tagged `project`, `reason: 'project-queue-evicted'`. |
+| `MAIN_GIT_DIFF_PRECOMPUTE_SCHEDULE` | `main:git.diff.precompute.schedule` | `i` | Same file — precompute scheduler began a burst for a project (after debounce). Tagged `project`, `candidateCount`. |
+| `MAIN_GIT_DIFF_PRECOMPUTE_SKIP_TOO_LARGE` | `main:git.diff.precompute.skip-too-large` | `i` | Same file — a candidate was skipped because its content exceeded the single-file cap. Tagged `project`, `filename`, `bytes`, `reason`. |
+| `RENDERER_GIT_DIFF_BODY_RENDERED` | `renderer:git-diff.body-rendered` | `i` | `src/components/GitDiffViewer/GitDiffViewer.tsx` — Monaco received the new `originalContent` / `modifiedContent` for the selected file. Tagged `cwd`, `fileKey`, `originalLen`, `modifiedLen`. |
+| `RENDERER_GIT_DIFF_FILE_LIST_MODE_CHANGE` | `renderer:git-diff.file-list-mode-change` | `i` | `src/components/GitDiffViewer/GitDiffViewer.tsx` — user switched the changed-file sidebar between Tree and Flat modes. Tagged `cwd`, `terminalId`, `mode`. |
+| `RENDERER_GIT_DIFF_JUMP_TO_EDITOR` | `renderer:git-diff.jump-to-editor` | `i` | Same file — user opened the selected diff file in Project Editor. Tagged `cwd`, `terminalId`, `filename`, `repoRoot`. |
+| `RENDERER_GIT_DIFF_SPLIT_MODE_TOGGLE` | `renderer:git-diff.split-mode-toggle` | `i` | Same file — user switched the diff display between Auto, Side-by-side, and Inline using the toggle in the working-directory bar. Tagged `cwd`, `terminalId`, `mode`. |
+| `RENDERER_PROJECT_EDITOR_JUMP_TO_DIFF` | `renderer:project-editor.jump-to-diff` | `i` | `src/components/ProjectEditor/ProjectEditor.tsx` — Project Editor routed the current file back to Git Diff. Tagged `terminalId`, `filename`, `repoRoot`, `changeType`. |
+| `RENDERER_GIT_DIFF_CLICK_PHASE_IPC` | `renderer:git-diff.click-phase.ipc` | `X` | `src/components/GitDiffViewer/clickLatencyTracker.ts` — span covering `getFileContent` IPC round-trip (`ipcEnd - ipcStart`). Payload: `durationMs`, `fileKey`, `filename`, `cacheState`, `totalMs`. Auto-routed to `ph='X'` by `perf-trace-logger::resolvePhase` because of `durationMs`. |
+| `RENDERER_GIT_DIFF_CLICK_PHASE_STATE_SET` | `renderer:git-diff.click-phase.state-set` | `X` | Same emitter — span between IPC end and React `setState` actually applied (`stateSet - ipcEnd`). Payload identical to the IPC phase. |
+| `RENDERER_GIT_DIFF_CLICK_PHASE_MODEL_BIND` | `renderer:git-diff.click-phase.model-bind` | `X` | Same emitter — span between React state availability and the DiffEditor model binding (`modelBound - stateSet`). |
+| `RENDERER_GIT_DIFF_CLICK_PHASE_MOUNT` | `renderer:git-diff.click-phase.mount` | `X` | Same emitter — span between model binding and Monaco DiffEditor `editorReady` (`editorReady - modelBound`) when the editor cold-mounts. |
+| `RENDERER_GIT_DIFF_CLICK_PHASE_DIFF_COMPUTE` | `renderer:git-diff.click-phase.diff-compute` | `X` | Same emitter — span between editor/model readiness and Monaco's `onDidUpdateDiff` (`diffComputed - ready`). |
+| `RENDERER_GIT_DIFF_CLICK_PHASE_DOM_COMMIT` | `renderer:git-diff.click-phase.dom-commit` | `X` | Same emitter — span between `onDidUpdateDiff` and the first observed Monaco DOM mutation (`domCommitted - diffComputed`). |
+| `RENDERER_GIT_DIFF_CLICK_PHASE_PAINT` | `renderer:git-diff.click-phase.paint` | `X` | Same emitter — span between DOM commit and the rAF callback that proxies for first paint (`paintReady - domCommitted`). |
+| `RENDERER_GIT_DIFF_CLICK_PHASE_TOKENIZE_SETTLE` | `renderer:git-diff.click-phase.tokenize-settle` | `X` | Same emitter — span between first paint and Monaco token/decorations/DOM quiet (`tokenizeSettle - paintReady`). This is the user-visible settled total used by the debug panel. |
+| `RENDERER_GIT_DIFF_CLICK_PHASE_COLD_MOUNT` | `renderer:git-diff.click-phase.cold-mount` | `X` | `src/components/GitDiffViewer/GitDiffViewer.tsx` — first DiffEditor mount after opening Git Diff (`handleEditorDidMount - git-diff open`). |
+| `RENDERER_GIT_DIFF_CLICK_PHASE_REVEAL_TIMEOUT` | `renderer:git-diff.click-phase.reveal-timeout` | `X` | Same file — abnormal fallback when neither model binding nor `onDidUpdateDiff` releases the reveal cycle before the cap. |
+| `RENDERER_GIT_DIFF_CLICK_TOTAL` | `renderer:git-diff.click-phase.total` | `X` | Same emitter — total click→settled span (`tokenizeSettle - clickAt`). Use this for percentile / regression queries; the per-phase events are for attribution. |
+
+These events are registered in `src/utils/perf-trace-names.ts` (commit 2 of
+the GitStateMirror PR). The autotest gates on the final visible branch /
+status state within a generous timeout and records elapsed times in assertion
+details plus trace events for trend analysis.
 
 #### Renderer lifecycle
 
@@ -255,6 +319,7 @@ git-ipc-worker — the worker's events forward through the existing
 | `MAIN_IPC_PROJECT_READ_FILE_CHUNK` | `main:ipc.project.read-file-chunk` | `X` | `ipc-handlers.ts` readFileChunk handler |
 | `MAIN_IPC_PROJECT_SAVE_FILE` | `main:ipc.project.save-file` | `X` | saveFile handler |
 | `MAIN_IPC_GIT_GET_DIFF` | `main:ipc.git.get-diff` | `X` | getDiff handler |
+| `MAIN_IPC_GIT_GET_FILE_CONTENT` | `main:ipc.git.get-file-content` | `X` | Git Diff per-file body handler |
 | `MAIN_IPC_GIT_GET_HISTORY` | `main:ipc.git.get-history` | `X` | getHistory handler |
 | `MAIN_IPC_TERMINAL_SPAWN` | `main:ipc.terminal.spawn` | `X` | terminal create handler |
 
