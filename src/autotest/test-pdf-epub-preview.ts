@@ -365,6 +365,124 @@ export async function testPdfEpubPreview(ctx: AutotestContext): Promise<TestResu
     )
   }
 
+  // (d) ESC + shortcut reopen — PdfReader must survive the close-retain →
+  // reopen cycle WITHOUT remounting the iframe. If the iframe is recreated
+  // every reopen, the user pays a full pdf.js viewer.js init (network +
+  // worker boot + page render) and sees a blank flash. The retain-mode close
+  // path keeps ProjectEditor mounted (panel mode `keepMountedInPanel=true`),
+  // and `isPdf` / `pdfPreviewUrl` survive the close branch (the early return
+  // at ProjectEditor.tsx:4213 skips the state-clear block), so the iframe
+  // element should be the same DOM node + contentWindow before and after.
+  // Per CLAUDE.md timing-sensitive autotest rule: N=5 trials, all-must-pass.
+  {
+    if (!getApi()?.isOpen?.()) {
+      window.dispatchEvent(new CustomEvent('project-editor:open', { detail: { terminalId } }))
+      await waitFor('pdf-reopen-baseline-editor', () => Boolean(getApi()?.isOpen?.()), 8000)
+    }
+    if (!getApi()?.isPdfReaderVisible?.()) {
+      await getApi()?.openFileByPathAsUser?.(pdfPath)
+      await waitFor('pdf-reopen-baseline-pdf', () => getApi()?.isPdfReaderVisible?.() === true, 8000)
+    }
+    await waitFor(
+      'pdf-reopen-baseline-iframe-mounted',
+      () => Boolean(document.querySelector('.project-editor-pdf-reader-iframe')),
+      5000,
+      100
+    )
+
+    const TRIALS = 5
+    type PdfReopenObservation = {
+      trial: number
+      closed: boolean
+      reopened: boolean
+      pdfVisibleAfterReopen: boolean
+      iframeIdentitySurvived: boolean
+      contentWindowSurvived: boolean
+    }
+    const observations: PdfReopenObservation[] = []
+    const canShortcut = Boolean(window.__onwardAppDebug?.triggerShortcutAction)
+    for (let i = 1; i <= TRIALS; i += 1) {
+      if (cancelled()) break
+      const initialIframe = document.querySelector('.project-editor-pdf-reader-iframe') as HTMLIFrameElement | null
+      const initialContentWindow = initialIframe?.contentWindow ?? null
+      if (!initialIframe || !initialContentWindow || !canShortcut) {
+        observations.push({
+          trial: i,
+          closed: false,
+          reopened: false,
+          pdfVisibleAfterReopen: false,
+          iframeIdentitySurvived: false,
+          contentWindowSurvived: false
+        })
+        break
+      }
+
+      // Close via host Escape — the user-reported flow. The iframe-side ESC
+      // forwarding is exercised separately by `pdf-reader-escape-forwarded`;
+      // here we want the host's own escape path so the close mirrors what a
+      // user pressing ESC outside the iframe focus does.
+      document.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 'Escape',
+        code: 'Escape',
+        bubbles: true,
+        cancelable: true
+      }))
+      const closed = await waitFor(
+        `pdf-reopen-trial-${i}-closed`,
+        () => !getApi()?.isOpen?.(),
+        4000,
+        80
+      )
+
+      const triggered = window.__onwardAppDebug?.triggerShortcutAction?.({ type: 'terminalProjectEditor' }) === true
+      const reopened = triggered
+        ? await waitFor(
+            `pdf-reopen-trial-${i}-reopened`,
+            () => Boolean(getApi()?.isOpen?.()),
+            8000,
+            80
+          )
+        : false
+      const pdfVisibleAfterReopen = reopened
+        ? await waitFor(
+            `pdf-reopen-trial-${i}-visible`,
+            () => getApi()?.isPdfReaderVisible?.() === true,
+            8000,
+            80
+          )
+        : false
+
+      const finalIframe = document.querySelector('.project-editor-pdf-reader-iframe') as HTMLIFrameElement | null
+      const finalContentWindow = finalIframe?.contentWindow ?? null
+      const iframeIdentitySurvived = Boolean(finalIframe) && finalIframe === initialIframe
+      const contentWindowSurvived = Boolean(finalContentWindow) && finalContentWindow === initialContentWindow
+
+      observations.push({
+        trial: i,
+        closed,
+        reopened,
+        pdfVisibleAfterReopen,
+        iframeIdentitySurvived,
+        contentWindowSurvived
+      })
+      if (!closed || !reopened || !pdfVisibleAfterReopen) break
+    }
+    const allKeptIframe =
+      observations.length === TRIALS &&
+      observations.every((obs) =>
+        obs.closed &&
+        obs.reopened &&
+        obs.pdfVisibleAfterReopen &&
+        obs.iframeIdentitySurvived &&
+        obs.contentWindowSurvived
+      )
+    record('pdf-reader-shortcut-reopen-keeps-iframe-mounted', allKeptIframe, {
+      expectedTrials: TRIALS,
+      observed: observations.length,
+      perTrial: observations
+    })
+  }
+
   // ---------- EPUB preview ----------
 
   log('epub:open', { epubPath })
@@ -635,6 +753,135 @@ export async function testPdfEpubPreview(ctx: AutotestContext): Promise<TestResu
   record('epub-font-size-persisted', persistedFontOk, {
     fontSizeLabel: getApi()?.getEpubReaderState?.()?.fontSizeLabel ?? null
   })
+
+  // ESC + shortcut reopen — EpubReader must survive the close-retain → reopen
+  // cycle WITHOUT remounting. epub.js boots a heavy nested iframe that takes
+  // multiple seconds to render the first chapter; remounting on every reopen
+  // would burn that cost AND visually flash the user back to chapter 1
+  // before jumping to the saved location. The retain-mode close keeps
+  // ProjectEditor mounted (panel mode), and `isEpub` / `epubPreviewData`
+  // survive the close branch's early-return guard, so the reader element
+  // should be the same DOM node before and after.
+  // Per CLAUDE.md timing-sensitive autotest rule: N=5 trials, all-must-pass.
+  {
+    if (!getApi()?.isOpen?.()) {
+      window.dispatchEvent(new CustomEvent('project-editor:open', { detail: { terminalId } }))
+      await waitFor('epub-reopen-baseline-editor', () => Boolean(getApi()?.isOpen?.()), 8000)
+    }
+    if (!getApi()?.isEpubReaderVisible?.()) {
+      await getApi()?.openFileByPathAsUser?.(epubPath)
+      await waitFor('epub-reopen-baseline-epub', () => getApi()?.isEpubReaderVisible?.() === true, 10000)
+    }
+    await waitFor(
+      'epub-reopen-baseline-reader-mounted',
+      () => Boolean(document.querySelector('.project-editor-epub-reader')),
+      5000,
+      100
+    )
+
+    const TRIALS = 5
+    type EpubReopenObservation = {
+      trial: number
+      closed: boolean
+      reopened: boolean
+      epubVisibleAfterReopen: boolean
+      readerIdentitySurvived: boolean
+      contentPaneIdentitySurvived: boolean
+      currentLocationHrefBefore: string | null
+      currentLocationHrefAfter: string | null
+      locationStable: boolean
+    }
+    const observations: EpubReopenObservation[] = []
+    const canShortcut = Boolean(window.__onwardAppDebug?.triggerShortcutAction)
+    for (let i = 1; i <= TRIALS; i += 1) {
+      if (cancelled()) break
+      const initialReader = document.querySelector('.project-editor-epub-reader') as HTMLElement | null
+      const initialContentPane = initialReader?.querySelector('.project-editor-epub-content') as HTMLElement | null
+      const beforeHref = getApi()?.getEpubReaderState?.()?.currentLocationHref ?? null
+      if (!initialReader || !initialContentPane || !canShortcut) {
+        observations.push({
+          trial: i,
+          closed: false,
+          reopened: false,
+          epubVisibleAfterReopen: false,
+          readerIdentitySurvived: false,
+          contentPaneIdentitySurvived: false,
+          currentLocationHrefBefore: beforeHref,
+          currentLocationHrefAfter: null,
+          locationStable: false
+        })
+        break
+      }
+
+      document.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 'Escape',
+        code: 'Escape',
+        bubbles: true,
+        cancelable: true
+      }))
+      const closed = await waitFor(
+        `epub-reopen-trial-${i}-closed`,
+        () => !getApi()?.isOpen?.(),
+        4000,
+        80
+      )
+
+      const triggered = window.__onwardAppDebug?.triggerShortcutAction?.({ type: 'terminalProjectEditor' }) === true
+      const reopened = triggered
+        ? await waitFor(
+            `epub-reopen-trial-${i}-reopened`,
+            () => Boolean(getApi()?.isOpen?.()),
+            8000,
+            80
+          )
+        : false
+      const epubVisibleAfterReopen = reopened
+        ? await waitFor(
+            `epub-reopen-trial-${i}-visible`,
+            () => getApi()?.isEpubReaderVisible?.() === true,
+            8000,
+            80
+          )
+        : false
+
+      const finalReader = document.querySelector('.project-editor-epub-reader') as HTMLElement | null
+      const finalContentPane = finalReader?.querySelector('.project-editor-epub-content') as HTMLElement | null
+      const readerIdentitySurvived = Boolean(finalReader) && finalReader === initialReader
+      const contentPaneIdentitySurvived = Boolean(finalContentPane) && finalContentPane === initialContentPane
+      const afterHref = getApi()?.getEpubReaderState?.()?.currentLocationHref ?? null
+      // Either both were null or they match — guard against epub.js fluttering
+      // through `null` while it re-binds the iframe.
+      const locationStable = beforeHref === afterHref
+
+      observations.push({
+        trial: i,
+        closed,
+        reopened,
+        epubVisibleAfterReopen,
+        readerIdentitySurvived,
+        contentPaneIdentitySurvived,
+        currentLocationHrefBefore: beforeHref,
+        currentLocationHrefAfter: afterHref,
+        locationStable
+      })
+      if (!closed || !reopened || !epubVisibleAfterReopen) break
+    }
+    const allKeptReader =
+      observations.length === TRIALS &&
+      observations.every((obs) =>
+        obs.closed &&
+        obs.reopened &&
+        obs.epubVisibleAfterReopen &&
+        obs.readerIdentitySurvived &&
+        obs.contentPaneIdentitySurvived &&
+        obs.locationStable
+      )
+    record('epub-reader-shortcut-reopen-keeps-reader-mounted', allKeptReader, {
+      expectedTrials: TRIALS,
+      observed: observations.length,
+      perTrial: observations
+    })
+  }
 
   // ---------- Outlined PDF fixture: unified OutlinePanel integration ----------
   // Copy the outlined PDF fixture next to the other fixtures.

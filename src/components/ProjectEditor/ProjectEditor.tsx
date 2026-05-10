@@ -5223,6 +5223,18 @@ export function ProjectEditor({
       isEditorVisible: isMarkdownEditorVisibleRef.current,
       outlineTarget: outlineTargetRef.current
     })
+    // Mirror the just-captured cache into the in-memory render ref so a later
+    // ESC-then-shortcut reopen recognises the retained markdownRenderedHtml as
+    // a fresh cache hit and skips the owner-switch DOM-clear / applyCacheHit
+    // path that would otherwise drive `previewRestorePhase` through
+    // 'waiting-html' / 'restoring-layout' and momentarily fade
+    // `.project-editor-preview-content` to opacity 0 (the user-visible
+    // "screen refreshes again" effect).
+    markdownSessionCacheRenderRef.current = {
+      key,
+      filePath: normalizePath(filePath),
+      content: fileContentRef.current
+    }
     if (DEBUG_PROJECT_EDITOR) {
       debugLog('markdown-cache:capture', {
         reason,

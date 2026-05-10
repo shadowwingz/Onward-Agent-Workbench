@@ -155,13 +155,13 @@ point at files under `test/unittest/`.
 | Read mode keeps preview open on edit toggle | `run-project-editor-markdown-navigation` (PMN-24) |
 | Outline target falls back between editor / preview when one is hidden | `run-project-editor-markdown-navigation` (PMN-27..34) |
 | Code-wrap preference (inline + block, persists across reopen) | `run-project-editor-markdown-navigation` (PMN-35..45) |
-| Markdown session restore (last file + section + mode, ESC close + shortcut reopen shell/body sync) | `run-project-editor-markdown-session-restore` (PMSR-*) |
+| Markdown session restore (last file + section + mode, ESC close + shortcut reopen shell/body sync, reopen reuses cached HTML without worker re-render flash, panel overlay toggles instantly with no fade afterimage) | `run-project-editor-markdown-session-restore` (PMSR-*) |
 | Markdown preview reveal latency (cache-miss + cache-hit fast path, 3 fixture sizes) | `run-markdown-preview-latency` (MPL-*) + unit `preview-restore-settle` (PRS-U-*) |
 | Markdown LaTeX (KaTeX) rendering in preview | `run-markdown-latex-preview` (MLP-*) |
 | Mermaid pan / zoom / fullscreen in preview | `run-mermaid-panzoom` (MPZ-01..02) |
 | Preview position restore across file switch (incl. Mermaid layout) | `run-preview-position-restore` (PPR-01..12) |
 | In-preview search (next / prev / wrap, centering) | `run-preview-search` (PS-01..12) |
-| PDF reader / EPUB reader inside editor (incl. iframe → host keyboard forwarding) | `run-pdf-epub-preview` (`pdf-reader-*`, `epub-*`) |
+| PDF reader / EPUB reader inside editor (incl. iframe → host keyboard forwarding, ESC + shortcut reopen keeps iframe / reader mounted across N=5 close-retain cycles) | `run-pdf-epub-preview` (`pdf-reader-*`, `epub-*`) |
 | PDF / EPUB full-mode read flow | `run-pdf-epub-full` (no fixed prefix) |
 
 ### 2.7 Prompt system
