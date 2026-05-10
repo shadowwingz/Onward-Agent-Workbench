@@ -33,7 +33,6 @@ export interface ClickAggregateStats {
   cancelled: number
   hitCount: number
   missCount: number
-  unknownCount: number
   hitRate: number | null // 0..1, null when completed === 0
   totalMs: { min: number; p50: number; p95: number; max: number; mean: number } | null
   perPhaseMean: PhaseMs
@@ -73,7 +72,6 @@ export function aggregateClickHistory(
   let cancelled = 0
   let hitCount = 0
   let missCount = 0
-  let unknownCount = 0
   const totals: number[] = []
   const phaseSums: PhaseMs = {
     ipcMs: 0, stateSetMs: 0, modelBindMs: 0, mountMs: 0, diffComputeMs: 0, domCommitMs: 0, paintMs: 0, tokenizeSettleMs: 0
@@ -88,8 +86,7 @@ export function aggregateClickHistory(
       continue
     }
     if (m.cacheState === 'hit') hitCount += 1
-    else if (m.cacheState === 'miss') missCount += 1
-    else unknownCount += 1
+    else missCount += 1
     totals.push(m.totalMs)
 
     const phases = computePhaseMs(m)
@@ -136,7 +133,6 @@ export function aggregateClickHistory(
     cancelled,
     hitCount,
     missCount,
-    unknownCount,
     hitRate,
     totalMs,
     perPhaseMean: phaseMean

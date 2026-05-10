@@ -50,10 +50,13 @@ function file(filename: string, additions: number, deletions = 0): DiffFile {
 }
 
 async function nextTick() {
-  // Yield once to let microtasks settle (Promise.all chains in the scheduler).
+  // Yield enough times for the bounded-concurrency loop AND the runBurst
+  // async finally to drain. setTimeout(0) flushes the macro-task queue so
+  // even multi-stage await chains complete in time for assertions.
   await Promise.resolve()
   await Promise.resolve()
   await Promise.resolve()
+  await new Promise<void>((resolve) => setTimeout(resolve, 0))
 }
 
 function makeScheduler(opts: Partial<PrecomputeSchedulerOptions> = {}) {
@@ -237,4 +240,156 @@ test('inspectStats reports totals across bursts', async () => {
   const stats = scheduler.inspectStats()
   assert.equal(stats.totalBursts, 1)
   assert.equal(stats.totalCompleted, 2)
+})
+
+test('perProject meta records pendingSince when invalidated', () => {
+  const fakeTimer = new FakeTimer()
+  const scheduler = new GitDiffPrecomputeScheduler({
+    debounceMs: 100,
+    timer: fakeTimer,
+    fetchFile: async () => { /* noop */ },
+    loadWorkingSet: async () => []
+  })
+  scheduler.onProjectInvalidated('/p')
+  // Burst hasn't run yet — pendingSince should be set, inFlightSince null,
+  // lastBurst null.
+  const stats = scheduler.inspectStats()
+  const meta = stats.perProject['/p']
+  assert.ok(meta, 'perProject entry must exist for /p')
+  assert.ok(meta.pendingSince !== null, 'pendingSince must be set')
+  assert.equal(meta.inFlightSince, null)
+  assert.equal(meta.lastBurst, null)
+})
+
+test('perProject meta records lastBurst summary after a burst completes', async () => {
+  const fakeTimer = new FakeTimer()
+  const scheduler = new GitDiffPrecomputeScheduler({
+    debounceMs: 0,
+    concurrency: 2,
+    maxCandidatesPerBurst: 10,
+    timer: fakeTimer,
+    isEligible: (f) => !f.filename.endsWith('.png'),
+    fetchFile: async () => { /* noop */ },
+    loadWorkingSet: async () => [
+      file('a.ts', 9),
+      file('b.ts', 8),
+      file('c.png', 7) // ineligible
+    ]
+  })
+  scheduler.onProjectInvalidated('/p')
+  fakeTimer.flushAll()
+  await nextTick()
+
+  const stats = scheduler.inspectStats()
+  const meta = stats.perProject['/p']
+  assert.ok(meta?.lastBurst, 'lastBurst must be recorded after the burst')
+  assert.equal(meta.lastBurst.workingSetSize, 3)
+  assert.equal(meta.lastBurst.eligibleCount, 2, '.png filtered out by isEligible')
+  assert.equal(meta.lastBurst.candidateCount, 2)
+  assert.equal(meta.lastBurst.completed, 2)
+  assert.equal(meta.lastBurst.skipped, 0)
+  // Pending / in-flight cleared once the burst finishes.
+  assert.equal(meta.pendingSince, null)
+  assert.equal(meta.inFlightSince, null)
+})
+
+test('perProject lastBurst.skipped counts fetchFile failures, not isEligible drops', async () => {
+  const fakeTimer = new FakeTimer()
+  const scheduler = new GitDiffPrecomputeScheduler({
+    debounceMs: 0,
+    concurrency: 1,
+    timer: fakeTimer,
+    fetchFile: async (_p, f) => {
+      if (f.filename === 'broken.ts') throw new Error('worker error')
+    },
+    loadWorkingSet: async () => [file('a.ts', 5), file('broken.ts', 4)]
+  })
+  scheduler.onProjectInvalidated('/p')
+  fakeTimer.flushAll()
+  await nextTick()
+  const meta = scheduler.inspectStats().perProject['/p']
+  assert.ok(meta?.lastBurst)
+  assert.equal(meta.lastBurst.completed, 1)
+  assert.equal(meta.lastBurst.skipped, 1, 'fetchFile rejection counts as a skipped fetch')
+})
+
+test('perProject meta caps the per-burst slice at maxCandidatesPerBurst', async () => {
+  const fakeTimer = new FakeTimer()
+  const scheduler = new GitDiffPrecomputeScheduler({
+    debounceMs: 0,
+    concurrency: 1,
+    maxCandidatesPerBurst: 2,
+    timer: fakeTimer,
+    fetchFile: async () => { /* noop */ },
+    loadWorkingSet: async () => [
+      file('a.ts', 9),
+      file('b.ts', 8),
+      file('c.ts', 7),
+      file('d.ts', 6)
+    ]
+  })
+  scheduler.onProjectInvalidated('/p')
+  fakeTimer.flushAll()
+  await nextTick()
+  const meta = scheduler.inspectStats().perProject['/p']
+  assert.ok(meta?.lastBurst)
+  assert.equal(meta.lastBurst.workingSetSize, 4)
+  assert.equal(meta.lastBurst.eligibleCount, 4, 'all eligible (no isEligible drops)')
+  assert.equal(meta.lastBurst.candidateCount, 2, 'sliced to maxCandidatesPerBurst')
+  assert.equal(meta.lastBurst.completed, 2)
+})
+
+test('perProject pendingSince clears when burst starts; inFlightSince set during burst', async () => {
+  // Use a delayed loadWorkingSet so we can observe the in-flight phase.
+  const fakeTimer = new FakeTimer()
+  let resolveWorkingSet: (() => void) | null = null
+  const scheduler = new GitDiffPrecomputeScheduler({
+    debounceMs: 0,
+    concurrency: 1,
+    timer: fakeTimer,
+    fetchFile: async () => { /* noop */ },
+    loadWorkingSet: async () => {
+      await new Promise<void>((resolve) => { resolveWorkingSet = resolve })
+      return [file('a.ts', 1)]
+    }
+  })
+  scheduler.onProjectInvalidated('/p')
+  fakeTimer.flushAll()
+  // runBurst is now awaiting loadWorkingSet — measurement is in-flight.
+  await nextTick()
+  let meta = scheduler.inspectStats().perProject['/p']
+  assert.ok(meta?.inFlightSince !== null, 'inFlightSince must be set while burst runs')
+  assert.equal(meta.pendingSince, null, 'pendingSince cleared when burst starts')
+  // Let the burst finish. runBurst has multiple async boundaries after
+  // loadWorkingSet resolves (filter / sort / per-candidate fetch loop /
+  // finally block), so give the microtask queue plenty of room to flush.
+  resolveWorkingSet?.()
+  await new Promise<void>((resolve) => setTimeout(resolve, 0))
+  meta = scheduler.inspectStats().perProject['/p']
+  assert.equal(meta.inFlightSince, null, 'inFlightSince cleared once burst completes')
+  assert.ok(meta.lastBurst, 'lastBurst recorded')
+})
+
+test('cancelProject clears pending / in-flight timestamps but preserves lastBurst', async () => {
+  const fakeTimer = new FakeTimer()
+  const scheduler = new GitDiffPrecomputeScheduler({
+    debounceMs: 0,
+    concurrency: 1,
+    timer: fakeTimer,
+    fetchFile: async () => { /* noop */ },
+    loadWorkingSet: async () => [file('a.ts', 1)]
+  })
+  scheduler.onProjectInvalidated('/p')
+  fakeTimer.flushAll()
+  await nextTick()
+  const before = scheduler.inspectStats().perProject['/p']
+  assert.ok(before?.lastBurst)
+  // Schedule another invalidation, then cancel before it runs.
+  scheduler.onProjectInvalidated('/p')
+  scheduler.cancelProject('/p')
+  const after = scheduler.inspectStats().perProject['/p']
+  // lastBurst from the earlier burst stays; pendingSince / inFlightSince cleared.
+  assert.deepEqual(after.lastBurst, before.lastBurst, 'lastBurst preserved across cancel')
+  assert.equal(after.pendingSince, null)
+  assert.equal(after.inFlightSince, null)
 })

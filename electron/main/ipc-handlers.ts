@@ -598,8 +598,8 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   ipcMain.handle(IPC.DEBUG_GET_PERF_TRACE_INFO, () => {
     return perfTraceLogger.getInfo()
   })
-  ipcMain.handle(IPC.DEBUG_GIT_DIFF_GET_DEBUG_STATS, () => {
-    return inspectContentCacheStats()
+  ipcMain.handle(IPC.DEBUG_GIT_DIFF_GET_DEBUG_STATS, async () => {
+    return await inspectContentCacheStats()
   })
   ipcMain.handle(IPC.DEBUG_RESET_PERF_TRACE_METRICS, () => {
     return perfTraceLogger.resetEventLoopMetrics()

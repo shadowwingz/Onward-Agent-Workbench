@@ -83,18 +83,16 @@ test('aggregate – cancelled entries excluded from latency, counted separately'
   assert.equal(stats.totalMs?.mean, 15)
 })
 
-test('aggregate – hit rate over (hit + miss), unknowns excluded', () => {
+test('aggregate – hit rate over hit + miss; cacheState is binary now', () => {
   const history = [
     make({ cacheState: 'hit', totalMs: 5, tokenizeSettleAt: 5 }),
     make({ cacheState: 'hit', totalMs: 6, tokenizeSettleAt: 6 }),
     make({ cacheState: 'hit', totalMs: 7, tokenizeSettleAt: 7 }),
-    make({ cacheState: 'miss', totalMs: 30, tokenizeSettleAt: 30 }),
-    make({ cacheState: 'unknown', totalMs: 8, tokenizeSettleAt: 8 })
+    make({ cacheState: 'miss', totalMs: 30, tokenizeSettleAt: 30 })
   ]
   const stats = aggregateClickHistory(history)
   assert.equal(stats.hitCount, 3)
   assert.equal(stats.missCount, 1)
-  assert.equal(stats.unknownCount, 1)
   assert.equal(stats.hitRate, 0.75)
 })
 

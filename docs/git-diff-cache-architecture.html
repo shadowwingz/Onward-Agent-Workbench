@@ -1,0 +1,1073 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Git Diff 缓存架构 / Git Diff Cache Architecture</title>
+  <style>
+    /* ------------------------------------------------------------------ */
+    /* Reset + base                                                        */
+    /* ------------------------------------------------------------------ */
+    *, *::before, *::after { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Helvetica Neue", sans-serif;
+      line-height: 1.7;
+      color: #1f2937;
+      background: #f8fafc;
+      padding: 0 0 80px;
+    }
+    .container { max-width: 1080px; margin: 0 auto; padding: 0 32px; }
+
+    /* ------------------------------------------------------------------ */
+    /* Lang toggle                                                         */
+    /* ------------------------------------------------------------------ */
+    html[data-lang="zh"] .lang-en { display: none; }
+    html[data-lang="en"] .lang-zh { display: none; }
+
+    .topbar {
+      position: sticky; top: 0; z-index: 100;
+      background: rgba(255, 255, 255, 0.96);
+      backdrop-filter: saturate(180%) blur(12px);
+      -webkit-backdrop-filter: saturate(180%) blur(12px);
+      border-bottom: 1px solid #e5e7eb;
+      padding: 14px 32px;
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    .topbar-title {
+      font-size: 1.0em; font-weight: 700; color: #0f172a; letter-spacing: 0.3px;
+    }
+    .lang-toggle {
+      display: inline-flex; gap: 0; border: 1.5px solid #cbd5e1; border-radius: 999px; overflow: hidden;
+      background: white;
+    }
+    .lang-toggle button {
+      border: 0; padding: 4px 14px; font-size: 13px; cursor: pointer;
+      background: transparent; color: #64748b; transition: all 0.15s;
+      font-family: inherit; font-weight: 600;
+    }
+    .lang-toggle button.is-active {
+      background: #1f2937; color: #fbbf24;
+    }
+    .lang-toggle button:not(.is-active):hover { background: #f1f5f9; color: #1e293b; }
+
+    /* ------------------------------------------------------------------ */
+    /* Typography                                                          */
+    /* ------------------------------------------------------------------ */
+    h1 {
+      color: #0f172a; font-size: 2em; font-weight: 800;
+      border-bottom: 3px solid #e5e7eb; padding-bottom: 16px; margin: 32px 0 8px;
+    }
+    .subtitle { color: #64748b; font-size: 1.05em; margin: 0; }
+    h2 {
+      color: #0f172a; font-size: 1.4em; font-weight: 800;
+      margin: 56px 0 20px; padding-left: 16px;
+      border-left: 5px solid #3b82f6;
+    }
+    h3 { color: #1e293b; font-size: 1.1em; font-weight: 700; margin-top: 28px; }
+    code {
+      background: #eef2ff; color: #3730a3; padding: 2px 6px;
+      border-radius: 4px; font-size: 0.88em;
+      font-family: "SF Mono", "JetBrains Mono", "Cascadia Code", monospace;
+    }
+    pre {
+      background: #0f172a; color: #e2e8f0; padding: 16px 20px;
+      border-radius: 8px; overflow-x: auto; font-size: 13px; line-height: 1.55;
+      font-family: "SF Mono", "JetBrains Mono", monospace;
+    }
+    pre code { background: none; color: inherit; padding: 0; }
+    table { border-collapse: collapse; width: 100%; margin: 16px 0; font-size: 0.95em; }
+    th, td { border: 1px solid #e5e7eb; padding: 10px 14px; vertical-align: top; text-align: left; }
+    th { background: #f1f5f9; font-weight: 700; }
+    td code { font-size: 0.85em; }
+
+    /* ------------------------------------------------------------------ */
+    /* TLDR                                                                */
+    /* ------------------------------------------------------------------ */
+    .tldr {
+      background: linear-gradient(135deg, #eff6ff 0%, #f0fdf4 100%);
+      border-left: 5px solid #3b82f6;
+      padding: 18px 24px; border-radius: 8px; margin: 24px 0 32px;
+    }
+    .tldr h3 { margin: 0 0 10px; color: #1e40af; font-size: 1em; }
+    .tldr ul { margin: 0; padding-left: 22px; }
+    .tldr li { margin-bottom: 8px; }
+
+    /* ------------------------------------------------------------------ */
+    /* Architecture diagram                                                */
+    /* ------------------------------------------------------------------ */
+    .diagram-wrap {
+      background: white;
+      border: 1px solid #e2e8f0;
+      border-radius: 14px;
+      padding: 32px 28px;
+      margin: 24px 0;
+      box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+    }
+
+    .scenario-buttons {
+      display: flex; gap: 10px; flex-wrap: wrap; align-items: center;
+      margin-bottom: 24px;
+      padding-bottom: 20px;
+      border-bottom: 1px dashed #e2e8f0;
+    }
+    .scenario-buttons .label { font-size: 0.92em; color: #64748b; margin-right: 6px; }
+    .scenario-buttons button {
+      border: 1.5px solid #cbd5e1;
+      background: white;
+      padding: 8px 14px;
+      font-family: inherit; font-size: 13px; font-weight: 600;
+      border-radius: 8px;
+      cursor: pointer;
+      color: #334155;
+      transition: all 0.15s;
+    }
+    .scenario-buttons button:hover { border-color: #3b82f6; color: #1d4ed8; transform: translateY(-1px); }
+    .scenario-buttons button.is-running { background: #1d4ed8; color: white; border-color: #1d4ed8; }
+    .scenario-buttons button.scenario-reset {
+      background: #f1f5f9; color: #64748b; border-color: #e2e8f0;
+    }
+    .scenario-buttons button.scenario-reset:hover { background: #fee2e2; color: #b91c1c; border-color: #fca5a5; }
+
+    /* Layer cards */
+    .diagram { display: flex; flex-direction: column; gap: 0; }
+    .user-action {
+      align-self: center;
+      background: #1e293b; color: #fbbf24;
+      padding: 8px 24px; border-radius: 999px;
+      font-weight: 700; font-size: 13px;
+      letter-spacing: 0.5px;
+      margin-bottom: 4px;
+      transition: all 0.3s;
+    }
+    .user-action.is-active {
+      background: #fbbf24; color: #1e293b;
+      box-shadow: 0 0 0 6px rgba(251, 191, 36, 0.25);
+      transform: scale(1.05);
+    }
+
+    .connector {
+      align-self: center;
+      display: flex; align-items: center; gap: 32px;
+      padding: 8px 0;
+      position: relative;
+    }
+    .arrow-track {
+      width: 2px; height: 38px; background: #e2e8f0;
+      position: relative;
+    }
+    .arrow-track::before, .arrow-track::after {
+      content: ''; position: absolute; left: 50%; transform: translateX(-50%);
+      width: 0; height: 0; border-style: solid;
+    }
+    /* Down arrowhead (default) */
+    .arrow-track.dir-down::after {
+      bottom: -3px;
+      border-width: 8px 6px 0 6px;
+      border-color: #cbd5e1 transparent transparent transparent;
+    }
+    /* Up arrowhead */
+    .arrow-track.dir-up::before {
+      top: -3px;
+      border-width: 0 6px 8px 6px;
+      border-color: transparent transparent #cbd5e1 transparent;
+    }
+
+    .arrow-track.is-active {
+      background: linear-gradient(#3b82f6, #3b82f6) no-repeat;
+      animation: arrow-flow 0.5s ease-out forwards;
+    }
+    .arrow-track.dir-down.is-active::after { border-top-color: #3b82f6; }
+    .arrow-track.dir-up.is-active::before { border-bottom-color: #3b82f6; }
+    .arrow-track.is-active.is-up { animation-name: arrow-flow-up; }
+    @keyframes arrow-flow {
+      0%   { background-size: 100% 0%; background-position: top; }
+      100% { background-size: 100% 100%; background-position: top; }
+    }
+    @keyframes arrow-flow-up {
+      0%   { background-size: 100% 0%; background-position: bottom; }
+      100% { background-size: 100% 100%; background-position: bottom; }
+    }
+    .arrow-track.is-completed {
+      background: #94a3b8;
+    }
+    .arrow-track.dir-down.is-completed::after { border-top-color: #94a3b8; }
+    .arrow-track.dir-up.is-completed::before { border-bottom-color: #94a3b8; }
+
+    .conn-label {
+      font-size: 0.82em; color: #64748b; font-family: "SF Mono", monospace;
+      white-space: nowrap;
+    }
+
+    .layer {
+      width: 100%; max-width: 720px; align-self: center;
+      border: 2.5px solid; border-radius: 14px;
+      padding: 18px 24px;
+      background: white;
+      transition: all 0.35s ease;
+      position: relative;
+    }
+    .layer-renderer { border-color: #93c5fd; background: linear-gradient(180deg, #eff6ff 0%, #ffffff 60%); }
+    .layer-main     { border-color: #6ee7b7; background: linear-gradient(180deg, #ecfdf5 0%, #ffffff 60%); }
+    .layer-worker   { border-color: #fcd34d; background: linear-gradient(180deg, #fffbeb 0%, #ffffff 60%); }
+
+    .layer.is-active {
+      transform: translateY(-2px);
+      box-shadow: 0 0 0 4px var(--glow), 0 8px 18px rgba(15, 23, 42, 0.08);
+    }
+    .layer-renderer.is-active { --glow: rgba(59, 130, 246, 0.25); border-color: #3b82f6; }
+    .layer-main.is-active     { --glow: rgba(16, 185, 129, 0.25); border-color: #10b981; }
+    .layer-worker.is-active   { --glow: rgba(245, 158, 11, 0.25); border-color: #f59e0b; }
+
+    .layer-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
+    .layer-title { font-weight: 800; font-size: 1.05em; letter-spacing: 0.3px; }
+    .layer-renderer .layer-title { color: #1d4ed8; }
+    .layer-main     .layer-title { color: #047857; }
+    .layer-worker   .layer-title { color: #b45309; }
+    .layer-meta { color: #6b7280; font-size: 0.85em; margin-top: 2px; }
+
+    .layer-pill {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 5px 12px; border-radius: 999px;
+      font-size: 12px; font-weight: 700;
+      background: #f1f5f9; color: #64748b;
+      border: 1px solid #e2e8f0;
+      flex-shrink: 0;
+      font-family: "SF Mono", monospace;
+    }
+    .layer-pill.state-loaded, .layer-pill.state-hit {
+      background: #d1fae5; color: #047857; border-color: #6ee7b7;
+    }
+    .layer-pill.state-miss {
+      background: #fee2e2; color: #b91c1c; border-color: #fca5a5;
+    }
+    .layer-pill.state-not-consulted, .layer-pill.state-untouched, .layer-pill.state-unloaded, .layer-pill.state-idle {
+      background: #f1f5f9; color: #64748b; border-color: #cbd5e1;
+    }
+    .layer-pill.state-rebuilt {
+      background: #fef3c7; color: #b45309; border-color: #fcd34d;
+    }
+
+    .layer-body {
+      margin-top: 12px;
+      background: rgba(255, 255, 255, 0.7);
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      padding: 10px 14px;
+      font-family: "SF Mono", monospace;
+      font-size: 12.5px;
+      color: #475569;
+      line-height: 1.65;
+    }
+    .layer-body strong { color: #1f2937; }
+
+    .layer-purpose {
+      margin-top: 10px;
+      background: #fef9c3;
+      border-left: 3px solid #eab308;
+      padding: 8px 14px;
+      border-radius: 4px;
+      font-size: 0.88em;
+      color: #713f12;
+    }
+
+    .narrative-panel {
+      margin-top: 24px;
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 10px;
+      padding: 18px 22px;
+      min-height: 100px;
+    }
+    .narrative-panel h4 {
+      margin: 0 0 10px; font-size: 0.95em; color: #475569;
+      letter-spacing: 0.4px; text-transform: uppercase; font-weight: 700;
+    }
+    .narrative-step {
+      display: flex; gap: 14px; padding: 6px 0;
+      opacity: 0;
+      transform: translateX(-6px);
+      transition: opacity 0.25s ease, transform 0.25s ease;
+    }
+    .narrative-step.is-shown { opacity: 1; transform: translateX(0); }
+    .narrative-time {
+      flex-shrink: 0; width: 50px;
+      font-family: "SF Mono", monospace; font-weight: 700;
+      color: #fbbf24; background: #1e293b;
+      text-align: center; border-radius: 4px;
+      padding: 2px 0; height: 20px; line-height: 1.4; font-size: 11px; align-self: flex-start;
+    }
+    .narrative-text { flex: 1; font-size: 0.93em; color: #1e293b; }
+    .narrative-text code { font-size: 0.85em; }
+
+    /* ------------------------------------------------------------------ */
+    /* State combination matrix                                            */
+    /* ------------------------------------------------------------------ */
+    .matrix {
+      display: grid; grid-template-columns: 1fr; gap: 14px; margin: 20px 0;
+    }
+    .matrix-row {
+      border: 2px solid; border-radius: 12px; padding: 18px 22px;
+      background: white;
+    }
+    .matrix-row.combo-1 { border-color: #93c5fd; background: linear-gradient(180deg, #eff6ff 0%, #fff 30%); }
+    .matrix-row.combo-2 { border-color: #6ee7b7; background: linear-gradient(180deg, #ecfdf5 0%, #fff 30%); }
+    .matrix-row.combo-3 { border-color: #fca5a5; background: linear-gradient(180deg, #fef2f2 0%, #fff 30%); }
+    .matrix-pills { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+    .matrix-pill {
+      display: inline-flex; align-items: center; padding: 4px 10px; border-radius: 999px;
+      font-size: 11px; font-weight: 700; font-family: "SF Mono", monospace;
+    }
+    .matrix-pill.pill-render-hit  { background: #d1fae5; color: #047857; }
+    .matrix-pill.pill-render-miss { background: #f1f5f9; color: #475569; }
+    .matrix-pill.pill-main-hit    { background: #d1fae5; color: #047857; }
+    .matrix-pill.pill-main-miss   { background: #fee2e2; color: #b91c1c; }
+    .matrix-pill.pill-main-na     { background: #f1f5f9; color: #475569; }
+    .matrix-headline { font-weight: 700; color: #1f2937; margin-bottom: 6px; font-size: 1em; }
+    .matrix-section { margin-top: 12px; }
+    .matrix-section-label {
+      font-size: 0.78em; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.6px; color: #64748b; margin-bottom: 4px;
+    }
+    .matrix-section ul { margin: 0; padding-left: 20px; font-size: 0.92em; }
+    .matrix-section li { margin-bottom: 4px; line-height: 1.55; }
+
+    /* ------------------------------------------------------------------ */
+    /* Misc utility                                                        */
+    /* ------------------------------------------------------------------ */
+    .callout {
+      background: #fff7ed;
+      border-left: 4px solid #ea580c;
+      padding: 14px 18px; border-radius: 4px; margin: 18px 0;
+    }
+    .callout strong { color: #9a3412; }
+    .quiet { color: #64748b; font-size: 0.94em; }
+
+    @media (max-width: 720px) {
+      .container { padding: 0 16px; }
+      .topbar { padding: 12px 16px; }
+      .layer { padding: 14px 16px; }
+      .layer-header { flex-direction: column; align-items: flex-start; gap: 6px; }
+    }
+  </style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar-title">
+    <span class="lang-zh">Git Diff 缓存架构</span>
+    <span class="lang-en">Git Diff Cache Architecture</span>
+  </div>
+  <div class="lang-toggle">
+    <button data-lang-set="zh" class="is-active">中文</button>
+    <button data-lang-set="en">EN</button>
+  </div>
+</header>
+
+<div class="container">
+
+<h1>
+  <span class="lang-zh">Git Diff 缓存架构</span>
+  <span class="lang-en">Git Diff Cache Architecture</span>
+</h1>
+<p class="subtitle">
+  <span class="lang-zh">两层独立的存储 — 渲染端的"状态"与主进程的"缓存" — 以及它们之间的"乒乓"流转。</span>
+  <span class="lang-en">Two independent layers — the renderer's "state" and the main process's "cache" — and the ping-pong they play.</span>
+</p>
+
+<!-- ====================================================================== -->
+<!-- TL;DR                                                                  -->
+<!-- ====================================================================== -->
+<div class="tldr">
+  <h3><span class="lang-zh">TL;DR</span><span class="lang-en">TL;DR</span></h3>
+  <ul>
+    <li>
+      <span class="lang-zh"><strong>主进程缓存</strong>是真正的缓存层（设计意图就是缓存）；<strong>渲染端状态</strong>不是缓存，是 React state 顺带"持有"了 Monaco 显示所需的字符串。两层概念不同，名字也分开。</span>
+      <span class="lang-en"><strong>Main-process cache</strong> is the deliberate caching layer; <strong>renderer state</strong> isn't a cache — it's the React state that happens to hold the strings Monaco needs to render. Two different concepts, two different names.</span>
+    </li>
+    <li>
+      <span class="lang-zh">每次点击文件，最多触发"渲染端 → 主进程 → Worker → git"四级链路。能在哪一级满足，就停在哪一级，立即把数据沿原路返回。</span>
+      <span class="lang-en">Each click traces at most a 4-tier ping-pong: <em>renderer → main → worker → git</em>. The first tier that has the answer stops the descent and bounces the data back.</span>
+    </li>
+    <li>
+      <span class="lang-zh">面板上两个独立的 pill 直白告诉你这次点击停在哪一级 — 没有"内容缓存命中"这种把两层混在一起的旧措辞。</span>
+      <span class="lang-en">Two independent pills in the diagnostics panel say which tier this click stopped at — no more conflated "content cache hit" label.</span>
+    </li>
+  </ul>
+</div>
+
+<!-- ====================================================================== -->
+<!-- ARCHITECTURE + INTERACTIVE PING-PONG                                   -->
+<!-- ====================================================================== -->
+<h2>
+  <span class="lang-zh">一、三层架构与"乒乓"流转</span>
+  <span class="lang-en">1. Three-Layer Architecture &amp; Ping-Pong Flow</span>
+</h2>
+
+<p>
+  <span class="lang-zh">点击下面任一场景按钮，看实际数据流。每个图层会在被触达时高亮，箭头会按时序填充，状态 pill 会变色。</span>
+  <span class="lang-en">Click a scenario below to watch the actual data flow. Layers light up when touched, arrows fill in order, and the state pills change color.</span>
+</p>
+
+<div class="diagram-wrap">
+
+  <div class="scenario-buttons">
+    <span class="label">
+      <span class="lang-zh">场景:</span><span class="lang-en">Scenario:</span>
+    </span>
+    <button data-scenario="render-hit">
+      <span class="lang-zh">① 渲染端命中（最快）</span>
+      <span class="lang-en">① Render hit (fastest)</span>
+    </button>
+    <button data-scenario="main-hit">
+      <span class="lang-zh">② 主进程缓存命中</span>
+      <span class="lang-en">② Main cache hit</span>
+    </button>
+    <button data-scenario="main-miss">
+      <span class="lang-zh">③ 全部未命中（最慢）</span>
+      <span class="lang-en">③ All-miss (slowest)</span>
+    </button>
+    <button class="scenario-reset" data-scenario="reset">
+      <span class="lang-zh">↺ 重置</span>
+      <span class="lang-en">↺ Reset</span>
+    </button>
+  </div>
+
+  <div class="diagram">
+
+    <div class="user-action" id="user-action">
+      <span class="lang-zh">👆 用户点击文件</span>
+      <span class="lang-en">👆 User clicks a file</span>
+    </div>
+
+    <div class="connector">
+      <div class="arrow-track dir-down" id="arrow-user-r"></div>
+    </div>
+
+    <!-- Layer 1: Renderer -->
+    <div class="layer layer-renderer" id="layer-renderer">
+      <div class="layer-header">
+        <div>
+          <div class="layer-title">
+            <span class="lang-zh">渲染端 (Chromium / React UI)</span>
+            <span class="lang-en">Renderer (Chromium / React UI)</span>
+          </div>
+          <div class="layer-meta">
+            <span class="lang-zh">React useState · 当前 GitDiffViewer 实例存活期间</span>
+            <span class="lang-en">React useState · alive while this GitDiffViewer is mounted</span>
+          </div>
+        </div>
+        <div class="layer-pill state-idle" id="pill-render">
+          <span class="lang-zh">渲染端状态</span>
+          <span class="lang-en">Render state</span>
+          : <span id="pill-render-value">—</span>
+        </div>
+      </div>
+      <div class="layer-body">
+        <strong>fileContents</strong>: <code>Record&lt;fileKey, FileContentState&gt;</code><br>
+        <span class="lang-zh">key = <code>&lt;repoRoot&gt;::&lt;changeType&gt;::&lt;status&gt;::&lt;orig&gt;::&lt;filename&gt;</code></span>
+        <span class="lang-en">key = <code>&lt;repoRoot&gt;::&lt;changeType&gt;::&lt;status&gt;::&lt;orig&gt;::&lt;filename&gt;</code></span><br>
+        value = <code>{ originalContent, modifiedContent, isBinary, loading, ... }</code>
+      </div>
+      <div class="layer-purpose">
+        <span class="lang-zh"><strong>它为什么存在?</strong> 不是为了缓存。Monaco diff 编辑器需要 JS 字符串才能挂载 model；React 重新渲染时不能反复发 IPC。所以这些字符串只能放在 state 里 — 这是"显示 diff"的<strong>必要条件</strong>，不是单独加的优化层。</span>
+        <span class="lang-en"><strong>Why does this exist?</strong> Not for caching. Monaco's diff editor needs JS strings to mount its models, and React re-renders can't keep re-firing IPC. The strings simply <strong>must</strong> live in state for the diff to render — it's not an opt-in caching layer.</span>
+      </div>
+    </div>
+
+    <div class="connector">
+      <div class="arrow-track dir-down" id="arrow-r-m" data-conn="r-to-m"></div>
+      <div class="conn-label">
+        <span class="lang-zh">IPC: window.electronAPI.git.getFileContent</span>
+        <span class="lang-en">IPC: window.electronAPI.git.getFileContent</span>
+      </div>
+      <div class="arrow-track dir-up" id="arrow-m-r" data-conn="m-to-r"></div>
+    </div>
+
+    <!-- Layer 2: Main -->
+    <div class="layer layer-main" id="layer-main">
+      <div class="layer-header">
+        <div>
+          <div class="layer-title">
+            <span class="lang-zh">主进程 (Electron Node.js)</span>
+            <span class="lang-en">Main process (Electron Node.js)</span>
+          </div>
+          <div class="layer-meta">
+            <span class="lang-zh">单例 · 跨窗口共享 · 应用整个生命周期</span>
+            <span class="lang-en">singleton · shared across windows · alive for the whole app</span>
+          </div>
+        </div>
+        <div class="layer-pill state-idle" id="pill-main">
+          <span class="lang-zh">主进程缓存</span>
+          <span class="lang-en">Main cache</span>
+          : <span id="pill-main-value">—</span>
+        </div>
+      </div>
+      <div class="layer-body">
+        <strong>GitDiffContentCache</strong> (per-project bucket)<br>
+        <span class="lang-zh">key = <code>&lt;changeType&gt;::&lt;status&gt;::&lt;orig&gt;::&lt;filename&gt;</code> （每 project 独立桶）</span>
+        <span class="lang-en">key = <code>&lt;changeType&gt;::&lt;status&gt;::&lt;orig&gt;::&lt;filename&gt;</code> (one bucket per project)</span><br>
+        value = <code>GitFileContentResult</code><br>
+        <span class="lang-zh">容量 ≤ 100 MB / project · 全局最多 8 project · 单文件 &gt; 10 MB 不入</span>
+        <span class="lang-en">capacity ≤ 100 MB / project · ≤ 8 projects · single file &gt; 10 MB skipped</span>
+      </div>
+      <div class="layer-purpose">
+        <span class="lang-zh"><strong>这才是真正的"缓存层"。</strong>多个 renderer 窗口共享；watcher / mutation 触发失效；scheduler 在后台预热常用文件，让你下一次点击直接命中。</span>
+        <span class="lang-en"><strong>This is the actual cache.</strong> Shared across windows, watcher/mutation invalidates it, the precompute scheduler pre-warms it so the next click hits.</span>
+      </div>
+    </div>
+
+    <div class="connector">
+      <div class="arrow-track dir-down" id="arrow-m-w" data-conn="m-to-w"></div>
+      <div class="conn-label">
+        <span class="lang-zh">worker_threads: gitIpcWorkerClient</span>
+        <span class="lang-en">worker_threads: gitIpcWorkerClient</span>
+      </div>
+      <div class="arrow-track dir-up" id="arrow-w-m" data-conn="w-to-m"></div>
+    </div>
+
+    <!-- Layer 3: Worker -->
+    <div class="layer layer-worker" id="layer-worker">
+      <div class="layer-header">
+        <div>
+          <div class="layer-title">
+            <span class="lang-zh">Git IPC Worker 线程</span>
+            <span class="lang-en">Git IPC Worker thread</span>
+          </div>
+          <div class="layer-meta">
+            <span class="lang-zh">无缓存 · 纯执行层 · 跑 git 命令 + 解析输出</span>
+            <span class="lang-en">no cache · execution layer · spawns git, parses output</span>
+          </div>
+        </div>
+        <div class="layer-pill state-idle" id="pill-worker">
+          <span class="lang-zh">Worker</span>
+          <span class="lang-en">Worker</span>
+          : <span id="pill-worker-value">—</span>
+        </div>
+      </div>
+      <div class="layer-body">
+        <span class="lang-zh">每次调用 spawn 一次 git，从磁盘读 HEAD / index / worktree 内容，组合成 diff result 返回。</span>
+        <span class="lang-en">Each call spawns git, reads HEAD / index / worktree contents from disk, assembles the diff result.</span>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="narrative-panel">
+    <h4>
+      <span class="lang-zh">流程时间线</span>
+      <span class="lang-en">Step timeline</span>
+    </h4>
+    <div id="narrative">
+      <div class="narrative-step is-shown">
+        <div class="narrative-text" style="color: #64748b;">
+          <span class="lang-zh">点上面三个场景按钮之一开始演示。</span>
+          <span class="lang-en">Click any scenario above to start.</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ====================================================================== -->
+<!-- STATE COMBINATION MATRIX                                               -->
+<!-- ====================================================================== -->
+<h2>
+  <span class="lang-zh">二、三种状态组合 — 各自的前提条件</span>
+  <span class="lang-en">2. The Three Combinations — Pre-conditions for Each</span>
+</h2>
+
+<p>
+  <span class="lang-zh">面板顶部的两个 pill 在生产中只会出现 <strong>三种</strong> 组合，每一种对应不同的链路出口。下面每行讲清楚"什么前提下"会看到这种组合。</span>
+  <span class="lang-en">Only <strong>three</strong> pill combinations occur in production, each marking a different exit point of the chain. Each row below spells out the pre-conditions.</span>
+</p>
+
+<div class="matrix">
+
+  <!-- Combo 1: render hit -->
+  <div class="matrix-row combo-1">
+    <div class="matrix-pills">
+      <span class="matrix-pill pill-render-hit">
+        <span class="lang-zh">渲染端状态: 已加载</span>
+        <span class="lang-en">Render: loaded</span>
+      </span>
+      <span class="matrix-pill pill-main-na">
+        <span class="lang-zh">主进程缓存: 未查询</span>
+        <span class="lang-en">Main: not consulted</span>
+      </span>
+    </div>
+    <div class="matrix-headline">
+      <span class="lang-zh">点击在渲染端就被消化了，IPC 根本没发出去。</span>
+      <span class="lang-en">The click resolved in renderer state — IPC never fired.</span>
+    </div>
+    <div class="matrix-section">
+      <div class="matrix-section-label">
+        <span class="lang-zh">前提条件</span>
+        <span class="lang-en">Pre-conditions</span>
+      </div>
+      <ul>
+        <li>
+          <span class="lang-zh"><code>fileContents[fileKey]</code> 存在、<code>!loading</code>、<strong>未被标记 stale</strong>、未被 invalidator 清掉。</span>
+          <span class="lang-en"><code>fileContents[fileKey]</code> exists, <code>!loading</code>, <strong>not marked stale</strong>, not cleared by invalidator.</span>
+        </li>
+        <li>
+          <span class="lang-zh">这一切意味着：在当前 GitDiffViewer 实例里，对这个完全相同的 fileKey （含相同 status + changeType）<strong>之前曾经发过一次 IPC 并填回了 state</strong>。</span>
+          <span class="lang-en">Which means: this exact fileKey (with the same status + changeType) was <strong>previously fetched and stored</strong> in this GitDiffViewer instance.</span>
+        </li>
+      </ul>
+    </div>
+    <div class="matrix-section">
+      <div class="matrix-section-label">
+        <span class="lang-zh">怎么会进入这个状态</span>
+        <span class="lang-en">How you get here</span>
+      </div>
+      <ul>
+        <li>
+          <span class="lang-zh"><strong>同会话内重复点同一个文件</strong> — 第一次拉过、之后再点就在 state 里。</span>
+          <span class="lang-en"><strong>Re-clicking the same file</strong> within the same session — the first click fetched, subsequent clicks short-circuit.</span>
+        </li>
+        <li>
+          <span class="lang-zh"><strong>List 刷新后 auto-select 静默拉取</strong> — selectedFile useEffect 触发 ensureFileContent 把内容塞进 state，等你"第一次手动点"时其实已经填好。这就是"删除文件第一次点击居然命中"的根因。</span>
+          <span class="lang-en"><strong>Auto-select silently pre-fetched it</strong> — after a list refresh, <code>selectedFile</code> changing fires <code>ensureFileContent</code> behind the scenes. By the time you "click for the first time," state already has it. This is exactly why deleting a file shows a hit on first click.</span>
+        </li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- Combo 2: main hit -->
+  <div class="matrix-row combo-2">
+    <div class="matrix-pills">
+      <span class="matrix-pill pill-render-miss">
+        <span class="lang-zh">渲染端状态: 未加载</span>
+        <span class="lang-en">Render: unloaded</span>
+      </span>
+      <span class="matrix-pill pill-main-hit">
+        <span class="lang-zh">主进程缓存: 命中</span>
+        <span class="lang-en">Main: hit</span>
+      </span>
+    </div>
+    <div class="matrix-headline">
+      <span class="lang-zh">IPC 走出去了，但主进程缓存里有 — 一来一回两跳就结束。</span>
+      <span class="lang-en">IPC fired, but main had it — round-trip ends in two hops.</span>
+    </div>
+    <div class="matrix-section">
+      <div class="matrix-section-label">
+        <span class="lang-zh">前提条件</span>
+        <span class="lang-en">Pre-conditions</span>
+      </div>
+      <ul>
+        <li>
+          <span class="lang-zh"><code>fileContents[fileKey]</code> 缺、loading 或 stale；</span>
+          <span class="lang-en"><code>fileContents[fileKey]</code> missing, loading, or stale; AND</span>
+        </li>
+        <li>
+          <span class="lang-zh">主进程 <code>gitDiffContentCache.get(project, key)</code> 命中（同一 key、未被 watcher / mutation invalidate、未被 LRU 淘汰）。</span>
+          <span class="lang-en">main's <code>gitDiffContentCache.get(project, key)</code> returns a non-null value (same key, not watcher/mutation-invalidated, not LRU-evicted).</span>
+        </li>
+      </ul>
+    </div>
+    <div class="matrix-section">
+      <div class="matrix-section-label">
+        <span class="lang-zh">怎么会进入这个状态（含 Git Diff 特定例子）</span>
+        <span class="lang-en">How you get here (Git Diff-specific examples)</span>
+      </div>
+      <ul>
+        <li>
+          <span class="lang-zh"><strong>Precompute scheduler 后台预热好了</strong>（最常见）— 你打开 Git Diff 时，scheduler 会拉取整个 working set 进 main 缓存，等你点哪个都是命中。</span>
+          <span class="lang-en"><strong>Scheduler pre-warmed it in the background</strong> (the common case) — when Git Diff opens, the scheduler fetches the whole working set into main, so any first click hits.</span>
+        </li>
+        <li>
+          <span class="lang-zh"><strong>跨窗口</strong> — 另一个 Git Diff 窗口对同一 project 同一文件的 IPC 已经把它写进了 main，本窗口第一次点击直接命中。</span>
+          <span class="lang-en"><strong>Cross-window</strong> — another Git Diff window's earlier IPC for the same project/file already cached it in main; this window's first click hits.</span>
+        </li>
+        <li>
+          <span class="lang-zh"><strong>状态切换 + scheduler 抢先一步</strong> — 文件从 M 变 D（你 <code>rm</code> 了），watcher 清空 main 桶；100 ms 防抖后 scheduler 跑批，对 D-key 对应的内容（HEAD 版本 + 空 modifiedContent）做了预热；然后你点击。renderer 没有 D-key 的 entry（list 刷新时 auto-select 进入了 useEffect 拉取，但若 useEffect 还没触发或已被覆盖）— 取决于时序，可能落在这里。</span>
+          <span class="lang-en"><strong>Status transition + scheduler racing ahead</strong> — file went M→D (you <code>rm</code>'d it). Watcher clears main's bucket; ~100 ms later, scheduler refetches the working set including the D-keyed entry (HEAD content + empty modified). If you click before auto-select's silent fetch lands, you land here.</span>
+        </li>
+        <li>
+          <span class="lang-zh"><strong>renderer 重新挂载</strong> — 关闭并重新打开 Git Diff 子页（同会话），renderer state 重置，但 main 缓存还在。</span>
+          <span class="lang-en"><strong>Renderer remount</strong> — close and reopen Git Diff in the same session; renderer state resets, main cache survives.</span>
+        </li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- Combo 3: main miss -->
+  <div class="matrix-row combo-3">
+    <div class="matrix-pills">
+      <span class="matrix-pill pill-render-miss">
+        <span class="lang-zh">渲染端状态: 未加载</span>
+        <span class="lang-en">Render: unloaded</span>
+      </span>
+      <span class="matrix-pill pill-main-miss">
+        <span class="lang-zh">主进程缓存: 未命中</span>
+        <span class="lang-en">Main: miss</span>
+      </span>
+    </div>
+    <div class="matrix-headline">
+      <span class="lang-zh">两层都空 — 全程下到 worker 跑 git。最慢的路径。</span>
+      <span class="lang-en">Both layers empty — descends all the way to the worker, runs git. Slowest path.</span>
+    </div>
+    <div class="matrix-section">
+      <div class="matrix-section-label">
+        <span class="lang-zh">前提条件</span>
+        <span class="lang-en">Pre-conditions</span>
+      </div>
+      <ul>
+        <li>
+          <span class="lang-zh">渲染端 state 缺 + 主进程缓存对该 key 也没东西。</span>
+          <span class="lang-en">Renderer state missing AND main cache returns null for the key.</span>
+        </li>
+      </ul>
+    </div>
+    <div class="matrix-section">
+      <div class="matrix-section-label">
+        <span class="lang-zh">怎么会进入这个状态（Git Diff 里典型例子）</span>
+        <span class="lang-en">How you get here (typical Git Diff cases)</span>
+      </div>
+      <ul>
+        <li>
+          <span class="lang-zh"><strong>点击 scheduler 跳过的文件</strong>：deleted (status='D')、conflict (status='!')、submodule、二进制扩展名 (.png/.jpg/.pdf 等)。这些 scheduler <code>isEligible</code> 直接返回 false，不预热。</span>
+          <span class="lang-en"><strong>Clicking a file the scheduler skipped</strong>: deleted (status='D'), conflict (status='!'), submodules, binary extensions (.png/.jpg/.pdf …). The scheduler's <code>isEligible</code> returns false for these.</span>
+        </li>
+        <li>
+          <span class="lang-zh"><strong>单文件超 10 MB</strong> 上限 — 即使 scheduler 拉过，main 的 <code>cache.put</code> 也会拒绝（防止单文件吃掉整个 project budget）。</span>
+          <span class="lang-en"><strong>File &gt; 10 MB</strong> single-file cap — even if scheduler fetched it, main's <code>cache.put</code> rejects oversized payloads to protect the project budget.</span>
+        </li>
+        <li>
+          <span class="lang-zh"><strong>scheduler 还没跑完就点</strong> — 100 ms 防抖 + 批次本身要拉 N 个文件，你"快手"会落在 in-flight 期间。</span>
+          <span class="lang-en"><strong>Clicking before scheduler finishes</strong> — 100 ms debounce + N-file burst, fast clicks land mid-flight.</span>
+        </li>
+        <li>
+          <span class="lang-zh"><strong>刚点过 Refresh changes</strong> — main 的 project 桶被清空，scheduler 重排，但你立刻点就还来不及。</span>
+          <span class="lang-en"><strong>Just hit Refresh changes</strong> — main's bucket cleared, scheduler re-queued, but your immediate click out-races it.</span>
+        </li>
+        <li>
+          <span class="lang-zh"><strong>watcher 检测到外部 mutation</strong> — invalidator 清空 main 桶 + 标 renderer state stale，下次点击两层都空。</span>
+          <span class="lang-en"><strong>Watcher detected external mutation</strong> — invalidator clears main's bucket and marks renderer entries stale; next click misses both.</span>
+        </li>
+        <li>
+          <span class="lang-zh"><strong>worker 报错</strong>（git 失败）— 结果不入缓存，状态记为 miss + missReason='worker-error'。</span>
+          <span class="lang-en"><strong>Worker error</strong> (git failed) — result NOT cached, recorded as miss with <code>missReason='worker-error'</code>.</span>
+        </li>
+      </ul>
+    </div>
+  </div>
+
+</div>
+
+<!-- ====================================================================== -->
+<!-- WHY RENDERER HOLDS                                                     -->
+<!-- ====================================================================== -->
+<h2>
+  <span class="lang-zh">三、为什么渲染端会"持有"内容？</span>
+  <span class="lang-en">3. Why Does Renderer "Hold" Content?</span>
+</h2>
+
+<p>
+  <span class="lang-zh">在 Electron 里，Renderer Process 这个名字其实是<strong>误导性的</strong> — 它和浏览器里"画像素"的渲染进程不是同一回事。它实际跑了整个 React 应用：组件树、useState、useEffect、事件处理、Monaco 编辑器、所有业务逻辑。</span>
+  <span class="lang-en">In Electron, "Renderer Process" is a <strong>misleading name</strong> — it's not the pixel-pushing renderer of the browser sense. It runs the entire React app: component tree, useState, useEffect, event handlers, Monaco editor, all business logic.</span>
+</p>
+
+<table>
+  <thead>
+    <tr>
+      <th><span class="lang-zh">你以为 Renderer 在干什么</span><span class="lang-en">What you think Renderer does</span></th>
+      <th><span class="lang-zh">实际在干什么</span><span class="lang-en">What it actually does</span></th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><span class="lang-zh">把像素画到屏幕</span><span class="lang-en">Draws pixels</span></td>
+      <td><span class="lang-zh">跑整个 React 应用 — 组件树、useState、useEffect、事件处理</span><span class="lang-en">Runs the whole React app — component tree, useState, useEffect, event handlers</span></td>
+    </tr>
+    <tr>
+      <td><span class="lang-zh">无状态接收主进程指令</span><span class="lang-en">Stateless receiver of main-process commands</span></td>
+      <td><span class="lang-zh">维护 UI 状态机（哪个文件选中、哪个 hunk 展开、各 panel 折叠状态…）</span><span class="lang-en">Maintains the UI state machine (selected file, expanded hunks, panel collapse states…)</span></td>
+    </tr>
+    <tr>
+      <td><span class="lang-zh">无内存</span><span class="lang-en">Stateless</span></td>
+      <td><span class="lang-zh">React state、ref、事件监听器、Monaco editor models 等大量内存数据</span><span class="lang-en">React state, refs, event listeners, Monaco editor models — substantial in-memory data</span></td>
+    </tr>
+  </tbody>
+</table>
+
+<p>
+  <span class="lang-zh">所以 "渲染端持有文件正文" 是 React 应用的<strong>结构性后果</strong>，不是有意添加的缓存：</span>
+  <span class="lang-en">So "renderer holds file bodies" is a <strong>structural consequence</strong> of being a React app, not an opt-in cache:</span>
+</p>
+
+<ol>
+  <li><span class="lang-zh">Monaco diff 编辑器需要 OriginalModel + ModifiedModel 两个 JS 字符串模型才能渲染。</span><span class="lang-en">Monaco's diff editor needs two JS string models to render.</span></li>
+  <li><span class="lang-zh">字符串只能放在 React state — 不能每次重新渲染都从主进程 IPC 拉。</span><span class="lang-en">Strings have to live in React state — re-rendering can't keep re-firing IPC.</span></li>
+  <li><span class="lang-zh">用户切换文件时，已持有的字符串<strong>必须保留</strong>，否则切回去要重拉，体验下降。</span><span class="lang-en">When the user switches files, the held strings <strong>must</strong> stay in state, else switching back means re-fetching.</span></li>
+  <li><span class="lang-zh"><code>fileContents</code> 这个 state 自然就充当了"已经拉过、不必再拉"的指示。</span><span class="lang-en">The <code>fileContents</code> state naturally serves as a "we already have this" indicator.</span></li>
+</ol>
+
+<div class="callout">
+  <strong>
+    <span class="lang-zh">类比:</span>
+    <span class="lang-en">Analogy:</span>
+  </strong>
+  <span class="lang-zh">说 Word 文档"缓存"了正在编辑的文字 — 听起来很奇怪。它是在<strong>持有</strong>，不是在<em>缓存</em>。Renderer 的 <code>fileContents</code> 一样。把它叫做"状态"而不是"缓存"，能避免无谓的混淆。</span>
+  <span class="lang-en">Saying Word "caches" the text you're currently editing — sounds weird. It <strong>holds</strong> it; that's not "caching." Renderer's <code>fileContents</code> is the same. Calling it "state" rather than "cache" avoids the confusion.</span>
+</div>
+
+<!-- ====================================================================== -->
+<!-- DELETED FILE TIMELINE                                                  -->
+<!-- ====================================================================== -->
+<h2>
+  <span class="lang-zh">四、深度示例：删除一个文件后的完整时间线</span>
+  <span class="lang-en">4. Deep Example: Full Timeline of Deleting a File</span>
+</h2>
+
+<p class="quiet">
+  <span class="lang-zh">设你已经选中了 <code>file.txt</code> (status M)，然后在终端 <code>rm file.txt</code>。这是经常让人困惑的案例。</span>
+  <span class="lang-en">Say you've selected <code>file.txt</code> (status M), then run <code>rm file.txt</code> in your shell. The classic confusing case.</span>
+</p>
+
+<div class="narrative-panel" style="margin-top: 18px;">
+  <div class="narrative-step is-shown"><div class="narrative-time">T0</div><div class="narrative-text">
+    <span class="lang-zh">点击 <code>file.txt</code> (M)。<strong>渲染端: 未加载 → 主进程: 未命中 → worker 拉取 → 全程写回</strong>。结束: render 已加载、main 命中（下一次）。</span>
+    <span class="lang-en">Click <code>file.txt</code> (M). <strong>Render: unloaded → Main: miss → worker fetches → both layers populated on the way back</strong>. After: render loaded, main has the entry.</span>
+  </div></div>
+  <div class="narrative-step is-shown"><div class="narrative-time">T1</div><div class="narrative-text">
+    <span class="lang-zh">你 <code>rm file.txt</code>。fs.watch 检测到删除。</span>
+    <span class="lang-en">You <code>rm file.txt</code>. fs.watch detects the deletion.</span>
+  </div></div>
+  <div class="narrative-step is-shown"><div class="narrative-time">T2</div><div class="narrative-text">
+    <span class="lang-zh">主进程 invalidator 触发 → <strong>整个 project 桶清空</strong> + scheduler 排队 100 ms 防抖。</span>
+    <span class="lang-en">Main's invalidator fires → <strong>entire project bucket cleared</strong>; scheduler queued for 100 ms debounce.</span>
+  </div></div>
+  <div class="narrative-step is-shown"><div class="narrative-time">T3</div><div class="narrative-text">
+    <span class="lang-zh">scheduler 跑批：getDiff 返回新 list（含 D 状态的 file.txt）。<code>isEligible</code> 检查 status==='D' → false → <strong>不预热</strong>。</span>
+    <span class="lang-en">Scheduler runs: getDiff returns the updated list (file.txt now status D). <code>isEligible</code> sees status==='D' → false → <strong>does NOT prewarm</strong>.</span>
+  </div></div>
+  <div class="narrative-step is-shown"><div class="narrative-time">T4</div><div class="narrative-text">
+    <span class="lang-zh">渲染端 invalidator listener 通过 IPC 收到通知 → 把所有 fileContents 标 stale + 重拉 list。</span>
+    <span class="lang-en">Renderer's invalidator listener receives the IPC notice → marks all fileContents entries stale + reloads the list.</span>
+  </div></div>
+  <div class="narrative-step is-shown"><div class="narrative-time">T5</div><div class="narrative-text">
+    <span class="lang-zh">applyLoadedDiffResult: nextKeys 含 D-key (M-key 被 prune) → matched 找到 (filename + changeType 都不变) → setSelectedFile(D-file) → React useEffect 触发。</span>
+    <span class="lang-en">applyLoadedDiffResult: nextKeys contains D-key (M-key pruned) → match found (same filename + changeType) → setSelectedFile(D-file) → React useEffect fires.</span>
+  </div></div>
+  <div class="narrative-step is-shown" style="background: #fef9c3; border-radius: 6px; padding: 10px 14px; margin-left: -14px; border-left: 3px solid #ca8a04;">
+    <div class="narrative-time" style="background: #ca8a04; color: white;">T6</div>
+    <div class="narrative-text">
+      <span class="lang-zh"><strong>关键步骤</strong>：useEffect 自动调 ensureFileContent(D-file)。fileContents[D-key]=undefined → IPC → main 也是空 → worker 拉取 → 写回 main + 写回 fileContents[D-key]。<strong>这次 IPC 没调 tracker.start，所以"最近一次点击"测量没记录</strong>。屏幕上 D-file 的 diff 已经显示出来了，但你没主动点过。</span>
+      <span class="lang-en"><strong>Key step</strong>: useEffect auto-calls ensureFileContent(D-file). fileContents[D-key]=undefined → IPC → main also empty → worker fetches → writes back to main and to fileContents[D-key]. <strong>This IPC did NOT call tracker.start, so the "last click" measurement isn't recorded</strong>. The diff is already on-screen, but you never clicked.</span>
+    </div>
+  </div>
+  <div class="narrative-step is-shown"><div class="narrative-time">T7</div><div class="narrative-text">
+    <span class="lang-zh">你看到 D-file，<strong>"点击"了一下</strong>（自认为是第一次）。tracker.start → setSelectedFile(D-file 新 ref) → useEffect → ensureFileContent. cached=fileContents[D-key] 存在（T6 写的）→ <strong>短路</strong> → markIpcEnd('hit', source='renderer-memory')。<br>面板 pill: <code>渲染端状态: 已加载</code> · <code>主进程缓存: 未查询</code>.</span>
+    <span class="lang-en">You see D-file, <strong>"click"</strong> it (you believe it's the first click). tracker.start → setSelectedFile(D-file new ref) → useEffect → ensureFileContent. cached=fileContents[D-key] exists (written at T6) → <strong>short-circuits</strong> → markIpcEnd('hit', source='renderer-memory').<br>Pill: <code>Render: loaded</code> · <code>Main: not consulted</code>.</span>
+  </div></div>
+</div>
+
+<div class="callout" style="margin-top: 24px;">
+  <strong>
+    <span class="lang-zh">为什么这不是 bug:</span>
+    <span class="lang-en">Why this isn't a bug:</span>
+  </strong>
+  <span class="lang-zh">行为完全正确 — 真正发生 IPC 的是 T6（auto-select 的 useEffect），那一次确实是 main miss + worker rebuild。等到 T7 你"第一次手动点击"时，状态已经填好，看到 <code>渲染端状态: 已加载</code> 是诚实的。新面板把这事讲明白了：渲染端被填了，但主进程这次没被问。</span>
+  <span class="lang-en">The behavior is correct — the actual IPC happened at T6 (auto-select's useEffect), which was a real main miss + worker rebuild. By the time T7 ("your first click") arrives, state already has it; <code>Render: loaded</code> is the honest answer. The new panel says exactly that: renderer was filled, but main wasn't asked this time.</span>
+</div>
+
+<!-- ====================================================================== -->
+<!-- CONCLUSION                                                             -->
+<!-- ====================================================================== -->
+<h2>
+  <span class="lang-zh">五、一句话总结</span>
+  <span class="lang-en">5. One-Sentence Summary</span>
+</h2>
+
+<div class="callout">
+  <span class="lang-zh"><strong>主进程缓存</strong>是真正的缓存，<strong>渲染端状态</strong>不是。把这两层用不同的名字、不同的 pill 分开报告 — 整个面板、用户的心智模型、以及你写代码时的边界 — 立刻清楚。</span>
+  <span class="lang-en"><strong>Main-process cache</strong> is the real cache; <strong>renderer state</strong> isn't. Naming them differently and reporting them as two distinct pills clarifies the panel, the user's mental model, and the boundaries you reason about when writing code — all at once.</span>
+</div>
+
+</div><!-- /.container -->
+
+<!-- ====================================================================== -->
+<!-- JS                                                                     -->
+<!-- ====================================================================== -->
+<script>
+  // ---------- Language toggle ----------
+  function applyLang(lang) {
+    document.documentElement.setAttribute('data-lang', lang)
+    document.documentElement.setAttribute('lang', lang === 'zh' ? 'zh-CN' : 'en')
+    document.querySelectorAll('.lang-toggle button').forEach(btn => {
+      btn.classList.toggle('is-active', btn.dataset.langSet === lang)
+    })
+    try { localStorage.setItem('cacheArchLang', lang) } catch (_) {}
+  }
+  document.querySelectorAll('.lang-toggle button').forEach(btn => {
+    btn.addEventListener('click', () => applyLang(btn.dataset.langSet))
+  })
+  try {
+    const stored = localStorage.getItem('cacheArchLang')
+    if (stored === 'en' || stored === 'zh') applyLang(stored)
+  } catch (_) {}
+
+  // ---------- Animation engine ----------
+  const els = {
+    user:        document.getElementById('user-action'),
+    arrowUserR:  document.getElementById('arrow-user-r'),
+    layerR:      document.getElementById('layer-renderer'),
+    layerM:      document.getElementById('layer-main'),
+    layerW:      document.getElementById('layer-worker'),
+    arrowRM:     document.getElementById('arrow-r-m'),
+    arrowMR:     document.getElementById('arrow-m-r'),
+    arrowMW:     document.getElementById('arrow-m-w'),
+    arrowWM:     document.getElementById('arrow-w-m'),
+    pillR:       document.getElementById('pill-render'),
+    pillRValue:  document.getElementById('pill-render-value'),
+    pillM:       document.getElementById('pill-main'),
+    pillMValue:  document.getElementById('pill-main-value'),
+    pillW:       document.getElementById('pill-worker'),
+    pillWValue:  document.getElementById('pill-worker-value'),
+    narrative:   document.getElementById('narrative')
+  }
+
+  // Bilingual pill values; CSS lang gating selects the right span at render.
+  function pillValueHTML(zh, en) {
+    return `<span class="lang-zh">${zh}</span><span class="lang-en">${en}</span>`
+  }
+
+  function reset() {
+    document.querySelectorAll('.is-active, .is-completed, .is-up, .is-running').forEach(n => {
+      n.classList.remove('is-active', 'is-completed', 'is-up', 'is-running')
+    })
+    els.pillR.className = 'layer-pill state-idle'
+    els.pillM.className = 'layer-pill state-idle'
+    els.pillW.className = 'layer-pill state-idle'
+    els.pillRValue.innerHTML = '—'
+    els.pillMValue.innerHTML = '—'
+    els.pillWValue.innerHTML = '—'
+    els.narrative.innerHTML = `
+      <div class="narrative-step is-shown">
+        <div class="narrative-text" style="color: #64748b;">
+          <span class="lang-zh">点上面三个场景按钮之一开始演示。</span>
+          <span class="lang-en">Click any scenario above to start.</span>
+        </div>
+      </div>`
+  }
+
+  function pulseLayer(layer) {
+    layer.classList.add('is-active')
+  }
+  function settleLayer(layer) {
+    // Keep highlighted to indicate the click visited this tier.
+  }
+
+  function flowArrow(arrow, isUp) {
+    arrow.classList.remove('is-completed')
+    arrow.classList.add('is-active')
+    if (isUp) arrow.classList.add('is-up')
+  }
+  function arrowDone(arrow) {
+    arrow.classList.remove('is-active', 'is-up')
+    arrow.classList.add('is-completed')
+  }
+
+  function setPill(pill, valueEl, klass, zh, en) {
+    pill.className = `layer-pill ${klass}`
+    valueEl.innerHTML = pillValueHTML(zh, en)
+  }
+
+  function pushNarrative(time, zh, en, highlight) {
+    const div = document.createElement('div')
+    div.className = 'narrative-step' + (highlight ? ' narrative-highlight' : '')
+    if (highlight) {
+      div.style.background = '#fef9c3'
+      div.style.borderRadius = '6px'
+      div.style.padding = '8px 12px'
+      div.style.borderLeft = '3px solid #ca8a04'
+      div.style.marginLeft = '-12px'
+    }
+    div.innerHTML = `
+      <div class="narrative-time">${time}</div>
+      <div class="narrative-text">
+        <span class="lang-zh">${zh}</span>
+        <span class="lang-en">${en}</span>
+      </div>`
+    els.narrative.appendChild(div)
+    requestAnimationFrame(() => requestAnimationFrame(() => div.classList.add('is-shown')))
+  }
+
+  function clearNarrative() {
+    els.narrative.innerHTML = ''
+  }
+
+  // Each scenario is a sequence of (delay, action) pairs.
+  const scenarios = {
+    'render-hit': [
+      [0,    () => { clearNarrative(); els.user.classList.add('is-active'); pushNarrative('t0', '用户点击文件 — handleFileSelect → tracker.start', 'User clicks — handleFileSelect → tracker.start') }],
+      [200,  () => { flowArrow(els.arrowUserR, false) }],
+      [500,  () => { arrowDone(els.arrowUserR); pulseLayer(els.layerR); pushNarrative('t1', '渲染端检查 fileContents[fileKey]', 'Renderer checks fileContents[fileKey]') }],
+      [900,  () => { setPill(els.pillR, els.pillRValue, 'state-loaded', '已加载', 'loaded'); pushNarrative('t2', '✓ 命中 React state — 直接返回，<strong>不发 IPC</strong>', '✓ Hit React state — return immediately, <strong>no IPC</strong>', true) }],
+      [1300, () => { setPill(els.pillM, els.pillMValue, 'state-not-consulted', '未查询', 'not consulted'); setPill(els.pillW, els.pillWValue, 'state-untouched', '未触达', 'untouched'); pushNarrative('t3', '主进程缓存 + Worker：本次点击根本没被问到', 'Main cache and Worker: never asked this time') }]
+    ],
+
+    'main-hit': [
+      [0,    () => { clearNarrative(); els.user.classList.add('is-active'); pushNarrative('t0', '用户点击文件', 'User clicks the file') }],
+      [200,  () => { flowArrow(els.arrowUserR, false) }],
+      [500,  () => { arrowDone(els.arrowUserR); pulseLayer(els.layerR); pushNarrative('t1', '渲染端检查 fileContents[fileKey]', 'Renderer checks fileContents[fileKey]') }],
+      [900,  () => { setPill(els.pillR, els.pillRValue, 'state-unloaded', '未加载', 'unloaded'); pushNarrative('t2', '✗ 渲染端没有这个 entry — 发 IPC', '✗ Renderer has no entry — fire IPC') }],
+      [1300, () => { flowArrow(els.arrowRM, false) }],
+      [1700, () => { arrowDone(els.arrowRM); pulseLayer(els.layerM); pushNarrative('t3', '主进程 fetchFileContentWithCache → cache.get(project, key)', 'Main: fetchFileContentWithCache → cache.get(project, key)') }],
+      [2100, () => { setPill(els.pillM, els.pillMValue, 'state-hit', '命中', 'hit'); pushNarrative('t4', '✓ 主进程缓存命中（可能是 scheduler 预热的 / 跨窗口的 / 之前的点击留下的）', '✓ Main cache hit (precompute / cross-window / earlier click)', true) }],
+      [2500, () => { flowArrow(els.arrowMR, true) }],
+      [2900, () => { arrowDone(els.arrowMR); pulseLayer(els.layerR); setPill(els.pillR, els.pillRValue, 'state-loaded', '已加载（写回）', 'loaded (back-filled)'); pushNarrative('t5', '数据回到渲染端，setFileContents 把它存进 React state；下次点击直接短路。', 'Data flows back, setFileContents stores it; next click short-circuits.') }],
+      [3300, () => { setPill(els.pillW, els.pillWValue, 'state-untouched', '未触达', 'untouched'); pushNarrative('t6', 'Worker 没被叫到。git 进程没被 spawn。', 'Worker untouched. No git process spawned.') }]
+    ],
+
+    'main-miss': [
+      [0,    () => { clearNarrative(); els.user.classList.add('is-active'); pushNarrative('t0', '用户点击文件', 'User clicks the file') }],
+      [200,  () => { flowArrow(els.arrowUserR, false) }],
+      [500,  () => { arrowDone(els.arrowUserR); pulseLayer(els.layerR); pushNarrative('t1', '渲染端检查 fileContents[fileKey]', 'Renderer checks fileContents[fileKey]') }],
+      [900,  () => { setPill(els.pillR, els.pillRValue, 'state-unloaded', '未加载', 'unloaded'); pushNarrative('t2', '✗ 渲染端没有 — 发 IPC', '✗ Renderer empty — fire IPC') }],
+      [1300, () => { flowArrow(els.arrowRM, false) }],
+      [1700, () => { arrowDone(els.arrowRM); pulseLayer(els.layerM); pushNarrative('t3', '主进程查 cache.get', 'Main: cache.get') }],
+      [2100, () => { setPill(els.pillM, els.pillMValue, 'state-miss', '未命中', 'miss'); pushNarrative('t4', '✗ 主进程缓存也是空的 — 调 worker', '✗ Main cache empty too — invoke worker') }],
+      [2500, () => { flowArrow(els.arrowMW, false) }],
+      [2900, () => { arrowDone(els.arrowMW); pulseLayer(els.layerW); pushNarrative('t5', 'Worker spawn git，从磁盘读 HEAD / index / worktree，组合成 diff 结果', 'Worker spawns git, reads HEAD / index / worktree, assembles the diff') }],
+      [3300, () => { setPill(els.pillW, els.pillWValue, 'state-rebuilt', '重建完成', 'rebuilt'); pushNarrative('t6', '✓ Worker 拿到结果，沿原路返回', '✓ Worker has result, sends back up', true) }],
+      [3700, () => { flowArrow(els.arrowWM, true) }],
+      [4100, () => { arrowDone(els.arrowWM); pulseLayer(els.layerM); setPill(els.pillM, els.pillMValue, 'state-hit', '已写回', 'just stored'); pushNarrative('t7', '主进程 cache.put — 下一次同 key 的请求就是命中了', 'Main cache.put — next request for this key will hit') }],
+      [4500, () => { flowArrow(els.arrowMR, true) }],
+      [4900, () => { arrowDone(els.arrowMR); pulseLayer(els.layerR); setPill(els.pillR, els.pillRValue, 'state-loaded', '已写回', 'just stored'); pushNarrative('t8', '数据到渲染端，setFileContents 写入；后续 re-click 直接短路。', 'Data reaches renderer, setFileContents stores it; subsequent re-clicks short-circuit.') }]
+    ]
+  }
+
+  let runningTimers = []
+  function clearAllTimers() {
+    runningTimers.forEach(id => clearTimeout(id))
+    runningTimers = []
+  }
+
+  function play(scenarioName) {
+    if (scenarioName === 'reset') { clearAllTimers(); reset(); return }
+    clearAllTimers(); reset()
+    const steps = scenarios[scenarioName]
+    if (!steps) return
+    document.querySelectorAll('.scenario-buttons button').forEach(b => b.classList.remove('is-running'))
+    document.querySelector(`[data-scenario="${scenarioName}"]`).classList.add('is-running')
+    steps.forEach(([delay, action]) => {
+      runningTimers.push(setTimeout(action, delay))
+    })
+    // Clear running highlight after sequence completes.
+    const lastDelay = steps[steps.length - 1][0]
+    runningTimers.push(setTimeout(() => {
+      document.querySelector(`[data-scenario="${scenarioName}"]`)?.classList.remove('is-running')
+    }, lastDelay + 800))
+  }
+
+  document.querySelectorAll('[data-scenario]').forEach(btn => {
+    btn.addEventListener('click', () => play(btn.dataset.scenario))
+  })
+</script>
+
+</body>
+</html>

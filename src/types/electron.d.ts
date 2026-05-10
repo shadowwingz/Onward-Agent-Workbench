@@ -378,7 +378,7 @@ export type GitDiffContentCacheSource =
   | 'worker-rebuild'
 
 export interface GitDiffContentCacheInfo {
-  state: 'hit' | 'miss' | 'unknown'
+  state: 'hit' | 'miss'
   source: GitDiffContentCacheSource
   missReason?: GitDiffContentCacheMissReason
   project?: string
@@ -889,6 +889,19 @@ export interface GitDiffDebugStats {
     totalSkipped: number
     pendingProjects: string[]
     inFlightProjects: string[]
+    perProject: Record<string, {
+      pendingSince: number | null
+      inFlightSince: number | null
+      lastBurst: {
+        finishedAt: number
+        durationMs: number
+        workingSetSize: number
+        eligibleCount: number
+        candidateCount: number
+        completed: number
+        skipped: number
+      } | null
+    }>
   }
   listCache: {
     entries: number

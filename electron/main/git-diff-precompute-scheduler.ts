@@ -30,6 +30,13 @@ export interface DiffFile {
   deletions: number
   changeType: string
   status: string
+  /**
+   * Set for renames (status === 'R') and copies (status === 'C'); empty
+   * otherwise. Must be propagated through the scheduler so the prewarmed
+   * cache key matches the renderer-click cache key — the click path always
+   * carries the original filename it received from `getDiff`.
+   */
+  originalFilename?: string
   isSubmoduleEntry?: boolean
   /** Full path of the repo this file belongs to. May differ from `project`
    * when a parent diff includes submodule files. */
@@ -71,6 +78,32 @@ const DEFAULT_CONCURRENCY = 3
 const DEFAULT_DEBOUNCE_MS = 200
 const DEFAULT_MAX_CANDIDATES = 50
 
+export interface PrecomputeBurstSummary {
+  /** ms epoch when this burst finished. */
+  finishedAt: number
+  /** Wall-clock cost of the burst, including loadWorkingSet + all fetches. */
+  durationMs: number
+  /** Total files in the project's changed-file list at burst time. */
+  workingSetSize: number
+  /** How many of those passed `isEligible` (text, present, non-submodule). */
+  eligibleCount: number
+  /** min(eligibleCount, maxCandidatesPerBurst) — what actually fed into fetch. */
+  candidateCount: number
+  /** fetchFile resolved successfully for this many files. */
+  completed: number
+  /** fetchFile threw (or generation aborted) for this many. */
+  skipped: number
+}
+
+export interface PrecomputeProjectMeta {
+  /** ms epoch the active debounce window started for this project; null if no pending burst. */
+  pendingSince: number | null
+  /** ms epoch the active burst started; null if no in-flight burst. */
+  inFlightSince: number | null
+  /** Most recent COMPLETED burst summary; null if the project has never had one. */
+  lastBurst: PrecomputeBurstSummary | null
+}
+
 export interface PrecomputeStats {
   totalBursts: number
   totalCancelled: number
@@ -78,21 +111,22 @@ export interface PrecomputeStats {
   totalSkipped: number
   pendingProjects: string[]
   inFlightProjects: string[]
+  /** Per-project debug detail keyed by project root. Only "live" projects appear. */
+  perProject: Record<string, PrecomputeProjectMeta>
 }
 
 export class GitDiffPrecomputeScheduler {
   private readonly pending = new Map<string, PendingProject>()
   private readonly inFlight = new Map<string, number>()
+  private readonly perProjectMeta = new Map<string, PrecomputeProjectMeta>()
   private readonly options: Required<Omit<PrecomputeSchedulerOptions, 'isEligible' | 'timer'>>
     & Pick<PrecomputeSchedulerOptions, 'isEligible' | 'timer'>
   private readonly timer: NonNullable<PrecomputeSchedulerOptions['timer']>
-  private readonly stats: PrecomputeStats = {
+  private readonly stats: Omit<PrecomputeStats, 'pendingProjects' | 'inFlightProjects' | 'perProject'> = {
     totalBursts: 0,
     totalCancelled: 0,
     totalCompleted: 0,
-    totalSkipped: 0,
-    pendingProjects: [],
-    inFlightProjects: []
+    totalSkipped: 0
   }
 
   constructor(options: PrecomputeSchedulerOptions) {
@@ -120,6 +154,11 @@ export class GitDiffPrecomputeScheduler {
     const existing = this.pending.get(project)
     if (existing) this.timer.clearTimeout(existing.debounceHandle)
 
+    const meta = this.ensureMeta(project)
+    if (meta.pendingSince === null) {
+      meta.pendingSince = Date.now()
+    }
+
     const generation = (existing?.generation ?? 0) + 1
     const handle = this.timer.setTimeout(() => {
       this.pending.delete(project)
@@ -146,16 +185,41 @@ export class GitDiffPrecomputeScheduler {
       this.inFlight.set(project, inFlight + 1) // bump generation; runBurst checks this
       cancelled = true
     }
-    if (cancelled) this.stats.totalCancelled += 1
+    if (cancelled) {
+      this.stats.totalCancelled += 1
+      const meta = this.perProjectMeta.get(project)
+      if (meta) {
+        meta.pendingSince = null
+        meta.inFlightSince = null
+      }
+    }
     return cancelled
   }
 
   inspectStats(): PrecomputeStats {
+    const perProject: Record<string, PrecomputeProjectMeta> = {}
+    for (const [project, meta] of this.perProjectMeta) {
+      perProject[project] = {
+        pendingSince: meta.pendingSince,
+        inFlightSince: meta.inFlightSince,
+        lastBurst: meta.lastBurst
+      }
+    }
     return {
       ...this.stats,
       pendingProjects: [...this.pending.keys()],
-      inFlightProjects: [...this.inFlight.keys()]
+      inFlightProjects: [...this.inFlight.keys()],
+      perProject
     }
+  }
+
+  private ensureMeta(project: string): PrecomputeProjectMeta {
+    let meta = this.perProjectMeta.get(project)
+    if (!meta) {
+      meta = { pendingSince: null, inFlightSince: null, lastBurst: null }
+      this.perProjectMeta.set(project, meta)
+    }
+    return meta
   }
 
   // --- private ---
@@ -163,14 +227,27 @@ export class GitDiffPrecomputeScheduler {
   private async runBurst(project: string, generation: number): Promise<void> {
     this.stats.totalBursts += 1
     this.inFlight.set(project, generation)
+    const startedAt = Date.now()
+    const meta = this.ensureMeta(project)
+    meta.pendingSince = null
+    meta.inFlightSince = startedAt
+    let workingSetSize = 0
+    let eligibleCount = 0
+    let candidateCount = 0
+    let burstCompleted = 0
+    let burstSkipped = 0
     try {
       const workingSet = await this.options.loadWorkingSet(project)
+      workingSetSize = workingSet.length
       if (!this.isCurrent(project, generation)) return
 
-      const candidates = workingSet
+      const eligible = workingSet
         .filter((file) => (this.options.isEligible ? this.options.isEligible(file) : true))
+      eligibleCount = eligible.length
+      const candidates = eligible
         .sort((a, b) => (b.additions + b.deletions) - (a.additions + a.deletions))
         .slice(0, this.options.maxCandidatesPerBurst)
+      candidateCount = candidates.length
 
       // Bounded-concurrency worker loop. Plain index pointer so we don't
       // need to allocate Promises per slot when concurrency is small.
@@ -181,8 +258,10 @@ export class GitDiffPrecomputeScheduler {
           const file = candidates[cursor++]
           try {
             await this.options.fetchFile(project, file)
+            burstCompleted += 1
             this.stats.totalCompleted += 1
           } catch {
+            burstSkipped += 1
             this.stats.totalSkipped += 1
           }
         }
@@ -195,6 +274,17 @@ export class GitDiffPrecomputeScheduler {
       // Only clear in-flight marker if no newer generation has taken over.
       if (this.inFlight.get(project) === generation) {
         this.inFlight.delete(project)
+      }
+      meta.inFlightSince = null
+      const finishedAt = Date.now()
+      meta.lastBurst = {
+        finishedAt,
+        durationMs: Math.max(0, finishedAt - startedAt),
+        workingSetSize,
+        eligibleCount,
+        candidateCount,
+        completed: burstCompleted,
+        skipped: burstSkipped
       }
     }
   }

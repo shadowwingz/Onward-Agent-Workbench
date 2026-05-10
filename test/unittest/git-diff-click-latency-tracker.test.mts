@@ -84,7 +84,10 @@ test('happy path records every phase and emits a final paintReadyAt', () => {
     assert.equal(last.totalMs, 133)
     assert.equal(last.settleReason, 'test')
     assert.equal(last.cancelled, false)
-    assert.equal(events.length, 1)
+    // Listeners fire twice: once at markIpcEnd (so the panel pill can
+    // render before tokenize-settle) and once at the full seal (so totalMs
+    // and the history entry are exposed).
+    assert.equal(events.length, 2)
   })
 })
 
@@ -101,6 +104,28 @@ test('markIpcEnd records cache source and miss reason', () => {
   assert.equal(active.cacheState, 'miss')
   assert.equal(active.cacheSource, 'worker-rebuild')
   assert.equal(active.cacheMissReason, 'invalidated-refresh')
+})
+
+test('markIpcEnd fires listeners so the panel pill can render before tokenize-settle', () => {
+  // The diagnostics-panel pill must not wait until markTokenizeSettled.
+  // Listeners must fire as soon as cacheState / cacheSource are recorded.
+  const { tracker } = makeTracker()
+  const events: { fileKey: string; cacheState: string; ipcEndAt: number | null; tokenizeSettleAt: number | null }[] = []
+  tracker.addListener((m) => events.push({
+    fileKey: m.fileKey,
+    cacheState: m.cacheState,
+    ipcEndAt: m.ipcEndAt,
+    tokenizeSettleAt: m.tokenizeSettleAt
+  }))
+  tracker.start('k', 'a.ts')
+  tracker.markIpcStart('k')
+  tracker.markIpcEnd('k', 'hit', { source: 'main-content-cache' })
+  // Panel must already have the data — no need to wait for tokenize-settle.
+  assert.equal(events.length, 1)
+  assert.equal(events[0].fileKey, 'k')
+  assert.equal(events[0].cacheState, 'hit')
+  assert.ok(events[0].ipcEndAt !== null, 'ipcEndAt must be set in the notification')
+  assert.equal(events[0].tokenizeSettleAt, null, 'measurement is not yet sealed at this point')
 })
 
 test('switching files mid-flight cancels the previous measurement', () => {
@@ -165,6 +190,92 @@ test('phase markers for stale files are silently ignored', () => {
     assert.equal(active.paintReadyAt, null)
     assert.equal(active.tokenizeSettleAt, null)
   })
+})
+
+test('start watchdog seals a stuck measurement so aggregator stats stay honest', async () => {
+  // Reproduces the empty-untracked-file failure mode: tracker.start fires,
+  // markIpcEnd lands with valid cacheState/cacheSource, but Monaco never
+  // fires onDidUpdateDiff (new model content matches the placeholder), so
+  // markTokenizeSettled is never called. Without the watchdog, the click
+  // would never enter history, biasing the aggregator's hit-rate.
+  // (The panel pill itself doesn't depend on this — it updates at
+  // markIpcEnd via the live listener.)
+  const { tracker } = makeTracker()
+  const events: { fileKey: string; cancelled: boolean; settleReason: string | null; ipcEndAt: number | null }[] = []
+  tracker.addListener((m) => events.push({
+    fileKey: m.fileKey,
+    cancelled: m.cancelled,
+    settleReason: m.settleReason,
+    ipcEndAt: m.ipcEndAt
+  }))
+  tracker.start('empty-untracked', 'newfile.txt')
+  tracker.markIpcStart('empty-untracked')
+  tracker.markIpcEnd('empty-untracked', 'miss', {
+    source: 'worker-rebuild',
+    missReason: 'first-load'
+  })
+  // First listener fire: at markIpcEnd, panel-pill data ready.
+  assert.equal(events.length, 1)
+  assert.equal(events[0].cancelled, false)
+  assert.ok(events[0].ipcEndAt !== null)
+
+  // No further marks happen — Monaco silent.
+  await new Promise(resolve => setTimeout(resolve, 5100))
+
+  // Second listener fire: watchdog seals into history.
+  assert.equal(events.length, 2, 'watchdog adds one more event after timeout')
+  assert.equal(events[1].cancelled, true)
+  assert.equal(events[1].settleReason, 'start-timeout')
+
+  const last = tracker.getLast()
+  assert.ok(last)
+  assert.equal(last.fileKey, 'empty-untracked')
+  // Crucially: the cache outcome that markIpcEnd recorded is preserved,
+  // so the panel pills can render real data even though the click was
+  // sealed by watchdog.
+  assert.equal(last.cacheState, 'miss')
+  assert.equal(last.cacheSource, 'worker-rebuild')
+  assert.equal(last.cacheMissReason, 'first-load')
+})
+
+test('start watchdog is cleared when markTokenizeSettled fires normally', async () => {
+  // Confirms the watchdog doesn't fire when a measurement seals normally.
+  const { tracker } = makeTracker()
+  withFakeRaf(() => {
+    tracker.start('normal', 'a.ts')
+    tracker.markIpcStart('normal')
+    tracker.markIpcEnd('normal', 'hit')
+    tracker.markStateSet('normal')
+    tracker.markModelBound('normal')
+    tracker.markEditorReady('normal')
+    tracker.markDiffComputed('normal')
+    tracker.markTokenizeSettled('normal', 'test')
+  })
+  // Watchdog window passes — no extra measurement should appear.
+  const beforeCount = tracker.getHistory().length
+  await new Promise(resolve => setTimeout(resolve, 5100))
+  assert.equal(tracker.getHistory().length, beforeCount, 'watchdog must NOT fire after a normal seal')
+})
+
+test('start watchdog is replaced when a new click starts', async () => {
+  // If user clicks A then quickly clicks B, A's watchdog should be replaced
+  // by B's. Otherwise A's stale watchdog could later seal B by mistake.
+  const { tracker } = makeTracker()
+  tracker.start('a', 'a.ts')
+  // Replace before A's watchdog fires.
+  tracker.start('b', 'b.ts')
+  // Both A's start and the cancellation pushed A to history with cancelled=true.
+  // B is now active. Wait for ONE watchdog's worth of time and verify only
+  // B's watchdog fires (not stacked with A's).
+  await new Promise(resolve => setTimeout(resolve, 5100))
+  const history = tracker.getHistory()
+  // A from the explicit cancel-on-switch (no settleReason since it was the
+  // synchronous cancel path), B from the watchdog.
+  const aEntries = history.filter(m => m.fileKey === 'a')
+  const bEntries = history.filter(m => m.fileKey === 'b')
+  assert.equal(aEntries.length, 1, 'A should appear exactly once (from the cancel-on-switch)')
+  assert.equal(bEntries.length, 1, 'B should appear exactly once (from the watchdog)')
+  assert.equal(bEntries[0].settleReason, 'start-timeout')
 })
 
 test('history is bounded so long sessions do not leak memory', () => {

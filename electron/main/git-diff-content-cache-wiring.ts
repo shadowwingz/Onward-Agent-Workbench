@@ -24,19 +24,29 @@
 
 import type {
   GitDiffContentCacheMissReason,
-  GitFileContentRequestOptions,
   GitFileContentResult,
   GitFileStatus
 } from './git-utils'
 import { getGitDiffRequestCacheStats } from './git-utils'
+import type { GitDiffRequestCacheStats } from './git-diff-request-cache'
 import { GitDiffContentCache } from './git-diff-content-cache'
 import { GitDiffPrecomputeScheduler, type DiffFile } from './git-diff-precompute-scheduler'
+import {
+  buildCacheKey,
+  createFetchFileContentWithCache,
+  type ContentCacheFile,
+  type FetchFileContentArgs,
+  type FetchFileContentDeps
+} from './git-diff-content-cache-state'
 import { gitIpcWorkerClient } from './git-ipc-worker-client'
 import { gitDiffCacheInvalidator } from './git-diff-cache-invalidator'
 import { perfTraceLogger } from './perf-trace-logger'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 
-type ContentCacheFile = Pick<GitFileStatus, 'filename' | 'status' | 'originalFilename' | 'changeType' | 'isSubmoduleEntry'>
+// Re-export so existing callers (and tests) can import these names from the
+// wiring module too. The single source of truth is `git-diff-content-cache-state`.
+export { buildCacheKey, createFetchFileContentWithCache } from './git-diff-content-cache-state'
+export type { ContentCacheFile, FetchFileContentArgs, FetchFileContentDeps } from './git-diff-content-cache-state'
 
 const PREFETCH_SKIP_EXTENSIONS = new Set<string>([
   'png', 'jpg', 'jpeg', 'gif', 'webp', 'ico', 'bmp', 'tiff',
@@ -105,13 +115,6 @@ export const gitDiffContentCache = new GitDiffContentCache<GitFileContentResult>
   singleFileByteLimit: 10 * 1024 * 1024
 })
 
-function buildCacheKey(file: ContentCacheFile): string {
-  // changeType + status disambiguate the same path's working-tree-vs-index
-  // vs index-vs-HEAD vs untracked variants. originalFilename is part of the
-  // key for renames so a rename's two ends do not collide.
-  return `${file.changeType}::${file.status}::${file.originalFilename ?? ''}::${file.filename}`
-}
-
 function estimateBytes(result: GitFileContentResult): number {
   // Sum the dominant string fields. UTF-16 byte underestimates non-ASCII
   // content but stays close enough for budget bookkeeping. Image data-URLs
@@ -124,46 +127,49 @@ function estimateBytes(result: GitFileContentResult): number {
   return total
 }
 
-export interface FetchFileContentArgs {
-  cwd: string
-  file: ContentCacheFile
-  repoRoot?: string
-  options?: GitFileContentRequestOptions
-}
-
-function withCacheInfo(
-  result: GitFileContentResult,
-  cacheInfo: NonNullable<GitFileContentResult['cacheInfo']>
-): GitFileContentResult {
+function buildDefaultDeps(): FetchFileContentDeps<GitFileContentResult> {
   return {
-    ...result,
-    cacheInfo
+    cache: gitDiffContentCache,
+    // The state module's ContentCacheFile has loose `status: string` so the
+    // generic factory stays free of git-utils types. The IPC client's signature
+    // pins status to `GitStatusCode`; we cast at this single boundary because
+    // the runtime values are GitStatusCode-shaped (they originate from getDiff).
+    fetchFromWorker: (cwd, file, repoRoot) => gitIpcWorkerClient.getFileContent(
+      cwd,
+      file as Pick<GitFileStatus, 'filename' | 'status' | 'originalFilename' | 'changeType' | 'isSubmoduleEntry'>,
+      repoRoot
+    ),
+    schedulerPendingProjects: () => gitDiffPrecomputeScheduler.inspectStats().pendingProjects,
+    schedulerInFlightProjects: () => gitDiffPrecomputeScheduler.inspectStats().inFlightProjects,
+    recentMissReason: getRecentProjectMissReason,
+    rememberMissReason: rememberProjectMissReason,
+    estimateBytes,
+    recordHit: ({ project, filename, changeType }) => {
+      perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_GIT_DIFF_CONTENT_CACHE_HIT, {
+        project,
+        filename,
+        changeType,
+        source: 'main-content-cache'
+      })
+    },
+    recordMiss: ({ project, filename, changeType, reason, force }) => {
+      perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_GIT_DIFF_CONTENT_CACHE_MISS, {
+        project,
+        filename,
+        changeType,
+        reason,
+        force
+      })
+    },
+    recordSkipTooLarge: ({ project, filename, bytes }) => {
+      perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_GIT_DIFF_PRECOMPUTE_SKIP_TOO_LARGE, {
+        project,
+        filename,
+        bytes,
+        reason: 'single-file-cap'
+      })
+    }
   }
-}
-
-function withoutCacheInfo(result: GitFileContentResult): GitFileContentResult {
-  const rest = { ...result }
-  delete rest.cacheInfo
-  return rest
-}
-
-function resolveMissReason(
-  project: string,
-  hadProjectBeforeLookup: boolean,
-  explicitReason?: GitDiffContentCacheMissReason
-): GitDiffContentCacheMissReason {
-  if (explicitReason) return explicitReason
-  const recentReason = getRecentProjectMissReason(project)
-  if (recentReason) return recentReason
-  if (gitDiffContentCache.consumeRecentProjectQueueEviction(project)) return 'project-queue-evicted'
-  const schedulerStats = gitDiffPrecomputeScheduler.inspectStats()
-  if (
-    schedulerStats.pendingProjects.includes(project) ||
-    schedulerStats.inFlightProjects.includes(project)
-  ) {
-    return 'precompute-pending'
-  }
-  return hadProjectBeforeLookup ? 'entry-not-warmed' : 'first-load'
 }
 
 /**
@@ -172,63 +178,7 @@ function resolveMissReason(
  * scheduler. Submodule entries get their own bucket via `repoRoot`; the
  * fallback is `cwd`.
  */
-export async function fetchFileContentWithCache(args: FetchFileContentArgs): Promise<GitFileContentResult> {
-  const project = args.repoRoot ?? args.cwd
-  const key = buildCacheKey(args.file)
-  const force = Boolean(args.options?.force)
-  const hadProjectBeforeLookup = gitDiffContentCache.hasProject(project)
-
-  const cached = force ? null : gitDiffContentCache.get(project, key)
-  if (cached) {
-    perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_GIT_DIFF_CONTENT_CACHE_HIT, {
-      project,
-      filename: args.file.filename,
-      changeType: args.file.changeType,
-      source: 'main-content-cache'
-    })
-    return withCacheInfo(cached, {
-      state: 'hit',
-      source: 'main-content-cache',
-      project,
-      key
-    })
-  }
-
-  const missReason = resolveMissReason(project, hadProjectBeforeLookup, args.options?.missReason)
-  perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_GIT_DIFF_CONTENT_CACHE_MISS, {
-    project,
-    filename: args.file.filename,
-    changeType: args.file.changeType,
-    reason: missReason,
-    force
-  })
-  const result = await gitIpcWorkerClient.getFileContent(args.cwd, args.file, args.repoRoot)
-  let stored = false
-  let bytes = 0
-  let finalMissReason: GitDiffContentCacheMissReason = result.success ? missReason : 'worker-error'
-  if (result.success) {
-    bytes = estimateBytes(result)
-    stored = gitDiffContentCache.put(project, key, withoutCacheInfo(result), bytes)
-    if (!stored && bytes > 0) {
-      finalMissReason = 'single-file-too-large'
-      perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_GIT_DIFF_PRECOMPUTE_SKIP_TOO_LARGE, {
-        project,
-        filename: args.file.filename,
-        bytes,
-        reason: 'single-file-cap'
-      })
-    }
-  }
-  return withCacheInfo(result, {
-    state: 'miss',
-    source: 'worker-rebuild',
-    missReason: finalMissReason,
-    project,
-    key,
-    stored,
-    bytes
-  })
-}
+export const fetchFileContentWithCache = createFetchFileContentWithCache(buildDefaultDeps())
 
 export const gitDiffPrecomputeScheduler = new GitDiffPrecomputeScheduler({
   // Click-latency autotest showed 1-2 files still cache-missed at click time
@@ -252,22 +202,38 @@ export const gitDiffPrecomputeScheduler = new GitDiffPrecomputeScheduler({
     // Force a fresh list — the invalidator just told us something changed.
     const result = await gitIpcWorkerClient.getDiff(project, { force: true })
     if (!result || !result.success) return []
-    return result.files
+    // Map every field the scheduler / fetch path reads. Crucially,
+    // `originalFilename` MUST be propagated for renames and copies — the
+    // renderer-click path passes the same value through, and if the
+    // scheduler-prewarm key omits it the two paths build different cache
+    // keys and prewarmed entries never hit on click.
+    return result.files.map<DiffFile>((file) => ({
+      filename: file.filename,
+      additions: file.additions,
+      deletions: file.deletions,
+      changeType: file.changeType,
+      status: file.status,
+      originalFilename: file.originalFilename,
+      isSubmoduleEntry: file.isSubmoduleEntry,
+      repoRoot: file.repoRoot
+    }))
   },
   fetchFile: async (project, file) => {
     // The scheduler hands us a `DiffFile` shape; we need the real
     // GitFileStatus subset for the cache key. The `repoRoot` argument lives
     // on the original list entry — propagate it when present so submodules
-    // route to their own bucket.
+    // route to their own bucket. originalFilename comes from `getDiff` for
+    // renames / copies; pass it through unchanged so the cache key matches
+    // what the renderer-driven click path will build.
     const repoRoot = file.repoRoot ?? project
     const cwd = repoRoot
-    const cacheFile = {
+    const cacheFile: ContentCacheFile = {
       filename: file.filename,
       status: file.status,
-      originalFilename: undefined,
+      originalFilename: file.originalFilename,
       changeType: file.changeType,
       isSubmoduleEntry: file.isSubmoduleEntry
-    } as ContentCacheFile
+    }
     await fetchFileContentWithCache({
       cwd,
       file: cacheFile,
@@ -326,11 +292,21 @@ export function invalidateContentCacheForProject(
   }
 }
 
-export function inspectContentCacheStats() {
+export async function inspectContentCacheStats() {
+  // List cache lives in the git-ipc worker (that is where getGitDiff runs),
+  // so we have to ask the worker for the real counters. If the worker is
+  // unavailable, fall back to the main-process controller stats — they are
+  // usually empty, but at least keep the panel rendering.
+  let listCache: GitDiffRequestCacheStats
+  try {
+    listCache = await gitIpcWorkerClient.inspectListCacheStats()
+  } catch {
+    listCache = getGitDiffRequestCacheStats()
+  }
   return {
     cache: gitDiffContentCache.inspectStats(),
     scheduler: gitDiffPrecomputeScheduler.inspectStats(),
-    listCache: getGitDiffRequestCacheStats(),
+    listCache,
     watcher: gitDiffCacheInvalidator.inspectHealth()
   }
 }

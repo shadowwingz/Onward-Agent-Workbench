@@ -108,7 +108,7 @@ const MIGRATION_THEME: ThemeSettings = {
 }
 
 // Current version number
-const CURRENT_VERSION = 6
+const CURRENT_VERSION = 7
 
 /** Settings panel default width */
 const DEFAULT_SETTINGS_PANEL_WIDTH = 400
@@ -276,7 +276,13 @@ class SettingsStorage {
     const telemetryInstanceId = typeof state.telemetryInstanceId === 'string' && state.telemetryInstanceId.length > 0
       ? state.telemetryInstanceId
       : null
-    const performanceDiagnosticsEnabled = state.performanceDiagnosticsEnabled === true
+    // v7: force-reset performanceDiagnosticsEnabled to false on upgrade so users
+    // who toggled it ON in earlier versions land on the documented default; the
+    // toggle is respected normally on subsequent loads.
+    const isLegacyPerfDiagState = typeof state.version === 'number' && state.version < 7
+    const performanceDiagnosticsEnabled = isLegacyPerfDiagState
+      ? false
+      : state.performanceDiagnosticsEnabled === true
 
     return {
       version: CURRENT_VERSION,

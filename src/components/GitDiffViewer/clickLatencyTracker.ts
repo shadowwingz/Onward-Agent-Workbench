@@ -43,12 +43,18 @@ export type ClickLatencySettleReason =
   | 'no-editor'
   | 'non-text'
   | 'test'
+  // Tracker's own watchdog: ensures stuck measurements (Monaco never fired
+  // because new content matched the placeholder, etc.) eventually land in
+  // history so the aggregator's hit-rate isn't biased by silent renders.
+  // The diagnostics-panel pill no longer waits for this — listeners fire
+  // at markIpcEnd so the pill displays instantly.
+  | 'start-timeout'
   | 'unknown'
 
 export interface ClickLatencyMeasurement {
   fileKey: string
   filename: string
-  cacheState: 'hit' | 'miss' | 'unknown'
+  cacheState: 'hit' | 'miss'
   cacheSource: GitDiffContentCacheSource | null
   cacheMissReason: GitDiffContentCacheMissReason | null
   /** All phase timestamps in ms, monotonic clock (performance.now). */
@@ -88,9 +94,50 @@ export class GitDiffClickLatencyTracker {
   private history: ClickLatencyMeasurement[] = []
   private listeners = new Set<(m: ClickLatencyMeasurement) => void>()
   private readonly now: () => number
+  /**
+   * Watchdog timer: every active measurement gets a hard upper bound. If
+   * markTokenizeSettled never fires (Monaco didn't see a model-content
+   * change because new and old contents matched — empty untracked file is
+   * the canonical trigger), this watchdog seals the measurement so the
+   * diagnostics panel still reflects this click.
+   *
+   * 5s is generous: real clicks settle in ~30-300ms; anything past 5s is
+   * a stuck render, not a slow one.
+   */
+  private startWatchdogTimerId: ReturnType<typeof setTimeout> | null = null
+  private static readonly START_WATCHDOG_MS = 5000
 
   constructor(now?: () => number) {
     this.now = now ?? (() => performance.now())
+  }
+
+  private clearStartWatchdog(): void {
+    if (this.startWatchdogTimerId !== null) {
+      clearTimeout(this.startWatchdogTimerId)
+      this.startWatchdogTimerId = null
+    }
+  }
+
+  private armStartWatchdog(fileKey: string): void {
+    this.clearStartWatchdog()
+    this.startWatchdogTimerId = setTimeout(() => {
+      this.startWatchdogTimerId = null
+      // Only fire if THIS measurement is still the active one. If a newer
+      // start() already replaced it, we have nothing to do.
+      if (!this.active || this.active.fileKey !== fileKey) return
+      this.active.cancelled = true
+      this.active.settleReason = 'start-timeout'
+      // Seal whatever progress was made. cacheState / cacheSource carry the
+      // values markIpcEnd recorded (typically valid) so the panel pills
+      // still display the actual cache outcome of this click.
+      const sealed = { ...this.active }
+      this.history.push(sealed)
+      this.trim()
+      for (const listener of this.listeners) {
+        try { listener(sealed) } catch { /* listener failures must not break tracking */ }
+      }
+      this.active = null
+    }, GitDiffClickLatencyTracker.START_WATCHDOG_MS)
   }
 
   start(fileKey: string, filename: string): void {
@@ -100,10 +147,14 @@ export class GitDiffClickLatencyTracker {
       this.history.push(this.active)
       this.trim()
     }
+    this.clearStartWatchdog()
     this.active = {
       fileKey,
       filename,
-      cacheState: 'unknown',
+      // Defensive default: assume cold (miss) until markIpcEnd reports back.
+      // If the measurement seals before markIpcEnd fires, the worst-case
+      // assumption is "we had to fetch", which keeps hit-rate honest.
+      cacheState: 'miss',
       cacheSource: null,
       cacheMissReason: null,
       clickAt: this.now(),
@@ -122,6 +173,7 @@ export class GitDiffClickLatencyTracker {
       coldMountMs: null,
       cancelled: false
     }
+    this.armStartWatchdog(fileKey)
   }
 
   markIpcStart(fileKey: string): void {
@@ -132,7 +184,7 @@ export class GitDiffClickLatencyTracker {
 
   markIpcEnd(
     fileKey: string,
-    cacheState: 'hit' | 'miss' | 'unknown' = 'unknown',
+    cacheState: 'hit' | 'miss' = 'miss',
     cacheInfo: ClickLatencyCacheInfo = {}
   ): void {
     if (this.active && this.active.fileKey === fileKey && this.active.ipcEndAt === null) {
@@ -140,6 +192,14 @@ export class GitDiffClickLatencyTracker {
       this.active.cacheState = cacheState
       this.active.cacheSource = cacheInfo.source ?? null
       this.active.cacheMissReason = cacheInfo.missReason ?? null
+      // The diagnostics panel's pill data is fully known at this point —
+      // cacheState and cacheSource have been set. Notify listeners so the
+      // panel re-renders immediately, rather than waiting for the full
+      // tokenize-settle seal (which can be 50-300ms later, or never for
+      // silent-Monaco renders). Total time still appears only on seal.
+      for (const listener of this.listeners) {
+        try { listener({ ...this.active }) } catch { /* listener errors must not break tracking */ }
+      }
     }
   }
 
@@ -201,6 +261,7 @@ export class GitDiffClickLatencyTracker {
   markTokenizeSettled(fileKey: string, reason: ClickLatencySettleReason = 'unknown'): void {
     if (!this.active || this.active.fileKey !== fileKey) return
     if (this.active.tokenizeSettleAt !== null) return
+    this.clearStartWatchdog()
     this.active.tokenizeSettleAt = this.now()
     this.active.settleReason = reason
     if (this.active.paintReadyAt === null) {
@@ -222,6 +283,7 @@ export class GitDiffClickLatencyTracker {
 
   cancelActive(): void {
     if (!this.active) return
+    this.clearStartWatchdog()
     this.active.cancelled = true
     this.history.push(this.active)
     this.trim()

@@ -307,37 +307,21 @@ export interface TerminalGitInfo {
 
 export type TerminalGitStatus = 'clean' | 'modified' | 'added' | 'unknown'
 
-export type GitDiffContentCacheMissReason =
-  | 'first-load'
-  | 'invalidated-mutation'
-  | 'invalidated-watch'
-  | 'invalidated-mirror'
-  | 'invalidated-refresh'
-  | 'renderer-force-refresh'
-  | 'project-queue-evicted'
-  | 'single-file-too-large'
-  | 'precompute-pending'
-  | 'entry-not-warmed'
-  | 'worker-error'
+// Cache-state vocabulary lives in a leaf module (no electron / IPC deps) so
+// the cache classification chain stays unit-testable. We import the types
+// for local use AND re-export them so existing call sites keep working.
+import type {
+  GitDiffContentCacheMissReason,
+  GitDiffContentCacheSource,
+  GitDiffContentCacheInfo,
+  GitFileContentRequestOptions
+} from './git-diff-content-cache-state'
 
-export type GitDiffContentCacheSource =
-  | 'renderer-memory'
-  | 'main-content-cache'
-  | 'worker-rebuild'
-
-export interface GitDiffContentCacheInfo {
-  state: 'hit' | 'miss' | 'unknown'
-  source: GitDiffContentCacheSource
-  missReason?: GitDiffContentCacheMissReason
-  project?: string
-  key?: string
-  stored?: boolean
-  bytes?: number
-}
-
-export interface GitFileContentRequestOptions {
-  force?: boolean
-  missReason?: GitDiffContentCacheMissReason
+export type {
+  GitDiffContentCacheMissReason,
+  GitDiffContentCacheSource,
+  GitDiffContentCacheInfo,
+  GitFileContentRequestOptions
 }
 
 // Git file content results

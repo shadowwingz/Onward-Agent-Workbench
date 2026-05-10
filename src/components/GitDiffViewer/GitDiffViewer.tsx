@@ -3206,7 +3206,7 @@ export function GitDiffViewer({
           missReason: cacheMissReasonForLoad(force, reason)
         })
         const cacheInfo = result.cacheInfo
-        clickLatencyTrackerRef.current.markIpcEnd(fileKey, cacheInfo?.state ?? 'unknown', {
+        clickLatencyTrackerRef.current.markIpcEnd(fileKey, cacheInfo?.state ?? 'miss', {
           source: cacheInfo?.source ?? null,
           missReason: cacheInfo?.missReason ?? null
         })
@@ -3228,7 +3228,7 @@ export function GitDiffViewer({
             filename: file.filename,
             changeType: file.changeType,
             reason,
-            cacheState: cacheInfo?.state ?? 'unknown',
+            cacheState: cacheInfo?.state ?? 'miss',
             cacheSource: cacheInfo?.source ?? null,
             cacheMissReason: cacheInfo?.missReason ?? null,
             result: 'error',
@@ -3291,6 +3291,11 @@ export function GitDiffViewer({
           }
         })
         clickLatencyTrackerRef.current.markStateSet(fileKey)
+        // Note: panel pill display does NOT depend on tokenize-settle seal —
+        // tracker fires listeners at markIpcEnd, and the panel reads the
+        // active measurement once cacheState/cacheSource are known. The
+        // tokenize-settle path below still runs for accurate Total time
+        // and history aggregation, but is no longer load-bearing for UI.
         lastFileContentLoadRef.current = {
           fileKey,
           filename: file.filename,
@@ -3307,7 +3312,7 @@ export function GitDiffViewer({
           filename: file.filename,
           changeType: file.changeType,
           reason,
-          cacheState: cacheInfo?.state ?? 'unknown',
+          cacheState: cacheInfo?.state ?? 'miss',
           cacheSource: cacheInfo?.source ?? null,
           cacheMissReason: cacheInfo?.missReason ?? null,
           result: 'success',
@@ -3324,7 +3329,7 @@ export function GitDiffViewer({
           originalLen: result.originalContent.length,
           modifiedLen: result.modifiedContent.length,
           reason,
-          cacheState: cacheInfo?.state ?? 'unknown',
+          cacheState: cacheInfo?.state ?? 'miss',
           cacheSource: cacheInfo?.source ?? null,
           cacheMissReason: cacheInfo?.missReason ?? null,
           force
@@ -3413,13 +3418,18 @@ export function GitDiffViewer({
     modifiedDecorationsRef.current?.clear()
   }, [selectedFile, ensureFileContent, getFileKey, setSelectedLineRangeValue])
 
-  // Lightweight renderer-side prefetch loop. The HEAVY prefetch lives in
-  // the main-process precompute scheduler now; this loop just primes the
-  // renderer's `fileContentsRef` so the autotest's "first-selection-uses-
-  // prefetched-body-cache" assertion (which inspects renderer state)
-  // still has data to look at. Each call almost always lands on the
-  // main-side cache and returns in single-digit ms, so the cost is
-  // negligible. Caps at 8 files per burst.
+  // Renderer-side prefetch loop. The heavy prefetch lives in the main-
+  // process precompute scheduler; this loop primes the renderer's
+  // `fileContentsRef` so any first user click is a renderer-memory hit
+  // (panel pill shows "render state: loaded" instantly, identical pill
+  // behaviour for every file in the visible list).
+  //
+  // No top-N cap: prefetching the entire visible list is what makes the
+  // pill display uniform. With a cap, position 5+ files (often the
+  // untracked group, which sorts to the bottom) would appear slow / blank
+  // on first click while the top files appeared instant. Each fetch
+  // almost always lands on the main cache and returns in <10ms, so the
+  // cost of a few dozen extra fetches is negligible.
   useEffect(() => {
     if (!isOpen || !activeCwd || !diffResult?.success || diffResult.submodulesLoading) {
       return
@@ -3433,7 +3443,6 @@ export function GitDiffViewer({
         return (!fileContentsRef.current[key] || staleFileContentKeysRef.current.has(key)) &&
           !inFlightRef.current[key]
       })
-      .slice(0, 4)
     if (candidates.length === 0) return
     rendererPrefetchSnapshotRef.current = {
       scheduled: candidates.length,
@@ -6518,6 +6527,7 @@ export function GitDiffViewer({
             <GitDiffDebugPanel
               tracker={clickLatencyTrackerRef.current}
               cwd={activeCwd ?? ''}
+              diffResult={diffResult}
               collapsed={debugPanelCollapsed}
               onToggleCollapsed={handleDebugPanelToggle}
             />
