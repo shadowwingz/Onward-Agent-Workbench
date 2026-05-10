@@ -1742,7 +1742,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   ipcMain.handle(IPC.PROJECT_READ_FILE, async (_, root: string, path: string, options: Parameters<typeof readProjectFile>[2]) => {
     const startedAt = performance.now()
     const result = await readProjectFile(root, path, options)
-    perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_IPC_PROJECT_READ_FILE, {
+    performanceTrace.record(PERF_TRACE_EVENT.MAIN_IPC_PROJECT_READ_FILE, {
       pathLen: path.length,
       ok: Boolean(result?.success),
       openMode: options?.openMode ?? result?.openMode ?? 'auto',
@@ -1755,7 +1755,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   ipcMain.handle(IPC.PROJECT_READ_FILE_CHUNK, async (_, root: string, path: string, offset: number, length: number, mode: Parameters<typeof readProjectFileChunk>[4]) => {
     const startedAt = performance.now()
     const result = await readProjectFileChunk(root, path, offset, length, mode)
-    perfTraceLogger.record(PERF_TRACE_EVENT.MAIN_IPC_PROJECT_READ_FILE_CHUNK, {
+    performanceTrace.record(PERF_TRACE_EVENT.MAIN_IPC_PROJECT_READ_FILE_CHUNK, {
       pathLen: path.length,
       ok: Boolean(result?.success),
       offset,
