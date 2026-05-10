@@ -252,6 +252,7 @@ git-ipc-worker — the worker's events forward through the existing
 | Constant | Name | Phase | Call site |
 |---|---|---|---|
 | `MAIN_IPC_PROJECT_READ_FILE` | `main:ipc.project.read-file` | `X` | `ipc-handlers.ts` readFile handler |
+| `MAIN_IPC_PROJECT_READ_FILE_CHUNK` | `main:ipc.project.read-file-chunk` | `X` | `ipc-handlers.ts` readFileChunk handler |
 | `MAIN_IPC_PROJECT_SAVE_FILE` | `main:ipc.project.save-file` | `X` | saveFile handler |
 | `MAIN_IPC_GIT_GET_DIFF` | `main:ipc.git.get-diff` | `X` | getDiff handler |
 | `MAIN_IPC_GIT_GET_HISTORY` | `main:ipc.git.get-history` | `X` | getHistory handler |
@@ -401,6 +402,7 @@ so every call through `window.electronAPI.<domain>.<method>()` gets a
 | Constant | Name | Phase | Call site |
 |---|---|---|---|
 | `RENDERER_IPC_PROJECT_READ_FILE` | `renderer:ipc.project.read-file` | `X` | `project.readFile()` wrapper |
+| `RENDERER_IPC_PROJECT_READ_FILE_CHUNK` | `renderer:ipc.project.read-file-chunk` | `X` | `project.readFileChunk()` wrapper |
 | `RENDERER_IPC_GIT_GET_DIFF` | `renderer:ipc.git.get-diff` | `X` | `git.getDiff()` wrapper |
 | `RENDERER_IPC_TERMINAL_WRITE` | `renderer:ipc.terminal.write` | `X` | `terminal.write()` wrapper |
 

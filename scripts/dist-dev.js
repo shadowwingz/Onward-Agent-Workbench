@@ -77,7 +77,7 @@ function getPackagedAppPath(productName) {
   if (process.platform === 'darwin') {
     let dirNames = []
     try {
-      dirNames = readdirSync(releaseRoot).filter((n) => n.startsWith('mac-'))
+      dirNames = readdirSync(releaseRoot).filter((n) => n === 'mac' || n.startsWith('mac-'))
     } catch {
       return null
     }
@@ -133,6 +133,7 @@ run('node', [join(__dirname, 'compile-changelog.js')])
 run('pnpm', ['typecheck'])
 // Generate third-party license notices for binary distribution
 run('pnpm', ['generate-notices'])
+run('node', [join(__dirname, 'ensure-node-pty-spawn-helper.js')])
 run('electron-vite', ['build'])
 // On Windows with shell: true, arguments containing spaces must be quoted
 const q = process.platform === 'win32' ? '"' : ''

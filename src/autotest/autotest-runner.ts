@@ -25,6 +25,7 @@ import { testStress } from './test-stress'
 import { testProjectEditorRestore } from './test-project-editor-restore'
 import { testProjectEditorRestoreUnit } from './test-project-editor-restore-unit'
 import { testProjectEditorOpenPosition } from './test-project-editor-open-position'
+import { testProjectEditorLargeFile } from './test-project-editor-large-file'
 import { testSubpageNavigation } from './test-subpage-navigation'
 import { testWorkingDirectoryCopy } from './test-working-directory-copy'
 import { testGitDiffSubdir } from './test-git-diff-subdir'
@@ -250,6 +251,13 @@ export async function runAllTests(ctx: AutotestContext): Promise<void> {
       log('phase0.55:begin')
       const results = await testProjectEditorFileMemory(ctx)
       collectSuiteResults('ProjectEditorFileMemory', results)
+      await sleep(500)
+    }
+
+    if (!ctx.cancelled() && shouldRun('project-editor-large-file')) {
+      log('phase0.56:begin')
+      const results = await testProjectEditorLargeFile(ctx)
+      collectSuiteResults('ProjectEditorLargeFile', results)
       await sleep(500)
     }
 

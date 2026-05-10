@@ -4,13 +4,14 @@
  */
 
 import BetterSqlite3 from 'better-sqlite3'
-import { readdir, stat, readFile, writeFile, mkdir, rename, rm, unlink, access } from 'fs/promises'
+import { readdir, stat, readFile, writeFile, mkdir, rename, rm, unlink, access, open as openFileHandle } from 'fs/promises'
 import { resolve, relative, dirname, sep, normalize, extname, join } from 'path'
-import { MAX_IMAGE_FILE_SIZE, bufferToImageDataUrl, isSupportedImageFile } from './image-utils'
+import { isSupportedImageFile } from './image-utils'
 
-const MAX_FILE_SIZE = 1024 * 1024
-const MAX_PDF_FILE_SIZE = 256 * 1024 * 1024
-const MAX_EPUB_FILE_SIZE = 64 * 1024 * 1024
+export const PROJECT_TEXT_WARNING_SIZE = 3 * 1024 * 1024
+export const PROJECT_TEXT_EAGER_LIMIT = 30 * 1024 * 1024
+export const PROJECT_FILE_CHUNK_SIZE = 512 * 1024
+const BINARY_SNIFF_BYTES = 64 * 1024
 const SQLITE_DEFAULT_LIMIT = 100
 const SQLITE_MAX_LIMIT = 500
 const SQLITE_MAX_QUERY_ROWS = 500
@@ -25,6 +26,38 @@ const SQLITE_EXTENSIONS = new Set([
 
 const PDF_EXTENSIONS = new Set(['.pdf'])
 const EPUB_EXTENSIONS = new Set(['.epub'])
+
+export type ProjectFileOpenMode = 'auto' | 'text' | 'binary'
+export type ProjectFileChunkMode = 'text' | 'binary'
+
+export interface ProjectReadOptions {
+  openMode?: ProjectFileOpenMode
+  confirmLargeText?: boolean
+}
+
+function baseProjectReadResult(root: string, path: string, sizeBytes = 0) {
+  return {
+    root,
+    path,
+    content: '',
+    isBinary: false,
+    isImage: false,
+    isSqlite: false,
+    sizeBytes
+  }
+}
+
+async function readFilePrefix(fullPath: string, byteLength: number): Promise<Buffer> {
+  if (byteLength <= 0) return Buffer.alloc(0)
+  const handle = await openFileHandle(fullPath, 'r')
+  try {
+    const buffer = Buffer.alloc(byteLength)
+    const { bytesRead } = await handle.read(buffer, 0, byteLength, 0)
+    return buffer.subarray(0, bytesRead)
+  } finally {
+    await handle.close()
+  }
+}
 
 function isPdfExtension(fullPath: string): boolean {
   return PDF_EXTENSIONS.has(extname(fullPath).toLowerCase())
@@ -419,18 +452,13 @@ export async function listDirectory(root: string, path: string) {
   }
 }
 
-export async function readProjectFile(root: string, path: string) {
+export async function readProjectFile(root: string, path: string, options: ProjectReadOptions = {}) {
   const rootPath = resolve(root)
   const fullPath = resolveInRoot(rootPath, path)
   if (!fullPath) {
     return {
       success: false,
-      root: rootPath,
-      path,
-      content: '',
-      isBinary: false,
-      isImage: false,
-      isSqlite: false,
+      ...baseProjectReadResult(rootPath, path),
       error: 'Invalid path. It is outside the working directory.'
     }
   }
@@ -440,12 +468,7 @@ export async function readProjectFile(root: string, path: string) {
     if (!fileStat.isFile()) {
       return {
         success: false,
-        root: rootPath,
-        path,
-        content: '',
-        isBinary: false,
-        isImage: false,
-        isSqlite: false,
+        ...baseProjectReadResult(rootPath, path, fileStat.size),
         error: 'The target is not a file.'
       }
     }
@@ -454,25 +477,6 @@ export async function readProjectFile(root: string, path: string) {
     const isImageByExt = isSupportedImageFile(fullPath)
     const isPdfByExt = isPdfExtension(fullPath)
     const isEpubByExt = isEpubExtension(fullPath)
-    const sizeLimit = isPdfByExt
-      ? MAX_PDF_FILE_SIZE
-      : isEpubByExt
-        ? MAX_EPUB_FILE_SIZE
-        : isImageByExt
-          ? MAX_IMAGE_FILE_SIZE
-          : MAX_FILE_SIZE
-    if (fileStat.size > sizeLimit && !isSqliteByExt) {
-      return {
-        success: false,
-        root: rootPath,
-        path,
-        content: '',
-        isBinary: false,
-        isImage: false,
-        isSqlite: false,
-        error: `File is too large to load (>${Math.floor(sizeLimit / 1024)}KB).`
-      }
-    }
 
     if (isSqliteByExt) {
       return {
@@ -482,7 +486,8 @@ export async function readProjectFile(root: string, path: string) {
         content: '',
         isBinary: true,
         isImage: false,
-        isSqlite: true
+        isSqlite: true,
+        sizeBytes: fileStat.size
       }
     }
 
@@ -498,12 +503,18 @@ export async function readProjectFile(root: string, path: string) {
         isSqlite: false,
         isPdf: true,
         previewUrl: await buildPdfViewerUrl(fullPath),
-        previewPath: fullPath
+        previewPath: fullPath,
+        sizeBytes: fileStat.size
       }
     }
 
     if (isEpubByExt) {
-      const buffer = await readFile(fullPath)
+      // Hand the raw .epub bytes to epub.js via Chromium's file loader.
+      // Avoids pulling the whole archive into the main process (the previous
+      // base64 path inflated bytes by ~33% and capped at 64 MB). The
+      // host-side fetch lives in ProjectEditor so EpubReader's mount stays
+      // synchronous — see the queue.tick / reportLocation rAF patches in
+      // EpubReader.tsx for the matching rAF-stall workaround.
       return {
         success: true,
         root: rootPath,
@@ -513,31 +524,84 @@ export async function readProjectFile(root: string, path: string) {
         isImage: false,
         isSqlite: false,
         isEpub: true,
-        previewData: buffer.toString('base64'),
-        previewPath: fullPath
+        previewUrl: `${toFileUrl(fullPath)}?mtime=${Math.trunc(fileStat.mtimeMs)}`,
+        previewPath: fullPath,
+        sizeBytes: fileStat.size
       }
     }
 
-    const buffer = await readFile(fullPath)
-    const isBinary = buffer.includes(0)
-    const isImage = isSupportedImageFile(fullPath)
-    const isSqlite = isLikelySqliteFile(fullPath, buffer)
-    const previewUrl = isImage
-      ? bufferToImageDataUrl(buffer, fullPath)
-      : undefined
-
-    if (isImage) {
+    if (isImageByExt) {
       return {
         success: true,
         root: rootPath,
         path,
         content: '',
-        isBinary,
+        isBinary: true,
         isImage: true,
         isSqlite: false,
-        previewUrl
+        previewUrl: `${toFileUrl(fullPath)}?mtime=${Math.trunc(fileStat.mtimeMs)}`,
+        previewPath: fullPath,
+        sizeBytes: fileStat.size
       }
     }
+
+    const openMode = options.openMode ?? 'auto'
+    const sniffBuffer = await readFilePrefix(fullPath, Math.min(BINARY_SNIFF_BYTES, fileStat.size))
+    const isBinary = sniffBuffer.includes(0)
+    if (isBinary && openMode === 'auto') {
+      return {
+        success: false,
+        ...baseProjectReadResult(rootPath, path, fileStat.size),
+        isBinary: true,
+        requiresOpenChoice: true,
+        extension: ext,
+        error: 'This file appears to be binary. Choose how to open it.'
+      }
+    }
+
+    if (openMode === 'binary') {
+      return {
+        success: true,
+        root: rootPath,
+        path,
+        content: '',
+        isBinary: true,
+        isImage: false,
+        isSqlite: false,
+        sizeBytes: fileStat.size,
+        openMode: 'binary',
+        readOnly: true
+      }
+    }
+
+    if (fileStat.size > PROJECT_TEXT_WARNING_SIZE && !options.confirmLargeText) {
+      return {
+        success: false,
+        ...baseProjectReadResult(rootPath, path, fileStat.size),
+        requiresConfirmation: true,
+        readOnly: fileStat.size > PROJECT_TEXT_EAGER_LIMIT,
+        openMode: fileStat.size > PROJECT_TEXT_EAGER_LIMIT ? 'large-text' : 'text',
+        error: 'This file is large and may take longer to open.'
+      }
+    }
+
+    if (fileStat.size > PROJECT_TEXT_EAGER_LIMIT) {
+      return {
+        success: true,
+        root: rootPath,
+        path,
+        content: '',
+        isBinary: false,
+        isImage: false,
+        isSqlite: false,
+        sizeBytes: fileStat.size,
+        openMode: 'large-text',
+        readOnly: true
+      }
+    }
+
+    const buffer = fileStat.size <= sniffBuffer.length ? sniffBuffer : await readFile(fullPath)
+    const isSqlite = isLikelySqliteFile(fullPath, buffer)
 
     if (isSqlite) {
       return {
@@ -547,12 +611,24 @@ export async function readProjectFile(root: string, path: string) {
         content: '',
         isBinary: true,
         isImage: false,
-        isSqlite: true
+        isSqlite: true,
+        sizeBytes: fileStat.size
       }
     }
 
-    if (isBinary) {
-      return { success: true, root: rootPath, path, content: '', isBinary: true, isImage: false, isSqlite: false }
+    if (isBinary && openMode !== 'text') {
+      return {
+        success: true,
+        root: rootPath,
+        path,
+        content: '',
+        isBinary: true,
+        isImage: false,
+        isSqlite: false,
+        sizeBytes: fileStat.size,
+        openMode: 'binary',
+        readOnly: true
+      }
     }
 
     return {
@@ -562,18 +638,86 @@ export async function readProjectFile(root: string, path: string) {
       content: buffer.toString('utf-8'),
       isBinary: false,
       isImage: false,
-      isSqlite: false
+      isSqlite: false,
+      sizeBytes: fileStat.size,
+      openMode: 'text'
+    }
+  } catch (error) {
+    return {
+      success: false,
+      ...baseProjectReadResult(rootPath, path),
+      error: `Failed to read file: ${String(error)}`
+    }
+  }
+}
+
+export async function readProjectFileChunk(root: string, path: string, offset: number, length: number, mode: ProjectFileChunkMode) {
+  const rootPath = resolve(root)
+  const fullPath = resolveInRoot(rootPath, path)
+  const requestedLength = Math.max(0, Math.min(Math.floor(length), PROJECT_FILE_CHUNK_SIZE * 4))
+  const normalizedOffset = Math.max(0, Math.floor(offset))
+  if (!fullPath) {
+    return {
+      success: false,
+      root: rootPath,
+      path,
+      offset: normalizedOffset,
+      requestedLength,
+      bytesRead: 0,
+      sizeBytes: 0,
+      error: 'Invalid path. It is outside the working directory.'
+    }
+  }
+
+  try {
+    const fileStat = await stat(fullPath)
+    if (!fileStat.isFile()) {
+      return {
+        success: false,
+        root: rootPath,
+        path,
+        offset: normalizedOffset,
+        requestedLength,
+        bytesRead: 0,
+        sizeBytes: fileStat.size,
+        error: 'The target is not a file.'
+      }
+    }
+
+    const safeOffset = Math.min(normalizedOffset, fileStat.size)
+    const safeLength = Math.min(requestedLength, Math.max(0, fileStat.size - safeOffset))
+    const handle = await openFileHandle(fullPath, 'r')
+    try {
+      const buffer = Buffer.alloc(safeLength)
+      const { bytesRead } = safeLength > 0
+        ? await handle.read(buffer, 0, safeLength, safeOffset)
+        : { bytesRead: 0 }
+      const slice = buffer.subarray(0, bytesRead)
+      return {
+        success: true,
+        root: rootPath,
+        path,
+        offset: safeOffset,
+        requestedLength,
+        bytesRead,
+        sizeBytes: fileStat.size,
+        ...(mode === 'binary'
+          ? { base64: slice.toString('base64') }
+          : { text: slice.toString('utf-8') })
+      }
+    } finally {
+      await handle.close()
     }
   } catch (error) {
     return {
       success: false,
       root: rootPath,
       path,
-      content: '',
-      isBinary: false,
-      isImage: false,
-      isSqlite: false,
-      error: `Failed to read file: ${String(error)}`
+      offset: normalizedOffset,
+      requestedLength,
+      bytesRead: 0,
+      sizeBytes: 0,
+      error: `Failed to read file chunk: ${String(error)}`
     }
   }
 }

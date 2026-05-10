@@ -88,6 +88,7 @@ SCRIPTS: List[str] = [
     "test/autotest/run-performance-trace-autotest.sh",
     "test/autotest/run-preview-search-autotest.sh",
     "test/autotest/run-project-editor-file-memory-autotest.sh",
+    "test/autotest/run-project-editor-large-file-autotest.sh",
     "test/autotest/run-project-editor-markdown-navigation-autotest.sh",
     "test/autotest/run-project-editor-markdown-session-restore-autotest.sh",
     "test/autotest/run-project-editor-multi-terminal-scope-autotest.sh",

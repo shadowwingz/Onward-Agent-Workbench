@@ -527,6 +527,15 @@ export interface ProjectListResult {
   error?: string
 }
 
+export type ProjectFileOpenMode = 'auto' | 'text' | 'binary'
+export type ProjectFileResolvedOpenMode = 'text' | 'large-text' | 'binary'
+export type ProjectFileChunkMode = 'text' | 'binary'
+
+export interface ProjectReadOptions {
+  openMode?: ProjectFileOpenMode
+  confirmLargeText?: boolean
+}
+
 export interface ProjectReadResult {
   success: boolean
   root: string
@@ -535,7 +544,29 @@ export interface ProjectReadResult {
   isBinary: boolean
   isImage: boolean
   isSqlite: boolean
+  isPdf?: boolean
+  isEpub?: boolean
   previewUrl?: string
+  previewPath?: string
+  sizeBytes?: number
+  openMode?: ProjectFileResolvedOpenMode
+  requiresConfirmation?: boolean
+  requiresOpenChoice?: boolean
+  readOnly?: boolean
+  extension?: string
+  error?: string
+}
+
+export interface ProjectFileChunkResult {
+  success: boolean
+  root: string
+  path: string
+  offset: number
+  requestedLength: number
+  bytesRead: number
+  sizeBytes: number
+  text?: string
+  base64?: string
   error?: string
 }
 
@@ -705,7 +736,8 @@ export interface ProjectAPI {
   buildFileIndex: (root: string) => Promise<string[]>
   searchFilenames: (root: string, query: string, limit?: number) => Promise<string[]>
   invalidateFileIndex: (root: string) => Promise<{ success: boolean }>
-  readFile: (root: string, path: string) => Promise<ProjectReadResult>
+  readFile: (root: string, path: string, options?: ProjectReadOptions) => Promise<ProjectReadResult>
+  readFileChunk: (root: string, path: string, offset: number, length: number, mode: ProjectFileChunkMode) => Promise<ProjectFileChunkResult>
   saveFile: (root: string, path: string, content: string) => Promise<ProjectSaveResult>
   createFile: (root: string, path: string, content?: string) => Promise<ProjectActionResult>
   createFolder: (root: string, path: string) => Promise<ProjectActionResult>
@@ -1485,11 +1517,19 @@ const projectAPI: ProjectAPI = {
     return ipcRenderer.invoke(IPC.PROJECT_INVALIDATE_FILE_INDEX, root)
   },
 
-  readFile: (root: string, path: string) => {
+  readFile: (root: string, path: string, options?: ProjectReadOptions) => {
     return traceIpc(
       PERF_TRACE_EVENT.RENDERER_IPC_PROJECT_READ_FILE,
-      { pathLen: path.length },
-      () => ipcRenderer.invoke(IPC.PROJECT_READ_FILE, root, path)
+      { pathLen: path.length, openMode: options?.openMode ?? 'auto', confirmed: Boolean(options?.confirmLargeText) },
+      () => ipcRenderer.invoke(IPC.PROJECT_READ_FILE, root, path, options)
+    )
+  },
+
+  readFileChunk: (root: string, path: string, offset: number, length: number, mode: ProjectFileChunkMode) => {
+    return traceIpc(
+      PERF_TRACE_EVENT.RENDERER_IPC_PROJECT_READ_FILE_CHUNK,
+      { pathLen: path.length, offset, length, mode },
+      () => ipcRenderer.invoke(IPC.PROJECT_READ_FILE_CHUNK, root, path, offset, length, mode)
     )
   },
 
