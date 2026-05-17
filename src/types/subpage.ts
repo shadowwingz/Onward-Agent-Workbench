@@ -29,6 +29,9 @@ export interface ProjectEditorOpenEventDetail {
 export interface SubpageNavigateEventDetail {
   terminalId?: string
   target?: SubpageId
+  from?: SubpageId | null
+  intent?: 'open' | 'switch' | 'jump' | 'close' | 'restore' | null
+  entryPoint?: 'shortcut' | 'dropdown' | 'subpage-switcher' | 'deep-link' | 'escape' | 'session-restore' | 'legacy-event' | 'debug' | null
   filePath?: string | null
   repoRoot?: string | null
   source?: SubpageId | null

@@ -1500,7 +1500,13 @@ export function GitHistoryViewer({
 
   const handleJumpToDiff = useCallback(() => {
     if (!terminalId) return
-    const detail: SubpageNavigateEventDetail = { terminalId, target: 'diff' }
+    const detail: SubpageNavigateEventDetail = {
+      terminalId,
+      target: 'diff',
+      from: 'history',
+      intent: 'switch',
+      entryPoint: 'subpage-switcher'
+    }
     window.dispatchEvent(new CustomEvent('subpage:navigate', { detail }))
   }, [terminalId])
 
@@ -1515,6 +1521,9 @@ export function GitHistoryViewer({
       detail: {
         terminalId: detail.terminalId,
         target: 'editor',
+        from: 'history',
+        intent: 'jump',
+        entryPoint: 'deep-link',
         filePath: detail.filePath,
         repoRoot: detail.repoRoot
       }
@@ -1531,7 +1540,13 @@ export function GitHistoryViewer({
       // rather than overriding it with History's selected file.
       if (!terminalId) return
       window.dispatchEvent(new CustomEvent<SubpageNavigateEventDetail>('subpage:navigate', {
-        detail: { terminalId, target: 'editor' }
+        detail: {
+          terminalId,
+          target: 'editor',
+          from: 'history',
+          intent: 'switch',
+          entryPoint: 'subpage-switcher'
+        }
       }))
     }
   }, [handleJumpToDiff, terminalId])
@@ -2066,6 +2081,20 @@ export function GitHistoryViewer({
   const externalPanelShellState = useMemo<SubpagePanelShellState>(() => ({
     current: 'history',
     onSelect: handleSelectSubpage,
+    lifecycle: {
+      beforeLeave: () => {
+        persistStateRef.current()
+        return {
+          subpage: 'history',
+          selectedShas: [...selectedShasRef.current],
+          selectionAnchor: selectionAnchorRef.current,
+          selectedFilePath: selectedFileRef.current?.filename ?? selectionRef.current.selectedFile,
+          commitScrollTop: commitScrollTopRef.current,
+          fileScrollTop: fileScrollTopRef.current,
+          diffScrollTop: diffScrollTopRef.current
+        }
+      }
+    },
     workingDirectoryLabel: t('gitHistory.cwd'),
     workingDirectoryPath: historyWorkingDirectory,
     workingDirectoryTitle: cwdTitle,

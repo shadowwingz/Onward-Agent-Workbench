@@ -27,7 +27,12 @@ import type { TerminalBatchIssue, TerminalBatchIssueReason } from './types/promp
 import type { AppInfo, CurrentChangelogResult, Prompt } from './types/electron.d.ts'
 import type { TabState, EditorDraft, PromptCleanupConfig, PromptSchedule, ExecutionLogEntry } from './types/tab.d.ts'
 import type { ShortcutAction } from './types/settings.d.ts'
-import type { ProjectEditorOpenEventDetail, ProjectEditorOpenRequest, SubpageId } from './types/subpage'
+import type {
+  ProjectEditorOpenEventDetail,
+  ProjectEditorOpenRequest,
+  SubpageId,
+  SubpageNavigateEventDetail
+} from './types/subpage'
 import { requestOpenExternalHttpLink } from './utils/externalLink'
 import { perfTrace, perfTraceTask } from './utils/perf-trace'
 import { PERF_TRACE_EVENT } from './utils/perf-trace-names'
@@ -1463,13 +1468,16 @@ function AppContent({
       setProjectEditorCwd(fallbackCwd)
       setProjectEditorOpen(true)
     }
-    if (typeof options?.filePath === 'string' && options.filePath.trim()) {
+    if (options) {
       if (projectEditorOpenTokenRef.current !== openToken) return
       projectEditorOpenRequestIdRef.current += 1
+      const requestedFilePath = typeof options.filePath === 'string' && options.filePath.trim()
+        ? options.filePath
+        : null
       setProjectEditorOpenRequest({
         id: projectEditorOpenRequestIdRef.current,
         terminalId,
-        filePath: options.filePath ?? null,
+        filePath: requestedFilePath,
         repoRoot: options.repoRoot ?? null,
         source: options.source ?? null,
         returnTarget: options.returnTarget ?? null,
@@ -1528,23 +1536,35 @@ function AppContent({
     void run()
   }, [activeTab, isLoaded])
 
-  useEffect(() => {
-    const handler = (event: Event) => {
-      const customEvent = event as CustomEvent<ProjectEditorOpenEventDetail>
-      const terminalId = customEvent.detail?.terminalId
-      if (!terminalId) return
-      void handleOpenProjectEditor(terminalId, {
-        filePath: customEvent.detail?.filePath ?? null,
-        repoRoot: customEvent.detail?.repoRoot ?? null,
-        source: customEvent.detail?.source ?? null,
-        returnTarget: customEvent.detail?.returnTarget ?? null,
-        diffFilePath: customEvent.detail?.diffFilePath ?? null,
-        diffRepoRoot: customEvent.detail?.diffRepoRoot ?? null
-      })
-    }
-    window.addEventListener('project-editor:open', handler as EventListener)
-    return () => window.removeEventListener('project-editor:open', handler as EventListener)
-  }, [handleOpenProjectEditor])
+	  useEffect(() => {
+	    const handler = (event: Event) => {
+	      const customEvent = event as CustomEvent<ProjectEditorOpenEventDetail>
+	      const terminalId = customEvent.detail?.terminalId
+	      if (!terminalId) return
+	      const activeSubpage = activeTab?.activeSubpage ?? null
+	      const filePath = customEvent.detail?.filePath ?? null
+	      const detail: SubpageNavigateEventDetail = {
+	        terminalId,
+	        target: 'editor',
+	        from: activeSubpage,
+	        intent: filePath
+	          ? 'jump'
+	          : activeSubpage && activeSubpage !== 'editor'
+	            ? 'switch'
+	            : 'open',
+	        entryPoint: 'legacy-event',
+	        filePath,
+	        repoRoot: customEvent.detail?.repoRoot ?? null,
+	        source: customEvent.detail?.source ?? null,
+	        returnTarget: customEvent.detail?.returnTarget ?? null,
+	        diffFilePath: customEvent.detail?.diffFilePath ?? null,
+	        diffRepoRoot: customEvent.detail?.diffRepoRoot ?? null
+	      }
+	      window.dispatchEvent(new CustomEvent<SubpageNavigateEventDetail>('subpage:navigate', { detail }))
+	    }
+	    window.addEventListener('project-editor:open', handler as EventListener)
+	    return () => window.removeEventListener('project-editor:open', handler as EventListener)
+	  }, [activeTab?.activeSubpage])
 
   useEffect(() => {
     if (!window.electronAPI?.debug?.profile && !window.electronAPI?.debug?.autotest) return

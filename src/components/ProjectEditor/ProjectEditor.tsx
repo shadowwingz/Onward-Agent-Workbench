@@ -334,6 +334,23 @@ type ProjectEditorScope = {
   cwd: string | null
 }
 
+type ProjectEditorSoftCloseKind = 'retained-close' | 'subpage-return'
+
+type ProjectEditorSoftCloseSnapshot = {
+  kind: ProjectEditorSoftCloseKind
+  scope: ProjectEditorScope
+  path: string | null
+  content: string
+  isBinary: boolean
+  isImage: boolean
+  isSqlite: boolean
+  isPdf: boolean
+  isEpub: boolean
+  isMarkdownPreviewOpen: boolean
+  isMarkdownEditorVisible: boolean
+  outlineTarget: OutlineTarget
+}
+
 type DiffReturnContext = {
   terminalId: string
   filePath: string | null
@@ -595,6 +612,16 @@ function isSameProjectEditorScope(a: ProjectEditorScope | null, b: ProjectEditor
   if (!a && !b) return true
   if (!a || !b) return false
   return a.terminalId === b.terminalId && normalizeScopeCwd(a.cwd) === normalizeScopeCwd(b.cwd)
+}
+
+function isProjectEditorSoftCloseSnapshotForScope(
+  snapshot: ProjectEditorSoftCloseSnapshot | null,
+  scope: ProjectEditorScope | null,
+  kind?: ProjectEditorSoftCloseKind
+): snapshot is ProjectEditorSoftCloseSnapshot {
+  if (!snapshot || !scope) return false
+  if (kind && snapshot.kind !== kind) return false
+  return isSameProjectEditorScope(snapshot.scope, scope)
 }
 
 function getFileScrollKey(scope: ProjectEditorScope | null, filePath: string | null): string | null {
@@ -1191,32 +1218,16 @@ export function ProjectEditor({
   const restoredStateRef = useRef<ProjectEditorState | null>(null)
   const lastEditorScopeRef = useRef<ProjectEditorScope | null>(null)
   const wasOpenRef = useRef(false)
-  const retainedCloseScopeRef = useRef<ProjectEditorScope | null>(null)
   const retainedFreshnessRequestIdRef = useRef(0)
   const projectEditorReopenStartedAtRef = useRef<number | null>(null)
   const lastProjectEditorReopenRestoreRef = useRef<ProjectEditorReopenRestoreDebug | null>(null)
   const skipClosePersistRef = useRef(false)
-  // Snapshot of activeFilePath captured by handleOpenGitDiff/History before
-  // resetActiveFileState clears state. Used to fast-path file restoration on
-  // subpage-return (Editor reopens with the same scope) without waiting for
-  // the full tree-reload + AppState restore cycle (which can exceed the
-  // autotest's 8s wait).
-  // Subpage-return snapshot. Carries enough state to repaint the editor
-  // immediately when the user returns from Diff / History without waiting
-  // for an async openFile() — most importantly the file CONTENT (otherwise
-  // Monaco's model would still be empty after root:effect's close branch
-  // wipes it on isOpen=false, and applyPendingViewState would clamp the
-  // restored cursor from line 60 to line 1).
-  const subpageReturnFileRef = useRef<{
-    scope: ProjectEditorScope
-    path: string
-    content: string
-    isBinary: boolean
-    isImage: boolean
-    isSqlite: boolean
-    isPdf: boolean
-    isEpub: boolean
-  } | null>(null)
+  // Unified soft-close snapshot. ESC retain-view and Editor -> Diff/History
+  // switching both preserve the same state shape; `kind` only records why the
+  // snapshot exists. The content field keeps Monaco populated while the async
+  // reopen pipeline catches up, so cursor/view-state restoration has real
+  // document lines to target.
+  const editorSoftCloseSnapshotRef = useRef<ProjectEditorSoftCloseSnapshot | null>(null)
   const previewActiveSlugRef = useRef<string | null>(null)
   const [previewActiveSlug, setPreviewActiveSlug] = useState<string | null>(null)
   const previewScrollMemoryRef = useRef<Map<string, PreviewScrollMemory>>(new Map())
@@ -2564,8 +2575,8 @@ export function ProjectEditor({
     return true
   }, [applyPendingCursorPosition, isEditorModelMatchingPath, scheduleEditorSyncFromPreview])
 
-  const resetActiveFileState = useCallback((options?: { preserveContentForSubpageReturn?: boolean }) => {
-    const preserveContent = options?.preserveContentForSubpageReturn === true
+  const resetActiveFileState = useCallback((options?: { preserveSoftCloseContent?: boolean }) => {
+    const preserveContent = options?.preserveSoftCloseContent === true
     if (DEBUG_PROJECT_EDITOR) {
       debugLog('reset:begin', {
         activeFilePath: activeFilePathRef.current,
@@ -2621,13 +2632,11 @@ export function ProjectEditor({
     fileFirstVisibleLineRef.current.clear()
     originalContentRef.current = ''
     originalModelVersionRef.current = null
-    // Subpage navigation (Editor → Diff/History → Editor) keeps the same
-    // file open. Wiping `fileContentRef` and `setFileContent('')` here
-    // would empty Monaco's model, so the slow-restore branch's
-    // `applyPendingViewState` then has nothing to position cursor onto and
-    // clamps line 60 → 1. The `preserveContentForSubpageReturn` flag lets
-    // the subpage callers skip the wipe; full close / file switch keeps
-    // the original behaviour.
+    // Soft-close navigation (ESC retain-view or Editor -> Diff/History ->
+    // Editor) keeps the same file open. Wiping `fileContentRef` and
+    // `setFileContent('')` here would empty Monaco's model, so the
+    // slow-restore branch's `applyPendingViewState` has no document lines to
+    // target and clamps deep cursors to line 1.
     if (!preserveContent) {
       fileContentRef.current = ''
       setOutlineContentSnapshot({ filePath: null, content: '' })
@@ -2673,19 +2682,85 @@ export function ProjectEditor({
     setIsDirty(false)
     setIsLoadingFile(false)
     setIsMarkdownRenderEnabled(false)
-    setMarkdownImageMap({})
-    markdownImageMapRef.current = {}
-    setMarkdownImagePaths([])
-    setMarkdownRenderedHtml('')
+    if (!preserveContent) {
+      // `preserveContent` is only set when the caller plans to consume the
+      // unified soft-close snapshot. In that case we keep the rendered
+      // markdown HTML, image map and render source so the next mount can reuse them via the
+      // cache-hit fast path in the [isOpen] useEffect. Without this, the
+      // React state was cleared here even though the surrounding plumbing
+      // was held, and the preview was shown empty until openFile
+      // re-rendered from scratch, which is what produced the
+      // user-reported "preview disappears after Git Diff / History
+      // round-trip" symptom (PMSR-30..35).
+      setMarkdownImageMap({})
+      markdownImageMapRef.current = {}
+      setMarkdownImagePaths([])
+      setMarkdownRenderedHtml('')
+      setMarkdownRenderSource('')
+    }
     setMarkdownRenderPending(false)
-    setMarkdownRenderSource('')
     setMissingFileNotice(null)
     void window.electronAPI.project.unwatchAllImageFiles()
     watchedImagePathsRef.current = new Set()
     if (DEBUG_PROJECT_EDITOR) {
       debugLog('reset:done', { activeFilePath: null })
+	    }
+	  }, [cancelFileTreeRestoreFrame, cancelMarkdownIdle, resetPreviewRestoreState, setActiveFilePathValue, updatePreviewActiveSlug])
+
+  const captureEditorSoftCloseSnapshot = useCallback((
+    kind: ProjectEditorSoftCloseKind,
+    scope: ProjectEditorScope | null
+  ): ProjectEditorSoftCloseSnapshot | null => {
+    if (!scope) {
+      editorSoftCloseSnapshotRef.current = null
+      return null
     }
-  }, [cancelFileTreeRestoreFrame, cancelMarkdownIdle, resetPreviewRestoreState, setActiveFilePathValue, updatePreviewActiveSlug])
+    const snapshot: ProjectEditorSoftCloseSnapshot = {
+      kind,
+      scope,
+      path: activeFilePathRef.current,
+      content: fileContentRef.current,
+      isBinary: isBinaryRef.current,
+      isImage: isImageRef.current,
+      isSqlite: isSqliteRef.current,
+      isPdf: isPdfRef.current,
+      isEpub: isEpubRef.current,
+      isMarkdownPreviewOpen: isMarkdownPreviewOpenRef.current,
+      isMarkdownEditorVisible: isMarkdownEditorVisibleRef.current,
+      outlineTarget: outlineTargetRef.current
+    }
+    editorSoftCloseSnapshotRef.current = snapshot
+    return snapshot
+  }, [])
+
+  const applyEditorSoftCloseSnapshot = useCallback((snapshot: ProjectEditorSoftCloseSnapshot): boolean => {
+    if (!snapshot.path) return false
+    setActiveFilePathValue(snapshot.path)
+    fileContentRef.current = snapshot.content
+    setFileContent(snapshot.content)
+    markdownRenderSourceRef.current = snapshot.content
+    setMarkdownRenderSource(snapshot.content)
+    setOutlineContentSnapshot({ filePath: snapshot.path, content: snapshot.content })
+    isBinaryRef.current = snapshot.isBinary
+    setIsBinary(snapshot.isBinary)
+    isImageRef.current = snapshot.isImage
+    setIsImage(snapshot.isImage)
+    isSqliteRef.current = snapshot.isSqlite
+    setIsSqlite(snapshot.isSqlite)
+    isPdfRef.current = snapshot.isPdf
+    setIsPdf(snapshot.isPdf)
+    isEpubRef.current = snapshot.isEpub
+    setIsEpub(snapshot.isEpub)
+    if (isMarkdownPath(snapshot.path)) {
+      setIsMarkdownPreviewOpen(snapshot.isMarkdownPreviewOpen)
+      isMarkdownPreviewOpenRef.current = snapshot.isMarkdownPreviewOpen
+      setIsMarkdownEditorVisible(snapshot.isMarkdownEditorVisible)
+      isMarkdownEditorVisibleRef.current = snapshot.isMarkdownEditorVisible
+      setOutlineTarget(snapshot.outlineTarget)
+      outlineTargetRef.current = snapshot.outlineTarget
+    }
+    return true
+  }, [setActiveFilePathValue])
 
   const clearActiveFileState = useCallback((options?: { preserveMissingNotice?: boolean }) => {
     cancelFileTreeRestoreFrame()
@@ -3029,7 +3104,15 @@ export function ProjectEditor({
 
   useEffect(() => {
     if (!isMarkdownWorkerActive) {
-      const preserveClosedPreview = Boolean(retainedCloseScopeRef.current && !isOpen)
+      // Preserve the previously rendered HTML across a "soft"
+      // worker-deactivate event so the cache-hit fast path on the next reopen
+      // can short-circuit `applyMarkdownSessionCacheHit` -> `beginPreviewRestore`
+      // and avoid the waiting-html opacity flicker.
+      const softCloseSnapshot = editorSoftCloseSnapshotRef.current
+      const preserveClosedPreview = Boolean(
+        softCloseSnapshot &&
+        (softCloseSnapshot.kind === 'subpage-return' || !isOpen)
+      )
       resetPreviewRestoreState()
       if (markdownWorkerRef.current) {
         markdownWorkerRef.current.terminate()
@@ -3213,7 +3296,12 @@ export function ProjectEditor({
       if (markdownRenderTimerRef.current) {
         window.clearTimeout(markdownRenderTimerRef.current)
       }
-      if (!(retainedCloseScopeRef.current && !isOpen)) {
+      const softCloseSnapshot = editorSoftCloseSnapshotRef.current
+      const preserveClosedPreview = Boolean(
+        softCloseSnapshot &&
+        (softCloseSnapshot.kind === 'subpage-return' || !isOpen)
+      )
+      if (!preserveClosedPreview) {
         setMarkdownRenderSource('')
       }
       setMarkdownRenderPending(false)
@@ -4529,11 +4617,11 @@ export function ProjectEditor({
   }, [t])
 
   useEffect(() => {
-    if (DEBUG_PROJECT_EDITOR) {
-      debugLog('root:effect', { isOpen, cwd })
-    }
-    if (!isOpen) {
-      const retainClosedView = Boolean(retainedCloseScopeRef.current)
+	    if (DEBUG_PROJECT_EDITOR) {
+	      debugLog('root:effect', { isOpen, cwd })
+	    }
+	    if (!isOpen) {
+	      const retainClosedView = Boolean(editorSoftCloseSnapshotRef.current)
       gitDiffOpenRef.current = false
       debugAutoOpenRef.current = false
       restoringStateRef.current = false
@@ -4588,13 +4676,13 @@ export function ProjectEditor({
       return
     }
 
-    const effectiveCwd = cwd || (window.electronAPI?.debug?.autotest
-      ? window.electronAPI.debug.autotestCwd
-      : null)
+	    const effectiveCwd = cwd || (window.electronAPI?.debug?.autotest
+	      ? window.electronAPI.debug.autotestCwd
+	      : null)
 
-    if (!effectiveCwd) {
-      retainedCloseScopeRef.current = null
-      setRootError(t('projectEditor.error.noWorkingDirectory'))
+	    if (!effectiveCwd) {
+	      editorSoftCloseSnapshotRef.current = null
+	      setRootError(t('projectEditor.error.noWorkingDirectory'))
       setRootPath(null)
       setPinnedFiles([])
       setRecentFiles([])
@@ -4610,10 +4698,10 @@ export function ProjectEditor({
     if (previousRoot && previousRoot !== normalizedCwd) {
       if (DEBUG_PROJECT_EDITOR) {
         debugLog('root:changed', { previousRoot, nextRoot: normalizedCwd })
-      }
-      restoreTokenRef.current += 1
-      retainedCloseScopeRef.current = null
-      hasRestoredStateRef.current = false
+	      }
+	      restoreTokenRef.current += 1
+	      editorSoftCloseSnapshotRef.current = null
+	      hasRestoredStateRef.current = false
       restoringStateRef.current = false
       resetActiveFileState()
       setPinnedFiles([])
@@ -4650,7 +4738,6 @@ export function ProjectEditor({
     if (lastHandledOpenRequestRef.current === openRequest.id) return
     if (!_terminalId || openRequest.terminalId !== _terminalId) return
     if (!rootPath) return
-    if (cwd && normalizeComparablePath(rootPath) !== normalizeComparablePath(cwd)) return
 
     lastHandledOpenRequestRef.current = openRequest.id
     if (openRequest.source === 'diff' || openRequest.returnTarget === 'diff') {
@@ -4664,7 +4751,57 @@ export function ProjectEditor({
       setDiffReturnContext(null)
     }
 
-    if (!openRequest.filePath) return
+    if (!openRequest.filePath) {
+      const currentScope = buildProjectEditorScope(_terminalId, rootRef.current ?? cwd ?? null)
+      const softCloseSnapshot = editorSoftCloseSnapshotRef.current
+      const hasSubpageReturnSnapshot = isProjectEditorSoftCloseSnapshotForScope(
+        softCloseSnapshot,
+        currentScope,
+        'subpage-return'
+      )
+      if (hasSubpageReturnSnapshot) {
+        editorSoftCloseSnapshotRef.current = null
+        applyEditorSoftCloseSnapshot(softCloseSnapshot)
+        if (
+          softCloseSnapshot.path &&
+          isMarkdownPath(softCloseSnapshot.path) &&
+          softCloseSnapshot.isMarkdownPreviewOpen &&
+          !softCloseSnapshot.isBinary &&
+          !softCloseSnapshot.isImage &&
+          !softCloseSnapshot.isSqlite
+        ) {
+          const cacheKey = rootRef.current
+            ? getMarkdownSessionCacheKey(rootRef.current, softCloseSnapshot.path)
+            : null
+          if (cacheKey) {
+            pendingMarkdownSessionCacheRestoreRef.current = {
+              key: cacheKey,
+              filePath: softCloseSnapshot.path
+            }
+          }
+          setIsMarkdownRenderEnabled(true)
+          if (markdownRenderedHtmlRef.current) {
+            resetPreviewRestoreState()
+          } else {
+            beginPreviewRestore()
+          }
+        }
+      } else if (
+        activeFilePathRef.current &&
+        isMarkdownPath(activeFilePathRef.current) &&
+        isMarkdownPreviewOpenRef.current &&
+        Boolean(markdownRenderedHtmlRef.current) &&
+        !isBinaryRef.current &&
+        !isImageRef.current &&
+        !isSqliteRef.current
+      ) {
+        setIsMarkdownRenderEnabled(true)
+        resetPreviewRestoreState()
+      }
+      return
+    }
+
+    if (cwd && normalizeComparablePath(rootPath) !== normalizeComparablePath(cwd)) return
 
     const navigationPath = resolveNavigationFilePath({
       editorRoot: rootPath,
@@ -4688,7 +4825,20 @@ export function ProjectEditor({
       trackRecent: true,
       missingBehavior: 'empty-state'
     })
-  }, [clearActiveFileState, cwd, isOpen, locale, openFile, openRequest, rootPath, showStatus, _terminalId])
+  }, [
+    applyEditorSoftCloseSnapshot,
+    beginPreviewRestore,
+    clearActiveFileState,
+    cwd,
+    isOpen,
+    locale,
+    openFile,
+    openRequest,
+    resetPreviewRestoreState,
+    rootPath,
+    showStatus,
+    _terminalId
+  ])
 
   useEffect(() => {
     if (isOpen) return
@@ -4737,7 +4887,7 @@ export function ProjectEditor({
   }, [activeFilePath, diffReturnContext, isOpen, rootPath, setDiffJumpTargetValue])
 
   useEffect(() => {
-    const currentScope = buildProjectEditorScope(_terminalId, cwd ?? rootRef.current ?? null)
+    const currentScope = buildProjectEditorScope(_terminalId, rootRef.current ?? cwd ?? null)
     if (!isOpen) {
       if (wasOpenRef.current && lastEditorScopeRef.current) {
         if (skipClosePersistRef.current) {
@@ -4761,44 +4911,31 @@ export function ProjectEditor({
       }
       const scopeChanged = !isSameProjectEditorScope(previousScope, currentScope)
       lastEditorScopeRef.current = currentScope
-      // Subpage-return fast path: when handleOpenGitDiff/History snapshotted
-      // the previous activeFilePath under this same scope, surface it
-      // immediately so an autotest's 8s `waitForProjectEditorFile` doesn't
-      // race against the slower full-restore pipeline (tree reload + AppState
-      // re-fetch + restore useEffect). We also restore file content + media
-      // flags from the snapshot so Monaco's model is repopulated before the
-      // slow restore's applyPendingViewState runs — without the content the
-      // restored cursor would clamp from line 60 to line 1 against an empty
-      // model.
-      const subpageReturn = subpageReturnFileRef.current
-      if (subpageReturn && isSameProjectEditorScope(subpageReturn.scope, currentScope)) {
-        subpageReturnFileRef.current = null
-        setActiveFilePathValue(subpageReturn.path)
-        fileContentRef.current = subpageReturn.content
-        setFileContent(subpageReturn.content)
-        setOutlineContentSnapshot({ filePath: subpageReturn.path, content: subpageReturn.content })
-        isBinaryRef.current = subpageReturn.isBinary
-        setIsBinary(subpageReturn.isBinary)
-        isImageRef.current = subpageReturn.isImage
-        setIsImage(subpageReturn.isImage)
-        isSqliteRef.current = subpageReturn.isSqlite
-        setIsSqlite(subpageReturn.isSqlite)
-        isPdfRef.current = subpageReturn.isPdf
-        setIsPdf(subpageReturn.isPdf)
-        isEpubRef.current = subpageReturn.isEpub
-        setIsEpub(subpageReturn.isEpub)
+      // Soft-close fast path: surface the previous active file immediately
+      // so state restoration does not wait for the full tree + AppState
+      // pipeline. The snapshot also keeps Monaco populated before
+      // applyPendingViewState runs.
+      const softCloseSnapshot = editorSoftCloseSnapshotRef.current
+      const scopedSoftCloseSnapshot = isProjectEditorSoftCloseSnapshotForScope(
+        softCloseSnapshot,
+        currentScope
+      )
+        ? softCloseSnapshot
+        : null
+      if (softCloseSnapshot && !scopedSoftCloseSnapshot) {
+        editorSoftCloseSnapshotRef.current = null
+      }
+      const hadSubpageReturnSnapshot = scopedSoftCloseSnapshot?.kind === 'subpage-return'
+      if (hadSubpageReturnSnapshot) {
+        editorSoftCloseSnapshotRef.current = null
+        applyEditorSoftCloseSnapshot(scopedSoftCloseSnapshot)
       }
       if (scopeChanged || !wasOpenRef.current) {
-        const retainedCloseScope = retainedCloseScopeRef.current
         const hasRetainedViewForScope = Boolean(
-          retainedCloseScope &&
-          isSameProjectEditorScope(retainedCloseScope, currentScope) &&
+          scopedSoftCloseSnapshot?.kind === 'retained-close' &&
           activeFilePathRef.current &&
           rootRef.current
         )
-        if (!hasRetainedViewForScope) {
-          retainedCloseScopeRef.current = null
-        }
         restoredStateRef.current = getProjectEditorState(currentScope)
         hasRestoredStateRef.current = false
         restoringStateRef.current = false
@@ -4817,15 +4954,40 @@ export function ProjectEditor({
           fileMemoryRef.current.set(storedState.activeFilePath, backCompatEntry)
         }
 
-        if (storedState?.activeFilePath && isMarkdownPath(storedState.activeFilePath)) {
+        const markdownRestorePath =
+          storedState?.activeFilePath && isMarkdownPath(storedState.activeFilePath)
+            ? storedState.activeFilePath
+            : hadSubpageReturnSnapshot &&
+                scopedSoftCloseSnapshot?.path &&
+                isMarkdownPath(scopedSoftCloseSnapshot.path)
+              ? scopedSoftCloseSnapshot.path
+              : null
+
+        if (markdownRestorePath) {
           const activePath = activeFilePathRef.current
           const root = rootRef.current
           const cacheRead = root && activePath
             ? readMarkdownSessionCache(root, activePath, fileContentRef.current)
             : null
+          // Re-enable the render gate that `resetActiveFileState` cleared
+          // on Diff / History entry, gated to soft-close paths
+          // (retain-view via ESC shortcut, subpage-return via Diff /
+          // History button). Without this, `isMarkdownRenderAllowed`
+          // would stay false and the preview pane would report
+          // `isMarkdownPreviewVisible=false` even when the rendered HTML
+          // is back on screen.
+          if (
+            (hasRetainedViewForScope || hadSubpageReturnSnapshot) &&
+            isMarkdownPreviewOpenRef.current &&
+            !isBinaryRef.current &&
+            !isImageRef.current &&
+            !isSqliteRef.current
+          ) {
+            setIsMarkdownRenderEnabled(true)
+          }
           if (
             hasRetainedViewForScope &&
-            activePath === storedState.activeFilePath &&
+            activePath === markdownRestorePath &&
             isMarkdownPreviewOpenRef.current &&
             (Boolean(markdownRenderedHtmlRef.current) || Boolean(cacheRead?.entry))
           ) {
@@ -4843,6 +5005,30 @@ export function ProjectEditor({
               cacheRead?.result.mode ?? null
             )
             void validateRetainedActiveFileFreshness(activePath, fileContentRef.current)
+          } else if (
+            hadSubpageReturnSnapshot &&
+            activePath === markdownRestorePath &&
+            isMarkdownPreviewOpenRef.current &&
+            Boolean(markdownRenderedHtmlRef.current)
+          ) {
+            // Subpage round-trip variant of the retained-view fast path:
+            // the preserveClosedPreview branch in the worker-deactivate
+            // effect kept `markdownRenderedHtmlRef` populated through the
+            // Diff / History detour, so the rendered HTML is still on
+            // screen. Skip `beginPreviewRestore` (which would otherwise
+            // flip the preview phase to 'waiting-html' and drive the
+            // content opacity to 0). Render gate is re-enabled above for
+            // the whole markdown branch.
+            const cacheKey = root
+              ? getMarkdownSessionCacheKey(root, activePath)
+              : null
+            if (cacheKey) {
+              pendingMarkdownSessionCacheRestoreRef.current = {
+                key: cacheKey,
+                filePath: activePath
+              }
+            }
+            resetPreviewRestoreState()
           } else {
             beginPreviewRestore()
           }
@@ -4856,6 +5042,7 @@ export function ProjectEditor({
     }
     wasOpenRef.current = true
   }, [
+    applyEditorSoftCloseSnapshot,
     beginPreviewRestore,
     cwd,
     finalizeProjectEditorReopenRestore,
@@ -4863,7 +5050,6 @@ export function ProjectEditor({
     isOpen,
     persistProjectEditorState,
     resetPreviewRestoreState,
-    setActiveFilePathValue,
     validateRetainedActiveFileFreshness,
     _terminalId
   ])
@@ -6319,23 +6505,34 @@ export function ProjectEditor({
       hasUnsavedChanges: dirtyRef.current,
       hasMissingFileNotice: Boolean(missingFileNoticeRef.current)
     })
-    if (scope) {
-      const treeEl = fileTreeContainerRef.current
-      const treeKey = getScrollScopeKey(scope)
-      if (treeEl && treeKey) {
-        fileTreeScrollTopRef.current.set(treeKey, treeEl.scrollTop)
-      }
-      capturePreviewScrollMemory()
-      captureMarkdownSessionCacheRef.current(retainViewOnClose ? 'close-retain' : 'close')
-      persistProjectEditorState(scope, { flush: true })
-    }
-    retainedCloseScopeRef.current = retainViewOnClose ? scope : null
-    skipClosePersistRef.current = true
-    if (!retainViewOnClose) {
-      resetActiveFileState()
-    }
-    onClose()
-  }, [capturePreviewScrollMemory, confirmDiscardChanges, onClose, persistProjectEditorState, resetActiveFileState])
+	    if (scope) {
+	      const treeEl = fileTreeContainerRef.current
+	      const treeKey = getScrollScopeKey(scope)
+	      if (treeEl && treeKey) {
+	        fileTreeScrollTopRef.current.set(treeKey, treeEl.scrollTop)
+	      }
+	      capturePreviewScrollMemory()
+	      captureMarkdownSessionCacheRef.current(retainViewOnClose ? 'close-retain' : 'close')
+	      persistProjectEditorState(scope, { flush: true })
+	    }
+	    if (retainViewOnClose) {
+	      captureEditorSoftCloseSnapshot('retained-close', scope)
+	    } else {
+	      editorSoftCloseSnapshotRef.current = null
+	    }
+	    skipClosePersistRef.current = true
+	    if (!retainViewOnClose) {
+	      resetActiveFileState()
+	    }
+	    onClose()
+	  }, [
+	    captureEditorSoftCloseSnapshot,
+	    capturePreviewScrollMemory,
+	    confirmDiscardChanges,
+	    onClose,
+	    persistProjectEditorState,
+	    resetActiveFileState
+	  ])
 
   const handleEscape = useCallback(() => {
     // Close overflow dropdown before anything else (P2-1: must beat useSubpageEscape)
@@ -6369,17 +6566,12 @@ export function ProjectEditor({
     targetFile?: { filePath?: string | null; repoRoot?: string | null }
   ) => {
     if (!_terminalId) return
-    if (gitDiffOpenRef.current) {
-      if (DEBUG_PROJECT_EDITOR) {
-        debugLog('gitdiff:open:ignored', { source, terminalId: _terminalId })
-      }
-      return
-    }
     if (DEBUG_PROJECT_EDITOR) {
       debugLog('gitdiff:open:start', {
         source,
         terminalId: _terminalId,
         activeFilePath,
+        diffAlreadyOpen: gitDiffOpenRef.current,
         isDirty: dirtyRef.current,
         isMarkdownRenderAllowed,
         markdownRenderPending,
@@ -6389,24 +6581,12 @@ export function ProjectEditor({
     const canClose = source === 'debug' || window.electronAPI.debug.profile ? true : await confirmDiscardChanges()
     if (!canClose) return
     if (lastEditorScopeRef.current) {
+      capturePreviewScrollMemory()
+      captureMarkdownSessionCacheRef.current('subpage-before-leave')
       persistProjectEditorState(lastEditorScopeRef.current, { flush: true })
-      // Snapshot the activeFilePath + content so the subpage-return fast
-      // path can repaint the editor immediately. Without the content, the
-      // root:effect close branch wipes Monaco's model and the eventual
-      // restoreViewState lands cursor on line 1 instead of line 60.
-      const snapshotPath = activeFilePathRef.current
-      subpageReturnFileRef.current = snapshotPath
-        ? {
-            scope: lastEditorScopeRef.current,
-            path: snapshotPath,
-            content: fileContentRef.current,
-            isBinary: isBinaryRef.current,
-            isImage: isImageRef.current,
-            isSqlite: isSqliteRef.current,
-            isPdf: isPdfRef.current,
-            isEpub: isEpubRef.current
-          }
-        : null
+      captureEditorSoftCloseSnapshot('subpage-return', lastEditorScopeRef.current)
+    } else {
+      editorSoftCloseSnapshotRef.current = null
     }
     skipClosePersistRef.current = true
     gitDiffOpenRef.current = true
@@ -6419,7 +6599,7 @@ export function ProjectEditor({
         hasIdleTask: markdownIdleHandleRef.current !== null
       })
     }
-    resetActiveFileState({ preserveContentForSubpageReturn: true })
+    resetActiveFileState({ preserveSoftCloseContent: true })
     const terminalId = _terminalId
     if (DEBUG_PROJECT_EDITOR) {
       debugLog('gitdiff:open:dispatch', { terminalId })
@@ -6428,6 +6608,9 @@ export function ProjectEditor({
       terminalId,
       target: 'diff',
       source: 'editor',
+      from: 'editor',
+      intent: targetFile?.filePath ? 'jump' : 'switch',
+      entryPoint: targetFile?.filePath ? 'deep-link' : 'subpage-switcher',
       filePath: targetFile?.filePath ?? null,
       repoRoot: targetFile?.repoRoot ?? null
     }
@@ -6440,6 +6623,7 @@ export function ProjectEditor({
   }, [
     _terminalId,
     activeFilePath,
+    captureEditorSoftCloseSnapshot,
     capturePreviewScrollMemory,
     confirmDiscardChanges,
     isIndexing,
@@ -6485,25 +6669,23 @@ export function ProjectEditor({
     const canClose = source === 'debug' || window.electronAPI.debug.profile ? true : await confirmDiscardChanges()
     if (!canClose) return
     if (lastEditorScopeRef.current) {
+      capturePreviewScrollMemory()
+      captureMarkdownSessionCacheRef.current('subpage-before-leave')
       persistProjectEditorState(lastEditorScopeRef.current, { flush: true })
-      const snapshotPath = activeFilePathRef.current
-      subpageReturnFileRef.current = snapshotPath
-        ? {
-            scope: lastEditorScopeRef.current,
-            path: snapshotPath,
-            content: fileContentRef.current,
-            isBinary: isBinaryRef.current,
-            isImage: isImageRef.current,
-            isSqlite: isSqliteRef.current,
-            isPdf: isPdfRef.current,
-            isEpub: isEpubRef.current
-          }
-        : null
+      captureEditorSoftCloseSnapshot('subpage-return', lastEditorScopeRef.current)
+    } else {
+      editorSoftCloseSnapshotRef.current = null
     }
     skipClosePersistRef.current = true
-    resetActiveFileState({ preserveContentForSubpageReturn: true })
+    resetActiveFileState({ preserveSoftCloseContent: true })
     const terminalId = _terminalId
-    const detail: SubpageNavigateEventDetail = { terminalId, target: 'history' }
+    const detail: SubpageNavigateEventDetail = {
+      terminalId,
+      target: 'history',
+      from: 'editor',
+      intent: 'switch',
+      entryPoint: 'subpage-switcher'
+    }
     perfTrace(PERF_TRACE_EVENT.RENDERER_PROJECT_SUBPAGE_NAVIGATE, {
       target: 'history',
       hasTerminalId: Boolean(terminalId)
@@ -6512,6 +6694,8 @@ export function ProjectEditor({
   }, [
     _terminalId,
     activeFilePath,
+    captureEditorSoftCloseSnapshot,
+    capturePreviewScrollMemory,
     confirmDiscardChanges,
     isIndexing,
     persistProjectEditorState,
@@ -8001,6 +8185,56 @@ export function ProjectEditor({
   const externalPanelShellState = useMemo<SubpagePanelShellState>(() => ({
     current: 'editor',
     onSelect: handleSelectSubpage,
+    lifecycle: {
+      beforeLeave: ({ command }) => {
+        const scope = lastEditorScopeRef.current
+        const snapshotKind: ProjectEditorSoftCloseKind = command.target ? 'subpage-return' : 'retained-close'
+        const shouldCaptureSoftClose = command.target !== null || shouldRetainProjectEditorViewOnClose({
+          hasActiveFile: Boolean(activeFilePathRef.current),
+          hasRootPath: Boolean(rootRef.current),
+          hasUnsavedChanges: dirtyRef.current,
+          hasMissingFileNotice: Boolean(missingFileNoticeRef.current)
+        })
+        let softCloseSnapshot = isProjectEditorSoftCloseSnapshotForScope(
+          editorSoftCloseSnapshotRef.current,
+          scope,
+          snapshotKind
+        )
+          ? editorSoftCloseSnapshotRef.current
+          : null
+        if (!softCloseSnapshot && scope && shouldCaptureSoftClose) {
+          capturePreviewScrollMemory()
+          captureMarkdownSessionCacheRef.current('subpage-before-leave')
+          persistProjectEditorState(scope, { flush: true })
+          softCloseSnapshot = captureEditorSoftCloseSnapshot(snapshotKind, scope)
+        } else if (!shouldCaptureSoftClose) {
+          editorSoftCloseSnapshotRef.current = null
+        }
+        return {
+          subpage: 'editor',
+          activeFilePath: softCloseSnapshot?.path ?? activeFilePathRef.current,
+          markdownPreviewOpen: softCloseSnapshot?.isMarkdownPreviewOpen ?? isMarkdownPreviewOpenRef.current,
+          markdownEditorVisible: softCloseSnapshot?.isMarkdownEditorVisible ?? isMarkdownEditorVisibleRef.current,
+          markdownRenderedHtmlLength: markdownRenderedHtmlRef.current.length,
+          previewRestorePhase: previewRestorePhaseRef.current,
+          scrollTop: previewRef.current?.scrollTop ?? editorRef.current?.getScrollTop() ?? null
+        }
+      },
+      afterEnter: () => {
+        if (
+          activeFilePathRef.current &&
+          isMarkdownPath(activeFilePathRef.current) &&
+          isMarkdownPreviewOpenRef.current &&
+          !isBinaryRef.current &&
+          !isImageRef.current &&
+          !isSqliteRef.current &&
+          markdownRenderedHtmlRef.current
+        ) {
+          setIsMarkdownRenderEnabled(true)
+          resetPreviewRestoreState()
+        }
+      }
+    },
     workingDirectoryLabel: t('projectEditor.workingDirectory'),
     workingDirectoryPath: rootPath || null,
     workingDirectoryTitle: cwdTitle,
@@ -8009,7 +8243,21 @@ export function ProjectEditor({
     metaExtra: editorStatusMeta,
     actions: externalPanelActions,
     taskTitle
-  }), [cwdFeedback, cwdTitle, editorStatusMeta, externalPanelActions, handleCwdDblClick, handleSelectSubpage, rootPath, t, taskTitle])
+  }), [
+    captureEditorSoftCloseSnapshot,
+    capturePreviewScrollMemory,
+    cwdFeedback,
+    cwdTitle,
+    editorStatusMeta,
+    externalPanelActions,
+    handleCwdDblClick,
+    handleSelectSubpage,
+    persistProjectEditorState,
+    resetPreviewRestoreState,
+    rootPath,
+    t,
+    taskTitle
+  ])
 
   useLayoutEffect(() => {
     if (!isPanel || panelShellMode !== 'external' || !onPanelShellStateChange) return

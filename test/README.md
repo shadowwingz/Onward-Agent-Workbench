@@ -100,7 +100,7 @@ point at files under `test/unittest/`.
 
 | Feature / Bug | Tests |
 |---|---|
-| Editor ↔ Diff ↔ History navigation memory | `run-subpage-navigation` (SN-07, SN-10, SN-12) |
+| Editor ↔ Diff ↔ History navigation memory | `run-subpage-navigation` (SN-07, SN-10, SN-12) + `run-subpage-cdp-clicks` (CDP-01..10) + `test/unittest/git-diff-view-memory.test.mts` |
 | Cursor / scroll position restored across subpage switches | `run-subpage-viewstate-restore` (SVR-01..15) |
 | Auto-updater UI state machine (idle / checking / downloading / restart) | `run-settings-update` (SU-01..10) |
 | Bug fix: error-code falls back to localized detail string | `run-settings-update` (SU-06b) |

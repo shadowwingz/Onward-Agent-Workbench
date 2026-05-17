@@ -52,6 +52,13 @@ import {
   type ClickLatencySettleReason
 } from './clickLatencyTracker'
 import { buildClickPhaseTraceRecords } from './clickLatencyTraceEmitter'
+import {
+  buildGitDiffFileKey,
+  resolveGitDiffRestoredSelection,
+  type DiffViewAnchor,
+  type DiffViewMemory,
+  type DiffViewMemoryEntry
+} from './diffViewMemory'
 import { GitDiffDebugPanel } from './GitDiffDebugPanel'
 import { createThemedSetiFileIconResolver, sanitizeSetiSvgOnce } from '../ProjectEditor/setiFileIconTheme'
 import { perfTrace } from '../../utils/perf-trace'
@@ -543,29 +550,9 @@ function buildDiffFileTree(files: GitFileStatus[], treeScopeKey: string): DiffFi
   return root.children!
 }
 
-type DiffViewAnchor = {
-  line: number | null        // Modify the first visible line number in the editor
-  scrollTop: number          // Editor scroll position
-}
-
 // Render-then-reveal state machine for eliminating diff scroll flash.
 // Mirrors the PreviewRestorePhase pattern used by Markdown preview.
 type DiffRevealPhase = 'idle' | 'waiting-diff' | 'restoring-scroll'
-
-type DiffViewMemoryEntry = {
-  fileKey: string
-  filePath: string
-  originalFilename?: string
-  anchor: DiffViewAnchor | null
-  scrollTop: number
-  signature: string | null
-  updatedAt: number
-}
-
-type DiffViewMemory = {
-  selectedFileKey: string | null
-  entries: Record<string, DiffViewMemoryEntry>
-}
 
 type RestoredAnchor = {
   line: number | null
@@ -849,11 +836,6 @@ function resolveLineSelectionInfo(
     end,
     count
   }
-}
-
-function buildFileKey(repoRoot: string, file: GitFileStatus): string {
-  const original = file.originalFilename ?? ''
-  return `${repoRoot}::${file.changeType}::${file.status}::${original}::${file.filename}`
 }
 
 // Rough line-level diff stats via multiset symmetric difference. Used to keep
@@ -1322,7 +1304,7 @@ export function GitDiffViewer({
   const [expandedRepoRoots, setExpandedRepoRoots] = useState<Set<string>>(() => new Set())
   const activeCwd = useMemo(() => diffResult?.cwd || cwd, [diffResult?.cwd, cwd])
   const getFileKey = useCallback((file: GitFileStatus, repoRoot = activeCwd || '') => {
-    return buildFileKey(file.repoRoot || repoRoot, file)
+    return buildGitDiffFileKey(file.repoRoot || repoRoot, file)
   }, [activeCwd])
 
   // Whenever a click measurement seals, emit one perf-trace span per phase
@@ -2479,7 +2461,7 @@ export function GitDiffViewer({
     }
 
     const repoRoot = result.cwd || sourceCwd
-    const nextKeys = new Set(result.files.map((file) => buildFileKey(file.repoRoot || repoRoot, file)))
+    const nextKeys = new Set(result.files.map((file) => buildGitDiffFileKey(file.repoRoot || repoRoot, file)))
     const memoryKey = getMemoryKey(repoRoot)
     const memoryStore = memoryKey
       ? (diffMemoryRef.current[memoryKey] || {
@@ -2507,42 +2489,36 @@ export function GitDiffViewer({
       [...staleFileContentKeysRef.current].filter((key) => nextKeys.has(key))
     )
 
-    const activeSelection = selectedFileRef.current || previousSelection
-    if (result.success && result.files.length > 0 && activeSelection) {
-      const previous = activeSelection
-      const matched = result.files.find((file) => file.filename === previous.filename && file.changeType === previous.changeType)
-      const fallback = (!matched && previous)
-        ? result.files.find((file) => file.filename === previous.filename &&
-          (file.originalFilename ?? '') === (previous.originalFilename ?? ''))
-        : null
+    const nextFile = result.success
+      ? resolveGitDiffRestoredSelection(
+          result.files,
+          repoRoot,
+          memoryStore,
+          selectedFileRef.current || previousSelection
+        )
+      : null
+    if (result.success && result.files.length > 0 && nextFile) {
       // Guard: skip setSelectedFile when the same file is already selected
       // (e.g., submodule stage-2 load arriving with unchanged file selection).
       // This prevents unnecessary Monaco editor remount and visual flash.
-      const nextFile = matched || fallback || null
-      if (!nextFile) {
-        selectedFileRef.current = null
-        lastSelectedFileRef.current = null
-        setSelectedFile(null)
+      const currentKey = selectedFileRef.current ? getFileKey(selectedFileRef.current) : null
+      const nextKey = buildGitDiffFileKey(nextFile.repoRoot || repoRoot, nextFile)
+      if (nextKey !== currentKey) {
+        setSelectedFile(nextFile)
       } else {
-        const currentKey = selectedFileRef.current ? getFileKey(selectedFileRef.current) : null
-        const nextKey = buildFileKey(nextFile.repoRoot || repoRoot, nextFile)
-        if (nextKey !== currentKey) {
-          setSelectedFile(nextFile)
-        } else {
-          selectedFileRef.current = nextFile
-          // The selected-file effect only fires on a reference change; when
-          // the per-file content cache was wiped externally (watcher-driven
-          // invalidation while the panel was closed), the effect will not
-          // re-fetch on its own and Monaco renders blank or the prior body.
-          // Trigger a fetch directly when the cache slot is empty.
-          const selectedBodyIsStale = staleFileContentKeysRef.current.has(nextKey)
-          if (!fileContentsRef.current[nextKey] || selectedBodyIsStale) {
-            void ensureFileContentRef.current?.(
-              nextFile,
-              selectedBodyIsStale,
-              selectedBodyIsStale ? 'auto-refresh' : 'select'
-            )
-          }
+        selectedFileRef.current = nextFile
+        // The selected-file effect only fires on a reference change; when
+        // the per-file content cache was wiped externally (watcher-driven
+        // invalidation while the panel was closed), the effect will not
+        // re-fetch on its own and Monaco renders blank or the prior body.
+        // Trigger a fetch directly when the cache slot is empty.
+        const selectedBodyIsStale = staleFileContentKeysRef.current.has(nextKey)
+        if (!fileContentsRef.current[nextKey] || selectedBodyIsStale) {
+          void ensureFileContentRef.current?.(
+            nextFile,
+            selectedBodyIsStale,
+            selectedBodyIsStale ? 'auto-refresh' : 'select'
+          )
         }
       }
     } else {
@@ -2623,7 +2599,7 @@ export function GitDiffViewer({
         const age = Date.now() - cached.at
         if (age < 800 && !cached.result.submodulesLoading) {
           debugLog('diff:load:cache', { cwd, age })
-          setDiffResult(cached.result)
+          applyLoadedDiffResult(cached.result, cwd, previousSelection)
           // Treat a cache hit as "diff loaded" for timing purposes so the
           // subpage entry's openToDiffLoadedMs reflects the real (near-zero)
           // latency users perceive when reopening Diff onto a warm cache.
@@ -4382,7 +4358,7 @@ export function GitDiffViewer({
           if (!prev) return prev
           let mutated = false
           const files = prev.files.map((f) => {
-            const key = buildFileKey(f.repoRoot || prev.cwd || '', f)
+            const key = buildGitDiffFileKey(f.repoRoot || prev.cwd || '', f)
             if (key !== selectedFileKey) return f
             if (f.additions === additions && f.deletions === deletions) return f
             mutated = true
@@ -4522,7 +4498,13 @@ export function GitDiffViewer({
     captureDiffView()
     detachDiffEditor()
     setDiffRestoreNotice(null)
-    const detail: SubpageNavigateEventDetail = { terminalId, target: 'history' }
+    const detail: SubpageNavigateEventDetail = {
+      terminalId,
+      target: 'history',
+      from: 'diff',
+      intent: 'switch',
+      entryPoint: 'subpage-switcher'
+    }
     window.dispatchEvent(new CustomEvent('subpage:navigate', { detail }))
   }, [captureDiffView, confirmCloseWithDraft, detachDiffEditor, persistCurrentDiffSplitRatio, terminalId])
 
@@ -4561,6 +4543,9 @@ export function GitDiffViewer({
       detail: {
         terminalId: detail.terminalId,
         target: 'editor',
+        from: 'diff',
+        intent: 'jump',
+        entryPoint: 'deep-link',
         filePath: detail.filePath,
         repoRoot: detail.repoRoot,
         source: detail.source,
@@ -4592,7 +4577,13 @@ export function GitDiffViewer({
       detachDiffEditor()
       setDiffRestoreNotice(null)
       window.dispatchEvent(new CustomEvent<SubpageNavigateEventDetail>('subpage:navigate', {
-        detail: { terminalId, target: 'editor' }
+        detail: {
+          terminalId,
+          target: 'editor',
+          from: 'diff',
+          intent: 'switch',
+          entryPoint: 'subpage-switcher'
+        }
       }))
       return
     }
@@ -6173,7 +6164,7 @@ export function GitDiffViewer({
           <div className="git-diff-file-list-content">
             {(() => {
               const renderFileItem = (file: GitFileStatus, options?: { depth?: number; treeLeafName?: string }) => {
-                const fileKey = diffResult?.cwd ? buildFileKey(file.repoRoot || diffResult.cwd, file) : file.filename
+                const fileKey = diffResult?.cwd ? buildGitDiffFileKey(file.repoRoot || diffResult.cwd, file) : file.filename
                 const isSelected = selectedFileKey === fileKey
                 const fileState = fileContents[fileKey]
                 const isDirty = fileState?.draftContent !== undefined &&
@@ -6423,10 +6414,11 @@ export function GitDiffViewer({
           <span aria-hidden="true">↓</span>
         </SubpagePanelButton>
       </div>
-      <SubpagePanelButton
-        className="git-diff-jump-editor"
-        onClick={handleOpenEditor}
-        disabled={Boolean(jumpToEditorDisabledReason)}
+	      <SubpagePanelButton
+	        className="git-diff-jump-editor"
+	        data-testid="git-diff-jump-editor"
+	        onClick={handleOpenEditor}
+	        disabled={Boolean(jumpToEditorDisabledReason)}
         title={jumpToEditorDisabledReason ?? t('gitDiff.jumpToEditorTitle')}
       >
         <JumpToEditorIcon />
@@ -6474,6 +6466,19 @@ export function GitDiffViewer({
   const externalPanelShellState = useMemo<SubpagePanelShellState>(() => ({
     current: 'diff',
     onSelect: handleSelectSubpage,
+    lifecycle: {
+      beforeLeave: () => {
+        persistCurrentDiffSplitRatio()
+        captureDiffView()
+        return {
+          subpage: 'diff',
+          selectedFilePath: selectedFileRef.current?.filename ?? null,
+          selectedFileKey,
+          scrollTop: diffEditorRef.current?.getModifiedEditor().getScrollTop() ?? null,
+          splitRatio: diffSplitRatioRef.current
+        }
+      }
+    },
     workingDirectoryLabel: t('gitDiff.workingDirectory'),
     workingDirectoryPath: displayedWorkingDirectory,
     workingDirectoryTitle: cwdTitle,
@@ -6482,7 +6487,20 @@ export function GitDiffViewer({
     actions: externalPanelActions,
     metaExtra: externalPanelMetaExtra,
     taskTitle
-  }), [cwdFeedback, cwdTitle, displayedWorkingDirectory, externalPanelActions, externalPanelMetaExtra, handleCwdDblClick, handleSelectSubpage, t, taskTitle])
+  }), [
+    captureDiffView,
+    cwdFeedback,
+    cwdTitle,
+    displayedWorkingDirectory,
+    externalPanelActions,
+    externalPanelMetaExtra,
+    handleCwdDblClick,
+    handleSelectSubpage,
+    persistCurrentDiffSplitRatio,
+    selectedFileKey,
+    t,
+    taskTitle
+  ])
 
   useLayoutEffect(() => {
     if (!isPanel || panelShellMode !== 'external' || !onPanelShellStateChange) return

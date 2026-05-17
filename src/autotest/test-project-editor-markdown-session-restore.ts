@@ -13,6 +13,8 @@ const TARGET_MIN_LINE = 260
 const FALLBACK_TARGET_LINE = 70
 const SHORTCUT_REOPEN_TRIALS = 5
 const SHORTCUT_REOPEN_SAMPLE_MS = 500
+const MIN_REOPEN_SAMPLE_COUNT = 5
+const MIN_SUBPAGE_RETURN_SAMPLE_COUNT = 5
 
 type ProjectEditorReopenRestore = {
   durationMs: number
@@ -148,7 +150,13 @@ export async function testProjectEditorMarkdownSessionRestore(ctx: AutotestConte
       window.setTimeout(finish, 32)
     })
     const startedAt = performance.now()
-    while (performance.now() - startedAt < durationMs) {
+    const maxSampleMs = durationMs + 4000
+    let sawBodyVisible = false
+    while (
+      performance.now() - startedAt < durationMs ||
+      samples.length < MIN_REOPEN_SAMPLE_COUNT ||
+      (!sawBodyVisible && performance.now() - startedAt < maxSampleMs)
+    ) {
       const host = document.querySelector('.terminal-grid-subpage-host.is-open')
       const shellVisible = Boolean(host?.querySelector('[data-subpage-panel-shell="true"]'))
       const bodyVisible = Boolean(host?.querySelector('.project-editor-overlay.panel.is-open .project-editor-body'))
@@ -162,6 +170,7 @@ export async function testProjectEditorMarkdownSessionRestore(ctx: AutotestConte
       // never a fractional value.
       const overlay = document.querySelector('.project-editor-overlay.panel') as HTMLElement | null
       const overlayOpacity = overlay ? Number(window.getComputedStyle(overlay).opacity) : 0
+      sawBodyVisible = sawBodyVisible || bodyVisible
       samples.push({
         selectFileEmptyStateVisible: Boolean(getApi()?.isSelectFileEmptyStateVisible?.()),
         shellVisible,
@@ -533,6 +542,275 @@ export async function testProjectEditorMarkdownSessionRestore(ctx: AutotestConte
         overlayMaxOpacityDuringReopen: obs.overlayMaxOpacityDuringReopen
       }))
     })
+
+    // PMSR-30..35 cross-entry preview cache hit.
+    //
+    // Reproduces the user-reported "Markdown Preview cache fails on
+    // non-shortcut entries" bug. The user explicitly framed the
+    // complaint as a *cache* failure, not as a state-loss failure:
+    // "the cache only works for the shortcut close-reopen path within
+    // the same Task; entries through other paths invalidate it".
+    //
+    // The shortcut-reopen path is locked by PMSR-13a: preview phase
+    // must stay 'idle' across reopen (cache hit short-circuits the
+    // 'waiting-html' -> 'restoring-layout' transitions that would
+    // otherwise drive `.project-editor-preview-content { opacity: 0 }`).
+    //
+    // These new cases extend the SAME contract to the subpage-return
+    // entries:
+    //   * Editor -> Git Diff -> Editor (PMSR-30..32)
+    //   * Editor -> Git History -> Editor (PMSR-33..35)
+    //
+    // For each entry path we sample the preview phase + content opacity
+    // across the entire transition window. The cache-hit fast path
+    // emits zero non-idle phase samples AND zero faded-content samples;
+    // any single observation of `phase != 'idle'` or `opacity < 1` means
+    // the renderer fell back to the slow re-render path, which is what
+    // the user perceives as "preview disappeared".
+
+    const clickSubpageButton = (target: 'diff' | 'editor' | 'history'): boolean => {
+      const button = document.querySelector<HTMLButtonElement>(`[data-subpage-button="${target}"]`)
+      if (!button || button.disabled) return false
+      button.click()
+      return true
+    }
+
+    // Faithful reproduction of the user-reported entry path: click the
+    // panel-shell's Diff / History button from inside the Editor.
+    // This goes through ProjectEditor.handleSelectSubpage ->
+    // handleOpenGitDiff (or handleOpenGitHistory), which sets
+    // `subpageReturnFileRef` AND triggers the editor close path.
+    //
+    // The earlier viewGitDiff shortcut path bypasses ProjectEditor
+    // entirely (TerminalGrid handles 'git-diff:open' directly without
+    // closing the editor), so it does not reproduce the bug. Using the
+    // subpage button click is the correct fixture for the cache-hit
+    // cross-entry regression.
+    const enterGitDiff = async (label: string): Promise<boolean> => {
+      if (!clickSubpageButton('diff')) return false
+      return await waitFor(
+        label,
+        () => Boolean(document.querySelector('.terminal-grid-subpage-host[data-active-subpage="diff"]')),
+        10000,
+        100
+      )
+    }
+
+    const enterGitHistory = async (label: string): Promise<boolean> => {
+      if (!clickSubpageButton('history')) return false
+      return await waitFor(
+        label,
+        () => Boolean(document.querySelector('.terminal-grid-subpage-host[data-active-subpage="history"]')),
+        10000,
+        100
+      )
+    }
+
+    const exitSubpageToEditor = async (label: string): Promise<boolean> => {
+      if (!clickSubpageButton('editor')) return false
+      return await waitFor(
+        label,
+        () => Boolean(getApi()?.isOpen?.())
+          && document.querySelector('.terminal-grid-subpage-host[data-active-subpage="editor"]') !== null,
+        10000,
+        100
+      )
+    }
+
+    /** Re-establish the canonical "Preview on, raw editor visible" state on
+     * `targetPath` before each cross-entry probe. Idempotent: if the editor
+     * is already in this state (e.g. after PMSR-13b's shortcut reopen) the
+     * setters are no-ops. */
+    const ensureCanonicalPreviewState = async (label: string): Promise<boolean> => {
+      const api = getApi()
+      if (!api) return false
+      if (api.getActiveFilePath?.() !== targetPath) {
+        await api.openFileByPathAsUser?.(targetPath, { trackRecent: true })
+      }
+      api.setMarkdownPreviewVisible?.(true)
+      api.setMarkdownEditorVisible?.(true)
+      return await waitForPreviewReady(label, targetPath)
+    }
+
+    /** Sample preview phase + content opacity for `durationMs`. Mirrors the
+     * sampleShortcutReopenFrames sampler used by PMSR-13a/13b but trimmed
+     * to the two signals we care about for cache-hit detection. */
+    const SUBPAGE_RETURN_SAMPLE_MS = 600
+    const sampleSubpageReturnFrames = async (durationMs: number) => {
+      const phases: Array<string | null> = []
+      const opacities: number[] = []
+      const waitForSampleTick = () => new Promise<void>((resolve) => {
+        let resolved = false
+        const finish = () => {
+          if (resolved) return
+          resolved = true
+          resolve()
+        }
+        requestAnimationFrame(finish)
+        window.setTimeout(finish, 32)
+      })
+      const startedAt = performance.now()
+      const maxSampleMs = durationMs + 4000
+      let sawEditorSubpage = false
+      while (
+        performance.now() - startedAt < durationMs ||
+        phases.length < MIN_SUBPAGE_RETURN_SAMPLE_COUNT ||
+        (!sawEditorSubpage && performance.now() - startedAt < maxSampleMs)
+      ) {
+        sawEditorSubpage = sawEditorSubpage || (
+          Boolean(getApi()?.isOpen?.()) &&
+          document.querySelector('.terminal-grid-subpage-host[data-active-subpage="editor"]') !== null
+        )
+        const previewBody = document.querySelector('.project-editor-preview-body') as HTMLElement | null
+        const previewContent = previewBody?.querySelector('.project-editor-preview-content') as HTMLElement | null
+        const opacity = previewContent ? Number(window.getComputedStyle(previewContent).opacity) : 1
+        opacities.push(opacity)
+        phases.push(getApi()?.getPreviewRestorePhase?.() ?? null)
+        await waitForSampleTick()
+      }
+      return { phases, opacities }
+    }
+
+    /** Run the full Diff (or History) round-trip while sampling preview
+     * phase / opacity. Returns the collected samples plus the post-trip
+     * final state so the assertions can check both transient regressions
+     * (mid-trip flash) and final-state correctness. */
+    interface SubpageRoundtripObservation {
+      setupReady: boolean
+      enteredSubpage: boolean
+      exitedToEditor: boolean
+      previewReady: boolean
+      phases: Array<string | null>
+      opacities: number[]
+      nonIdlePhaseSamples: number
+      fadedOpacitySamples: number
+      totalSamples: number
+      finalIsMarkdownPreviewVisible: boolean | null
+      finalIsMarkdownEditorVisible: boolean | null
+      finalHtmlLength: number
+      finalRestorePhase: string | null
+    }
+    const runSubpageRoundtrip = async (
+      label: string,
+      enterSubpage: (label: string) => Promise<boolean>
+    ): Promise<SubpageRoundtripObservation> => {
+      const setupReady = await ensureCanonicalPreviewState(`${label}-setup`)
+      if (!setupReady) {
+        return {
+          setupReady, enteredSubpage: false, exitedToEditor: false, previewReady: false,
+          phases: [], opacities: [],
+          nonIdlePhaseSamples: -1, fadedOpacitySamples: -1, totalSamples: 0,
+          finalIsMarkdownPreviewVisible: null, finalIsMarkdownEditorVisible: null,
+          finalHtmlLength: 0, finalRestorePhase: null
+        }
+      }
+      const enteredSubpage = await enterSubpage(`${label}-enter-subpage`)
+      if (!enteredSubpage) {
+        return {
+          setupReady, enteredSubpage, exitedToEditor: false, previewReady: false,
+          phases: [], opacities: [],
+          nonIdlePhaseSamples: -1, fadedOpacitySamples: -1, totalSamples: 0,
+          finalIsMarkdownPreviewVisible: null, finalIsMarkdownEditorVisible: null,
+          finalHtmlLength: 0, finalRestorePhase: null
+        }
+      }
+      // Start sampling THEN dispatch the navigate event so we catch the
+      // first paint frames where the cache-miss flash would surface.
+      const samplesPromise = sampleSubpageReturnFrames(SUBPAGE_RETURN_SAMPLE_MS)
+      const exitedToEditor = await exitSubpageToEditor(`${label}-exit-to-editor`)
+      const { phases, opacities } = await samplesPromise
+      const previewReady = exitedToEditor
+        && await waitForPreviewReady(`${label}-preview-ready`, targetPath)
+      const api = getApi()
+      const nonIdlePhaseSamples = phases.filter((phase) => phase !== null && phase !== 'idle').length
+      const fadedOpacitySamples = opacities.filter((opacity) => opacity < 0.99).length
+      return {
+        setupReady,
+        enteredSubpage,
+        exitedToEditor,
+        previewReady,
+        phases,
+        opacities,
+        nonIdlePhaseSamples,
+        fadedOpacitySamples,
+        totalSamples: phases.length,
+        finalIsMarkdownPreviewVisible: api?.isMarkdownPreviewVisible?.() ?? null,
+        finalIsMarkdownEditorVisible: api?.isMarkdownEditorVisible?.() ?? null,
+        finalHtmlLength: api?.getMarkdownRenderedHtml?.()?.length ?? 0,
+        finalRestorePhase: api?.getPreviewRestorePhase?.() ?? null
+      }
+    }
+
+    // PMSR-30..32 Editor -> Git Diff -> Editor.
+
+    const diffObservation = await runSubpageRoundtrip('pmsr-diff', enterGitDiff)
+    record('PMSR-30-diff-roundtrip-cache-hit-no-phase-flash',
+      diffObservation.previewReady
+        && diffObservation.totalSamples > 0
+        && diffObservation.nonIdlePhaseSamples === 0,
+      {
+        ...diffObservation,
+        // Truncate raw samples to keep the diagnostic blob readable.
+        phases: diffObservation.phases.slice(0, 30),
+        opacities: diffObservation.opacities.slice(0, 30)
+      }
+    )
+    record('PMSR-31-diff-roundtrip-cache-hit-no-opacity-fade',
+      diffObservation.previewReady
+        && diffObservation.totalSamples > 0
+        && diffObservation.fadedOpacitySamples === 0,
+      {
+        nonIdlePhaseSamples: diffObservation.nonIdlePhaseSamples,
+        fadedOpacitySamples: diffObservation.fadedOpacitySamples,
+        totalSamples: diffObservation.totalSamples
+      }
+    )
+    record('PMSR-32-diff-roundtrip-final-state-preview-rendered',
+      diffObservation.previewReady
+        && diffObservation.finalIsMarkdownPreviewVisible === true
+        && diffObservation.finalHtmlLength > 0,
+      {
+        finalIsMarkdownPreviewVisible: diffObservation.finalIsMarkdownPreviewVisible,
+        finalIsMarkdownEditorVisible: diffObservation.finalIsMarkdownEditorVisible,
+        finalHtmlLength: diffObservation.finalHtmlLength,
+        finalRestorePhase: diffObservation.finalRestorePhase
+      }
+    )
+
+    // PMSR-33..35 Editor -> Git History -> Editor.
+
+    const historyObservation = await runSubpageRoundtrip('pmsr-history', enterGitHistory)
+    record('PMSR-33-history-roundtrip-cache-hit-no-phase-flash',
+      historyObservation.previewReady
+        && historyObservation.totalSamples > 0
+        && historyObservation.nonIdlePhaseSamples === 0,
+      {
+        ...historyObservation,
+        phases: historyObservation.phases.slice(0, 30),
+        opacities: historyObservation.opacities.slice(0, 30)
+      }
+    )
+    record('PMSR-34-history-roundtrip-cache-hit-no-opacity-fade',
+      historyObservation.previewReady
+        && historyObservation.totalSamples > 0
+        && historyObservation.fadedOpacitySamples === 0,
+      {
+        nonIdlePhaseSamples: historyObservation.nonIdlePhaseSamples,
+        fadedOpacitySamples: historyObservation.fadedOpacitySamples,
+        totalSamples: historyObservation.totalSamples
+      }
+    )
+    record('PMSR-35-history-roundtrip-final-state-preview-rendered',
+      historyObservation.previewReady
+        && historyObservation.finalIsMarkdownPreviewVisible === true
+        && historyObservation.finalHtmlLength > 0,
+      {
+        finalIsMarkdownPreviewVisible: historyObservation.finalIsMarkdownPreviewVisible,
+        finalIsMarkdownEditorVisible: historyObservation.finalIsMarkdownEditorVisible,
+        finalHtmlLength: historyObservation.finalHtmlLength,
+        finalRestorePhase: historyObservation.finalRestorePhase
+      }
+    )
   } finally {
     for (const cleanupPath of cleanupPaths) {
       const deleted = await window.electronAPI.project.deletePath(rootPath, cleanupPath)

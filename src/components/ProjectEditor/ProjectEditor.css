@@ -1492,7 +1492,6 @@ body.project-editor-preview-resizing .project-editor-preview-resizer::after {
 .project-editor-preview-content {
   min-height: 100%;
   opacity: 1;
-  transition: opacity 0.15s ease-out;
 }
 
 .project-editor-preview-body.preview-phase-waiting-html .project-editor-preview-content,
