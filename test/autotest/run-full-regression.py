@@ -110,6 +110,7 @@ SCRIPTS: List[str] = [
     "test/autotest/run-prompt-sender-autotest.sh",
     "test/autotest/run-schedule-autotest.sh",
     "test/autotest/run-settings-update-autotest.sh",
+    "test/autotest/run-subpage-cdp-clicks-autotest.sh",
     "test/autotest/run-subpage-navigation-autotest.sh",
     "test/autotest/run-subpage-viewstate-restore-autotest.sh",
     "test/autotest/run-telemetry-autotest.sh",

@@ -217,24 +217,26 @@ export function TerminalDropdown({
           {t('terminalDropdown.developmentGroup')}
         </div>
         <div className="terminal-dropdown-section-card">
-          <button
-            type="button"
-            className="terminal-dropdown-item"
-            onClick={() => { handleMenuItemClick(onOpenProjectEditor, 'dropdown/development', 'editor') }}
-            role="menuitem"
-          >
+	          <button
+	            type="button"
+	            className="terminal-dropdown-item"
+	            data-terminal-dropdown-action="editor"
+	            onClick={() => { handleMenuItemClick(onOpenProjectEditor, 'dropdown/development', 'editor') }}
+	            role="menuitem"
+	          >
             <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
               <path d="M2.5 2.75A.75.75 0 0 1 3.25 2h4.19c.2 0 .39.08.53.22l1.06 1.06c.14.14.33.22.53.22h3.24a.75.75 0 0 1 .75.75v9.5a.75.75 0 0 1-.75.75H3.25a.75.75 0 0 1-.75-.75v-11zm1.5.75v9.5h8.5V4.5h-3.5a1 1 0 0 1-.7-.3L7 2.5H4z" />
               <path d="M6.25 6.5a.75.75 0 0 1 .75-.75h4a.75.75 0 0 1 0 1.5H8.5v3.25a.75.75 0 0 1-1.5 0V7.25H7a.75.75 0 0 1-.75-.75z" />
             </svg>
             <span>{t('terminalDropdown.openEditor')}</span>
           </button>
-          <button
-            type="button"
-            className="terminal-dropdown-item"
-            onClick={() => { handleMenuItemClick(onViewGitDiff, 'dropdown/development', 'gitDiff') }}
-            role="menuitem"
-          >
+	          <button
+	            type="button"
+	            className="terminal-dropdown-item"
+	            data-terminal-dropdown-action="diff"
+	            onClick={() => { handleMenuItemClick(onViewGitDiff, 'dropdown/development', 'gitDiff') }}
+	            role="menuitem"
+	          >
             <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
               <path d="M5.5 2.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5zM4 5a1.5 1.5 0 1 1 3 0 1.5 1.5 0 0 1-3 0zm6.5 3.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5zM9 11a1.5 1.5 0 1 1 3 0 1.5 1.5 0 0 1-3 0z"/>
               <path d="M5.5 8v4.5h1V8h-1zm4-2.5V1h-1v4.5h1z"/>
@@ -242,12 +244,13 @@ export function TerminalDropdown({
             </svg>
             <span>{t('terminalDropdown.viewGitDiff')}</span>
           </button>
-          <button
-            type="button"
-            className="terminal-dropdown-item"
-            onClick={() => { handleMenuItemClick(onViewGitHistory, 'dropdown/development', 'gitHistory') }}
-            role="menuitem"
-          >
+	          <button
+	            type="button"
+	            className="terminal-dropdown-item"
+	            data-terminal-dropdown-action="history"
+	            onClick={() => { handleMenuItemClick(onViewGitHistory, 'dropdown/development', 'gitHistory') }}
+	            role="menuitem"
+	          >
             <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
               <path d="M3 2.75A.75.75 0 0 1 3.75 2h6.5a.75.75 0 0 1 .75.75v1.5H14a.75.75 0 0 1 .75.75v7.25a.75.75 0 0 1-.75.75H7.75a.75.75 0 0 1-.75-.75V11H3.75A.75.75 0 0 1 3 10.25Z" />
               <path d="M4.5 5.5A.5.5 0 0 1 5 5h5a.5.5 0 0 1 0 1H5a.5.5 0 0 1-.5-.5zm0 2A.5.5 0 0 1 5 7h5a.5.5 0 0 1 0 1H5a.5.5 0 0 1-.5-.5zm0 2A.5.5 0 0 1 5 9h3.5a.5.5 0 0 1 0 1H5a.5.5 0 0 1-.5-.5z" />
@@ -293,11 +296,12 @@ export function TerminalDropdown({
 
   return (
     <div className="terminal-dropdown" ref={dropdownRef}>
-      <button
-        ref={triggerRef}
-        className={`terminal-dropdown-trigger ${isOpen ? 'open' : ''}`}
-        onClick={handleTriggerClick}
-        title={t('terminalDropdown.title')}
+	      <button
+	        ref={triggerRef}
+	        className={`terminal-dropdown-trigger ${isOpen ? 'open' : ''}`}
+	        data-terminal-dropdown-trigger="true"
+	        onClick={handleTriggerClick}
+	        title={t('terminalDropdown.title')}
         aria-haspopup="menu"
         aria-expanded={isOpen}
       >

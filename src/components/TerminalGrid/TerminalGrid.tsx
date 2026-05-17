@@ -34,6 +34,17 @@ import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
 import { useI18n } from '../../i18n/useI18n'
 import { buildChangeDirectoryCommand, type TerminalShellKind } from '../../utils/terminal-command'
 import type { ProjectEditorOpenRequest, SubpageId, SubpageNavigateEventDetail } from '../../types/subpage'
+import {
+  buildSubpageRouteCommand,
+  legacyNavigateDetailToRouteCommand,
+  shouldApplySubpageTargetFile,
+  subpageRouteCommandToDebugLabel,
+  type SubpageRouteCommand
+} from './subpageRouter'
+import {
+  createSubpageStateMemory,
+  type SubpageMemoryScope
+} from './subpageStateMemory'
 import '@xterm/xterm/css/xterm.css'
 import './TerminalGrid.css'
 import '../../styles/path-copy-toast.css'
@@ -288,6 +299,9 @@ export const TerminalGrid = memo(function TerminalGrid({
   const [gitHistoryCwd, setGitHistoryCwd] = useState<string | null>(null)
   const [activeSubpage, setActiveSubpage] = useState<SubpageId | null>(initialActiveSubpage)
   const [panelShellStates, setPanelShellStates] = useState<Partial<Record<SubpageId, SubpagePanelShellState>>>({})
+  const panelShellStatesRef = useRef<Partial<Record<SubpageId, SubpagePanelShellState>>>({})
+  const subpageStateMemoryRef = useRef(createSubpageStateMemory())
+  const executeSubpageRouteRef = useRef<((command: SubpageRouteCommand) => Promise<void>) | null>(null)
 
   // Coding Agent launch modal state
   const [codingAgentModalOpen, setCodingAgentModalOpen] = useState(false)
@@ -325,6 +339,7 @@ export const TerminalGrid = memo(function TerminalGrid({
   const gitDiffNavigationTargetNonceRef = useRef(0)
   const gitHistoryOpenTokenRef = useRef(0)
   const subpageNavigateTokenRef = useRef(0)
+  const pendingSubpageRouteTargetRef = useRef<SubpageId | null>(null)
   const [terminalStatuses, setTerminalStatuses] = useState<Record<string, TerminalSessionStatus>>({})
   const projectEditorOpenInGrid = projectEditorOpen
     && Boolean(projectEditorTerminalId && terminals.some(term => term.id === projectEditorTerminalId))
@@ -356,12 +371,15 @@ export const TerminalGrid = memo(function TerminalGrid({
         if (!(subpage in prev)) return prev
         const next = { ...prev }
         delete next[subpage]
+        panelShellStatesRef.current = next
         return next
       }
       if (prev[subpage] === state) {
         return prev
       }
-      return { ...prev, [subpage]: state }
+      const next = { ...prev, [subpage]: state }
+      panelShellStatesRef.current = next
+      return next
     })
   }, [])
 
@@ -385,6 +403,9 @@ export const TerminalGrid = memo(function TerminalGrid({
   // 'editor' (SN-05 reproduction). The new logic only picks a panel when the
   // current activeSubpage points to a closed panel.
   useLayoutEffect(() => {
+    if (activeSubpage !== null && pendingSubpageRouteTargetRef.current === activeSubpage) {
+      return
+    }
     const currentStillOpen = (
       activeSubpage === 'diff' ? gitDiffOpen :
       activeSubpage === 'history' ? gitHistoryOpen :
@@ -415,7 +436,6 @@ export const TerminalGrid = memo(function TerminalGrid({
       ? retainedPanelShellState ?? lastPanelShellStateRef.current
       : null
   )
-  const activeSubpageSelect = activePanelShellState?.onSelect
 
   useEffect(() => {
     const previous = previousActiveSubpageRef.current
@@ -467,11 +487,13 @@ export const TerminalGrid = memo(function TerminalGrid({
     subpageRestoredRef.current = true
     // Defer so terminal info and refs are settled after mount
     const timer = window.setTimeout(() => {
-      if (initialActiveSubpage === 'diff') {
-        handleViewGitDiff(restoreTerminalId)
-      } else if (initialActiveSubpage === 'history') {
-        handleViewGitHistory(restoreTerminalId)
-      }
+      void executeSubpageRouteRef.current?.(buildSubpageRouteCommand({
+        intent: 'restore',
+        entryPoint: 'session-restore',
+        terminalId: restoreTerminalId,
+        from: null,
+        target: initialActiveSubpage
+      }))
     }, 0)
     return () => window.clearTimeout(timer)
     // Only run once on mount with initial values
@@ -2061,9 +2083,160 @@ export const TerminalGrid = memo(function TerminalGrid({
     }
   }, [getPersistedTerminalCwd, terminalInfos])
 
+  const resolveSubpageMemoryScope = useCallback((
+    terminalId: string,
+    subpage: SubpageId | null
+  ): SubpageMemoryScope => {
+    const terminalInfo = terminalInfos[terminalId]
+    const fallbackCwd = terminalInfo?.repoRoot || terminalInfo?.cwd || getPersistedTerminalCwd(terminalId)
+    let root: string | null = fallbackCwd ?? null
+    if (subpage === 'editor' && projectEditorTerminalId === terminalId) {
+      root = projectEditorCwd || fallbackCwd || null
+    } else if (subpage === 'diff' && gitDiffTerminalId === terminalId) {
+      root = gitDiffCwd || fallbackCwd || null
+    } else if (subpage === 'history' && gitHistoryTerminalId === terminalId) {
+      root = gitHistoryCwd || fallbackCwd || null
+    }
+    return {
+      terminalId,
+      root,
+      tabId: _tabId ?? null
+    }
+  }, [
+    getPersistedTerminalCwd,
+    gitDiffCwd,
+    gitDiffTerminalId,
+    gitHistoryCwd,
+    gitHistoryTerminalId,
+    projectEditorCwd,
+    projectEditorTerminalId,
+    _tabId,
+    terminalInfos
+  ])
+
+  const captureSubpageBeforeLeave = useCallback(async (command: SubpageRouteCommand) => {
+    const from = command.from
+    if (!from) return
+    const lifecycle = panelShellStatesRef.current[from]?.lifecycle
+    const snapshot = await lifecycle?.beforeLeave?.({ command })
+    if (!snapshot) return
+    const scope = resolveSubpageMemoryScope(command.terminalId, from)
+    subpageStateMemoryRef.current.save(scope, snapshot)
+    debugLog('subpage:memory:capture', {
+      route: subpageRouteCommandToDebugLabel(command),
+      subpage: snapshot.subpage,
+      scope
+    })
+  }, [resolveSubpageMemoryScope])
+
+  const notifySubpageAfterEnter = useCallback(async (command: SubpageRouteCommand) => {
+    const target = command.target
+    if (!target) return
+    const lifecycle = panelShellStatesRef.current[target]?.lifecycle
+    await lifecycle?.afterEnter?.({ command })
+  }, [])
+
+  const closeNonTargetSubpagesForRoute = useCallback((target: SubpageId | null) => {
+    if (target !== 'diff') {
+      closeGitDiffPanel(false)
+    }
+    if (target !== 'history') {
+      closeGitHistoryPanel(false)
+    }
+    if (target !== 'editor') {
+      onCloseProjectEditor?.()
+    }
+  }, [closeGitDiffPanel, closeGitHistoryPanel, onCloseProjectEditor])
+
+  const executeSubpageRoute = useCallback(async (command: SubpageRouteCommand) => {
+    const navigateToken = ++subpageNavigateTokenRef.current
+    if (command.intent !== 'open' || command.from) {
+      await captureSubpageBeforeLeave(command)
+    }
+
+    const target = command.target
+    pendingSubpageRouteTargetRef.current = target
+    setActiveSubpage(target)
+    debugLog('subpage:route', subpageRouteCommandToDebugLabel(command))
+
+    if (!target) {
+      pendingSubpageRouteTargetRef.current = null
+      if (command.from === 'diff') {
+        closeGitDiffPanel(true)
+      } else if (command.from === 'history') {
+        closeGitHistoryPanel(true)
+      } else if (command.from === 'editor') {
+        onCloseProjectEditor?.()
+      } else {
+        closeNonTargetSubpagesForRoute(null)
+      }
+      return
+    }
+
+    if (target === 'diff') {
+      setGitDiffNavigationTarget(shouldApplySubpageTargetFile(command) && command.targetFile
+        ? {
+            filePath: command.targetFile.filePath,
+            repoRoot: command.targetFile.repoRoot,
+            nonce: ++gitDiffNavigationTargetNonceRef.current
+          }
+        : null)
+      void handleViewGitDiff(command.terminalId, { closeOtherSubpages: false })
+    } else if (target === 'history') {
+      void handleViewGitHistory(command.terminalId, { closeOtherSubpages: false })
+    } else if (target === 'editor') {
+      void onOpenProjectEditor(command.terminalId, {
+        filePath: shouldApplySubpageTargetFile(command) ? command.targetFile?.filePath ?? null : null,
+        repoRoot: shouldApplySubpageTargetFile(command) ? command.targetFile?.repoRoot ?? null : null,
+        source: command.source,
+        returnTarget: command.returnTarget,
+        diffFilePath: shouldApplySubpageTargetFile(command) ? command.targetFile?.diffFilePath ?? null : null,
+        diffRepoRoot: shouldApplySubpageTargetFile(command) ? command.targetFile?.diffRepoRoot ?? null : null
+      })
+    }
+
+    requestAnimationFrame(() => {
+      if (subpageNavigateTokenRef.current !== navigateToken) return
+      closeNonTargetSubpagesForRoute(target)
+      requestAnimationFrame(() => {
+        if (subpageNavigateTokenRef.current !== navigateToken) return
+        pendingSubpageRouteTargetRef.current = null
+        void notifySubpageAfterEnter(command)
+      })
+    })
+  }, [
+    captureSubpageBeforeLeave,
+    closeGitDiffPanel,
+    closeGitHistoryPanel,
+    closeNonTargetSubpagesForRoute,
+    handleViewGitDiff,
+    handleViewGitHistory,
+    notifySubpageAfterEnter,
+    onOpenProjectEditor
+  ])
+
+  useEffect(() => {
+    executeSubpageRouteRef.current = executeSubpageRoute
+    return () => {
+      if (executeSubpageRouteRef.current === executeSubpageRoute) {
+        executeSubpageRouteRef.current = null
+      }
+    }
+  }, [executeSubpageRoute])
+
   const handleCloseGitDiff = useCallback(() => {
+    if (gitDiffTerminalId) {
+      void executeSubpageRoute(buildSubpageRouteCommand({
+        intent: 'close',
+        entryPoint: 'escape',
+        terminalId: gitDiffTerminalId,
+        from: 'diff',
+        target: null
+      }))
+      return
+    }
     closeGitDiffPanel(true)
-  }, [closeGitDiffPanel])
+  }, [closeGitDiffPanel, executeSubpageRoute, gitDiffTerminalId])
 
   useEffect(() => {
     const handleOpenGitDiff = (event: Event) => {
@@ -2073,14 +2246,20 @@ export const TerminalGrid = memo(function TerminalGrid({
       if (!terminalId) return
       debugLog('gitdiff:event:open', { terminalId })
       if (!terminals.some(term => term.id === terminalId)) return
-      handleViewGitDiff(terminalId)
+      void executeSubpageRoute(buildSubpageRouteCommand({
+        intent: activeSubpage && activeSubpage !== 'diff' ? 'switch' : 'open',
+        entryPoint: 'legacy-event',
+        terminalId,
+        from: activeSubpage,
+        target: 'diff'
+      }))
     }
 
     window.addEventListener('git-diff:open', handleOpenGitDiff as EventListener)
     return () => {
       window.removeEventListener('git-diff:open', handleOpenGitDiff as EventListener)
     }
-  }, [handleViewGitDiff, hidden, terminals, visibleTerminals])
+  }, [activeSubpage, executeSubpageRoute, hidden, terminals, visibleTerminals])
 
   useEffect(() => {
     const handleOpenGitHistory = (event: Event) => {
@@ -2089,65 +2268,29 @@ export const TerminalGrid = memo(function TerminalGrid({
       const terminalId = customEvent.detail?.terminalId
       if (!terminalId) return
       if (!terminals.some(term => term.id === terminalId)) return
-      handleViewGitHistory(terminalId)
+      void executeSubpageRoute(buildSubpageRouteCommand({
+        intent: activeSubpage && activeSubpage !== 'history' ? 'switch' : 'open',
+        entryPoint: 'legacy-event',
+        terminalId,
+        from: activeSubpage,
+        target: 'history'
+      }))
     }
 
     window.addEventListener('git-history:open', handleOpenGitHistory as EventListener)
     return () => {
       window.removeEventListener('git-history:open', handleOpenGitHistory as EventListener)
     }
-  }, [handleViewGitHistory, hidden, terminals])
+  }, [activeSubpage, executeSubpageRoute, hidden, terminals])
 
   useEffect(() => {
     const handleSubpageNavigate = (event: Event) => {
       if (hidden) return
       const customEvent = event as CustomEvent<SubpageNavigateEventDetail>
-      const terminalId = customEvent.detail?.terminalId
-      const target = customEvent.detail?.target
-      if (!terminalId || !target) return
-      if (!terminals.some(term => term.id === terminalId)) return
-      const navigateToken = ++subpageNavigateTokenRef.current
-      setActiveSubpage(target)
-
-      const closeNonTargetSubpages = () => {
-        if (subpageNavigateTokenRef.current !== navigateToken) return
-        if (target !== 'diff') {
-          closeGitDiffPanel(false)
-        }
-        if (target !== 'history') {
-          closeGitHistoryPanel(false)
-        }
-        if (target !== 'editor') {
-          onCloseProjectEditor?.()
-        }
-      }
-
-      if (target === 'diff') {
-        const filePath = customEvent.detail?.filePath
-        setGitDiffNavigationTarget(typeof filePath === 'string' && filePath.trim()
-          ? {
-              filePath,
-              repoRoot: customEvent.detail?.repoRoot ?? null,
-              nonce: ++gitDiffNavigationTargetNonceRef.current
-            }
-          : null)
-        void handleViewGitDiff(terminalId, { closeOtherSubpages: false })
-      } else if (target === 'history') {
-        void handleViewGitHistory(terminalId, { closeOtherSubpages: false })
-      } else {
-        void onOpenProjectEditor(terminalId, {
-          filePath: customEvent.detail?.filePath ?? null,
-          repoRoot: customEvent.detail?.repoRoot ?? null,
-          source: customEvent.detail?.source ?? null,
-          returnTarget: customEvent.detail?.returnTarget ?? null,
-          diffFilePath: customEvent.detail?.diffFilePath ?? null,
-          diffRepoRoot: customEvent.detail?.diffRepoRoot ?? null
-        })
-      }
-
-      requestAnimationFrame(() => {
-        closeNonTargetSubpages()
-      })
+      const command = legacyNavigateDetailToRouteCommand(customEvent.detail, activeSubpage)
+      if (!command) return
+      if (!terminals.some(term => term.id === command.terminalId)) return
+      void executeSubpageRoute(command)
     }
 
     window.addEventListener('subpage:navigate', handleSubpageNavigate as EventListener)
@@ -2155,13 +2298,9 @@ export const TerminalGrid = memo(function TerminalGrid({
       window.removeEventListener('subpage:navigate', handleSubpageNavigate as EventListener)
     }
   }, [
-    closeGitDiffPanel,
-    closeGitHistoryPanel,
-    handleViewGitDiff,
-    handleViewGitHistory,
+    activeSubpage,
+    executeSubpageRoute,
     hidden,
-    onCloseProjectEditor,
-    onOpenProjectEditor,
     terminals
   ])
 
@@ -2182,8 +2321,18 @@ export const TerminalGrid = memo(function TerminalGrid({
   }, [handleOpenBrowser, hidden, terminals])
 
   const handleCloseGitHistory = useCallback(() => {
+    if (gitHistoryTerminalId) {
+      void executeSubpageRoute(buildSubpageRouteCommand({
+        intent: 'close',
+        entryPoint: 'escape',
+        terminalId: gitHistoryTerminalId,
+        from: 'history',
+        target: null
+      }))
+      return
+    }
     closeGitHistoryPanel(true)
-  }, [closeGitHistoryPanel])
+  }, [closeGitHistoryPanel, executeSubpageRoute, gitHistoryTerminalId])
 
   // Coding Agent handlers
   const handleOpenCodingAgent = useCallback((terminalId: string) => {
@@ -2261,33 +2410,24 @@ export const TerminalGrid = memo(function TerminalGrid({
       return projectEditorOpenInGrid
     }
 
-    const selectOpenSubpage = (target: SubpageId) => {
-      if (!anySubpageOpen) return false
+    const openOrSwitchSubpage = (target: SubpageId) => {
       if (isSubpageOpen(target)) return true
-      if (!activeSubpageSelect) {
-        debugLog('subpage:shortcut:missing-selector', { target, activeSubpage })
-        return true
-      }
-      activeSubpageSelect(target)
+      void executeSubpageRoute(buildSubpageRouteCommand({
+        intent: anySubpageOpen ? 'switch' : 'open',
+        entryPoint: 'shortcut',
+        terminalId: shortcutAction.terminalId,
+        from: activeSubpage,
+        target
+      }))
       return true
     }
 
     switch (shortcutAction.action) {
       case 'gitDiff':
-        if (selectOpenSubpage('diff')) {
-          return
-        }
-        if (!gitDiffOpen) {
-          void handleViewGitDiff(shortcutAction.terminalId)
-        }
+        openOrSwitchSubpage('diff')
         break
       case 'gitHistory':
-        if (selectOpenSubpage('history')) {
-          return
-        }
-        if (!gitHistoryOpen) {
-          void handleViewGitHistory(shortcutAction.terminalId)
-        }
+        openOrSwitchSubpage('history')
         break
       case 'changeWorkDir':
         void handleChangeWorkDir(shortcutAction.terminalId)
@@ -2296,21 +2436,22 @@ export const TerminalGrid = memo(function TerminalGrid({
         void handleOpenWorkDir(shortcutAction.terminalId)
         break
       case 'projectEditor':
-        if (selectOpenSubpage('editor')) {
-          return
-        }
-        if (!projectEditorOpenInGrid) {
-          setActiveSubpage('editor')
-          perfTrace(PERF_TRACE_EVENT.RENDERER_SUBPAGE_FRESHNESS_CHECK, {
-            subpage: 'editor',
-            cwd: getPersistedTerminalCwd(shortcutAction.terminalId),
-            reason: 'open'
-          })
-          onOpenProjectEditor(shortcutAction.terminalId)
-        }
+        openOrSwitchSubpage('editor')
         break
     }
-  }, [shortcutAction, hidden, visibleTerminals, handleViewGitDiff, handleViewGitHistory, handleChangeWorkDir, handleOpenWorkDir, onOpenProjectEditor, anySubpageOpen, activeSubpage, activeSubpageSelect, gitDiffOpen, gitHistoryOpen, projectEditorOpenInGrid, getPersistedTerminalCwd])
+  }, [
+    activeSubpage,
+    anySubpageOpen,
+    executeSubpageRoute,
+    gitDiffOpen,
+    gitHistoryOpen,
+    handleChangeWorkDir,
+    handleOpenWorkDir,
+    hidden,
+    projectEditorOpenInGrid,
+    shortcutAction,
+    visibleTerminals
+  ])
 
   const handleTerminalFocus = useCallback((terminalId: string, event?: React.MouseEvent) => {
     // Skip focus steal when click originates inside a browser panel
@@ -2424,13 +2565,37 @@ export const TerminalGrid = memo(function TerminalGrid({
                 onClick={(e) => handleTerminalFocus(termInfo.id, e)}
               >
                 <div className="terminal-grid-header">
-                  <TerminalDropdown
-                    terminalId={termInfo.id}
-                    onViewGitDiff={() => handleViewGitDiff(termInfo.id)}
-                    onViewGitHistory={() => handleViewGitHistory(termInfo.id)}
-                    onChangeWorkDir={() => handleChangeWorkDir(termInfo.id)}
-                    onOpenWorkDir={() => handleOpenWorkDir(termInfo.id)}
-                    onOpenProjectEditor={() => onOpenProjectEditor(termInfo.id)}
+	                  <TerminalDropdown
+	                    terminalId={termInfo.id}
+	                    onViewGitDiff={() => {
+	                      void executeSubpageRoute(buildSubpageRouteCommand({
+	                        intent: anySubpageOpen ? 'switch' : 'open',
+	                        entryPoint: 'dropdown',
+	                        terminalId: termInfo.id,
+	                        from: activeSubpage,
+	                        target: 'diff'
+	                      }))
+	                    }}
+	                    onViewGitHistory={() => {
+	                      void executeSubpageRoute(buildSubpageRouteCommand({
+	                        intent: anySubpageOpen ? 'switch' : 'open',
+	                        entryPoint: 'dropdown',
+	                        terminalId: termInfo.id,
+	                        from: activeSubpage,
+	                        target: 'history'
+	                      }))
+	                    }}
+	                    onChangeWorkDir={() => handleChangeWorkDir(termInfo.id)}
+	                    onOpenWorkDir={() => handleOpenWorkDir(termInfo.id)}
+	                    onOpenProjectEditor={() => {
+	                      void executeSubpageRoute(buildSubpageRouteCommand({
+	                        intent: anySubpageOpen ? 'switch' : 'open',
+	                        entryPoint: 'dropdown',
+	                        terminalId: termInfo.id,
+	                        from: activeSubpage,
+	                        target: 'editor'
+	                      }))
+	                    }}
                     onToggleBrowser={() => handleToggleBrowser(termInfo.id)}
                     isBrowserOpen={browserOpenTerminals.has(termInfo.id)}
                     onOpenCodingAgent={() => handleOpenCodingAgent(termInfo.id)}

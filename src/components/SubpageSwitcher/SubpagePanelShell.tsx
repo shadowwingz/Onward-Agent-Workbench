@@ -5,6 +5,7 @@
 
 import type { MouseEventHandler, ReactNode } from 'react'
 import type { SubpageId } from '../../types/subpage'
+import type { SubpageLifecycleController } from '../TerminalGrid/subpageLifecycle'
 import { SubpageSwitcher } from './SubpageSwitcher'
 import './SubpagePanelShell.css'
 
@@ -27,6 +28,7 @@ interface SubpagePanelShellProps {
 export interface SubpagePanelShellState {
   current: SubpageId
   onSelect: (target: SubpageId) => void
+  lifecycle?: SubpageLifecycleController
   actions?: ReactNode
   workingDirectoryLabel: string
   workingDirectoryPath: string | null

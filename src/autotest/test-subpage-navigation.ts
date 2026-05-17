@@ -158,12 +158,12 @@ export async function testSubpageNavigation(ctx: AutotestContext): Promise<TestR
       'Set-Content -LiteralPath "diff-deleted.md" -Value "# diff deleted`n"',
       'Set-Content -LiteralPath "editor-only.md" -Value "# editor only`n"',
       'git add existing.md history-deleted.md diff-deleted.md editor-only.md',
-      'git -c user.name="Onward AutoTest" -c user.email="autotest@example.com" commit -m "base" | Out-Null',
+      'git -c user.name="Onward AutoTest" -c user.email="autotest@example.com" -c commit.gpgsign=false commit -m "base" | Out-Null',
       'Set-Content -LiteralPath "existing.md" -Value "# existing`nline1`nline2`ncommitted"',
       'git add existing.md',
-      'git -c user.name="Onward AutoTest" -c user.email="autotest@example.com" commit -m "update existing" | Out-Null',
+      'git -c user.name="Onward AutoTest" -c user.email="autotest@example.com" -c commit.gpgsign=false commit -m "update existing" | Out-Null',
       'git rm --quiet history-deleted.md',
-      'git -c user.name="Onward AutoTest" -c user.email="autotest@example.com" commit -m "delete history file" | Out-Null'
+      'git -c user.name="Onward AutoTest" -c user.email="autotest@example.com" -c commit.gpgsign=false commit -m "delete history file" | Out-Null'
     ].join('; ') + '\r'
     : [
       `rm -rf "${fixtureShellPath}"`,
@@ -175,12 +175,12 @@ export async function testSubpageNavigation(ctx: AutotestContext): Promise<TestR
       'printf "# diff deleted\\n" > diff-deleted.md',
       'printf "# editor only\\n" > editor-only.md',
       'git add existing.md history-deleted.md diff-deleted.md editor-only.md',
-      'git -c user.name="Onward AutoTest" -c user.email="autotest@example.com" commit -m "base" >/dev/null 2>&1',
+      'git -c user.name="Onward AutoTest" -c user.email="autotest@example.com" -c commit.gpgsign=false commit -m "base" >/dev/null 2>&1',
       'printf "# existing\\nline1\\nline2\\ncommitted\\n" > existing.md',
       'git add existing.md',
-      'git -c user.name="Onward AutoTest" -c user.email="autotest@example.com" commit -m "update existing" >/dev/null 2>&1',
+      'git -c user.name="Onward AutoTest" -c user.email="autotest@example.com" -c commit.gpgsign=false commit -m "update existing" >/dev/null 2>&1',
       'git rm -q history-deleted.md',
-      'git -c user.name="Onward AutoTest" -c user.email="autotest@example.com" commit -m "delete history file" >/dev/null 2>&1'
+      'git -c user.name="Onward AutoTest" -c user.email="autotest@example.com" -c commit.gpgsign=false commit -m "delete history file" >/dev/null 2>&1'
     ].join(' && ') + '\r'
 
   log('phase0.58:start', {
@@ -226,6 +226,12 @@ export async function testSubpageNavigation(ctx: AutotestContext): Promise<TestR
     }, 8000)
   }
 
+  const waitForActiveSubpage = async (label: string, target: 'diff' | 'editor' | 'history') => {
+    return await waitFor(`subpage-navigation-active-subpage:${label}`, () => {
+      return document.querySelector(`.terminal-grid-subpage-host[data-active-subpage="${target}"]`) !== null
+    }, 8000)
+  }
+
   const waitForGitDiffOpen = async (label: string) => {
     return await waitFor(`subpage-navigation-diff-open:${label}`, () => Boolean(getGitDiffApi()?.isOpen()), 8000)
   }
@@ -245,6 +251,14 @@ export async function testSubpageNavigation(ctx: AutotestContext): Promise<TestR
     return await waitFor(`subpage-navigation-history-files:${label}`, () => {
       const api = getGitHistoryApi()
       return Boolean(api && !api.isLoading() && api.getFiles().length > 0)
+    }, 8000)
+  }
+
+  const selectHistoryCommitByIndex = async (label: string, index: number) => {
+    return await waitFor(`subpage-navigation-history-commit:${label}`, () => {
+      const api = getGitHistoryApi()
+      if (!api || api.isLoading()) return false
+      return api.selectCommitByIndex(index) === true
     }, 8000)
   }
 
@@ -345,6 +359,16 @@ export async function testSubpageNavigation(ctx: AutotestContext): Promise<TestR
   const editorOnlyRestored = await waitForProjectEditorFile('editor-only-restored', 'editor-only.md')
   const clickedDiffAgain = clickSubpageButton('diff')
   const diffRestored = clickedDiffAgain && await waitForGitDiffOpen('restore-from-editor')
+  // waitForGitDiffOpen only confirms the panel is mounted (api.isOpen()).
+  // GitDiffViewer's own [isOpen=true] restore effect re-applies the
+  // previously selected file via memory-store lookup on a follow-up render
+  // tick, so reading `getSelectedFile()` synchronously here would race the
+  // restore. Give it up to 3 s to settle before recording the value.
+  if (diffRestored) {
+    await waitFor('subpage-navigation-diff-selection-restored',
+      () => Boolean(getGitDiffApi()?.getSelectedFile?.()?.filename),
+      3000)
+  }
   const restoredDiffSelection = getGitDiffApi()?.getSelectedFile?.()?.filename ?? null
   _assert('SN-07-editor-to-diff-restores-diff-selection', editorOnlyRestored && diffRestored && restoredDiffSelection === 'existing.md', {
     editorOnlyRestored,
@@ -380,8 +404,7 @@ export async function testSubpageNavigation(ctx: AutotestContext): Promise<TestR
     metrics: historyButtonsUniform.metrics
   })
 
-  const historyApi = getGitHistoryApi()
-  const selectedUpdateCommit = historyApi?.selectCommitByIndex(1) === true
+  const selectedUpdateCommit = await selectHistoryCommitByIndex('update-existing', 1)
   const historyFilesLoaded = await waitFor('subpage-navigation-history-existing-file', () => {
     const api = getGitHistoryApi()
     return Boolean(api && !api.isLoading() && api.getFiles().some((file) => file.filename === 'existing.md'))
@@ -452,18 +475,27 @@ export async function testSubpageNavigation(ctx: AutotestContext): Promise<TestR
 
   const clickedDiffForMissing = clickSubpageButton('diff')
   const diffOpenedForMissing = clickedDiffForMissing && await waitForGitDiffOpen('missing')
+  const diffActiveForMissing = diffOpenedForMissing && await waitForActiveSubpage('missing-diff-active', 'diff')
   const diffDeletedReady = await waitForDiffFile('deleted', 'diff-deleted.md')
   const selectedDeletedDiffFile = diffDeletedReady && getGitDiffApi()?.selectFileByPath('diff-deleted.md') === true
   await sleep(500)
-  const clickedEditorMissingFromDiff = clickSubpageButton('editor')
-  const diffDeletedRestored = clickedEditorMissingFromDiff && await waitForProjectEditorFile('diff-deleted-restore', 'editor-only.md')
+  const clickedEditorMissingFromDiff = Boolean(diffActiveForMissing) && clickSubpageButton('editor')
+  const editorActiveFromDiff = clickedEditorMissingFromDiff && await waitForActiveSubpage('diff-deleted-editor-active', 'editor')
+  const diffDeletedRestored = editorActiveFromDiff && await waitForProjectEditorFile('diff-deleted-restore', 'editor-only.md')
   _assert('SN-14-diff-deleted-file-does-not-override-editor', Boolean(
     diffOpenedForMissing &&
+    diffActiveForMissing &&
     selectedDeletedDiffFile &&
+    clickedEditorMissingFromDiff &&
+    editorActiveFromDiff &&
     diffDeletedRestored
   ), {
     diffOpenedForMissing,
+    diffActiveForMissing,
     selectedDeletedDiffFile,
+    clickedEditorMissingFromDiff,
+    editorActiveFromDiff,
+    diffDeletedRestored,
     expected: 'editor-only.md',
     activeFilePath: getProjectEditorApi()?.getActiveFilePath?.() ?? null
   })
