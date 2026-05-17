@@ -99,6 +99,12 @@ try {
     exit 1
   }
 
+  if (-not (Select-String -Path $LogFile -Pattern 'GSM-14-force-refresh-bumps-generation' -Quiet)) {
+    Write-Host 'Missing GSM-14 marker; the generation refresh test did not run to completion'
+    Get-Content $LogFile -Tail 40 | Out-Host
+    exit 1
+  }
+
   if (-not (Select-String -Path $LogFile -Pattern 'git-state-mirror-latency:done' -Quiet)) {
     Write-Host 'Missing git-state-mirror-latency:done marker; the suite did not finish cleanly'
     Get-Content $LogFile -Tail 40 | Out-Host

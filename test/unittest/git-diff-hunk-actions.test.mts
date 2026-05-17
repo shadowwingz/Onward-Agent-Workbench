@@ -42,7 +42,11 @@ const firstChange = {
   modifiedEndLineNumber: 2
 }
 
-test('hunk widgets install for a normal worktree file and clamp anchor lines', () => {
+test('hunk widgets install for a normal worktree file (anchor clamped, range trusted)', () => {
+  // The anchorLine is still clamped against lineCount inside
+  // buildHunkActionWidgetPlan (legitimate widget-placement bound, not a
+  // defensive snapshot read). Range numbers are preserved verbatim from
+  // Monaco — no longer clamped to lineCount, per Phase 4.
   const plan = buildHunkActionWidgetPlan({
     file: file(),
     state: {},
@@ -56,11 +60,7 @@ test('hunk widgets install for a normal worktree file and clamp anchor lines', (
   assert.equal(plan.widgets[0].anchorLine, 1)
   assert.equal(plan.widgets[0].primaryAction, 'stage')
   assert.equal(plan.widgets[0].showRevert, true)
-  assert.deepEqual(plan.widgets[0].range, createHunkActionRange({
-    ...firstChange,
-    modifiedStartLineNumber: 1,
-    modifiedEndLineNumber: 1
-  }, 0))
+  assert.deepEqual(plan.widgets[0].range, createHunkActionRange(firstChange, 0))
 })
 
 test('staged files expose unstage without a revert widget action', () => {
@@ -154,7 +154,17 @@ test('hunk widget plan caps rendered widgets to avoid DOM overload', () => {
   assert.equal(plan.widgets.length, 100)
 })
 
-test('hunk widget plan drops invalid Monaco line changes before widget creation', () => {
+test('hunk widget plan trusts Monaco LineChange[] line numbers (no defensive clamping)', () => {
+  // After the Phase 4 refactor, normalizeLineSide no longer clamps against
+  // a maxLineCount — Monaco's diff service already guarantees its LineChange
+  // entries are within the bound model. The previous defensive check was
+  // the entry point of the same-blob-OID race (it tripped when getLineCount
+  // was sampled in a setTimeout window before the new model was attached).
+  //
+  // This test locks the new behaviour: both line changes survive, even when
+  // one of them references line numbers larger than the model's reported
+  // lineCount (which only happens via stale snapshots — Monaco itself never
+  // produces such a change).
   const plan = buildHunkActionWidgetPlan({
     file: file(),
     state: {},
@@ -172,27 +182,30 @@ test('hunk widget plan drops invalid Monaco line changes before widget creation'
   })
 
   assert.equal(plan.eligibility.result, 'installed')
-  assert.equal(plan.widgets.length, 1)
-  assert.deepEqual(plan.widgets[0].range, createHunkActionRange(firstChange, 1))
+  assert.equal(plan.widgets.length, 2)
 })
 
-test('normalizeHunkActionLineChange rejects reversed ranges but preserves pure deletions', () => {
+test('normalizeHunkActionLineChange rejects reversed ranges (range validity only, no clamping)', () => {
+  // Reversed range (start > end) is still rejected — that's a true
+  // structural invariant violation, not defensive clamping.
   assert.equal(normalizeHunkActionLineChange({
     originalStartLineNumber: 8,
     originalEndLineNumber: 3,
     modifiedStartLineNumber: 5,
     modifiedEndLineNumber: 6
-  }, 10), null)
+  }), null)
 
+  // Pure deletions (modifiedEnd === 0) are preserved as-is.
+  // No clamping — modifiedStartLineNumber=99 is returned unchanged.
   assert.deepEqual(normalizeHunkActionLineChange({
     originalStartLineNumber: 10,
     originalEndLineNumber: 12,
     modifiedStartLineNumber: 99,
     modifiedEndLineNumber: 0
-  }, 20), {
+  }), {
     originalStartLineNumber: 10,
     originalEndLineNumber: 12,
-    modifiedStartLineNumber: 20,
+    modifiedStartLineNumber: 99,
     modifiedEndLineNumber: 0
   })
 })

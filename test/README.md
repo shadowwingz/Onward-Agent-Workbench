@@ -114,6 +114,7 @@ point at files under `test/unittest/`.
 | Recursive submodule traversal | `run-git-diff-recursive-submodules` (RSM-*) |
 | Bug fix: parent diff hides "internal-only" dirty submodule entries | `run-git-diff-staleness-and-submodule` (GDS-01..05, GDS-13, GDS-14) |
 | Bug fix: 3-second request cache invalidated by FS watcher | `run-git-diff-staleness-and-submodule` (GDS-06..10, GDS-12, GDS-15) |
+| Bug fix: GitStateMirror parcel-watcher shutdown exits cleanly after an active subscription | `run-git-state-mirror-quit` (GSMQ-*) |
 | Snapshot service caches submodule meta (cache-hit / capture / invalidate) | `run-git-diff-staleness-and-submodule` (GDS-11, GDS-16) |
 | Trace markers emitted on watcher / freshness / snapshot paths | `run-git-diff-staleness-and-submodule` (GDS-12, GDS-16) |
 | Image diff (PNG / SVG) in Diff modes 2up / swipe / onion | `run-image-diff` (ID-01, ID-02, ID-03, ID-19) |
@@ -143,7 +144,7 @@ point at files under `test/unittest/`.
 | Large text warning, read-only chunk viewer, unknown binary open choices, supported PNG/PDF/EPUB bypass binary prompt, large GIF + EPUB preview both use file:// URLs (no base64 IPC, no main-process buffer copy), supported file types (PDF / SQLite / EPUB) have no hard size cap | `run-project-editor-large-file` (PLF-*) |
 | Editor scope = active terminal (multi-terminal isolation) | `run-project-editor-multi-terminal-scope` (PEMS-*) |
 | SQLite viewer (open `.db`, table list, paging) | `run-project-editor-sqlite` (PSQL-*) |
-| File index cache + Quick Open behaviour | `run-file-index-cache-ui` (FIC-01..21) |
+| File index cache + Quick Open behaviour, including ignored `.git/index.lock` / `node_modules/.cache` watcher noise | `run-file-index-cache-ui` (FIC-01..26) |
 | File-index unit (cache eviction, dirty key tracking) | `test/unittest/file-index-cache.test.mts` (executed by `run-unittest-suite`) |
 | Editor auto-refresh on external file mutation | `run-file-watch` (FW-01..05) |
 | Global ripgrep search across project | `run-global-search` (GS-01..11) |
@@ -162,6 +163,7 @@ point at files under `test/unittest/`.
 | Outline target falls back between editor / preview when one is hidden | `run-project-editor-markdown-navigation` (PMN-27..34) |
 | Code-wrap preference (inline + block, persists across reopen) | `run-project-editor-markdown-navigation` (PMN-35..45) |
 | Markdown session restore (last file + section + mode, ESC close + shortcut reopen shell/body sync, reopen reuses cached HTML without worker re-render flash, panel overlay toggles instantly with no fade afterimage) | `run-project-editor-markdown-session-restore` (PMSR-*) |
+| Bug fix: Markdown preview / editor idle no longer keeps Helper CPU high from hidden/loading animations | `run-markdown-preview-cpu` (MPC-*) + unit `preview-restore-settle` (PRS-U-*) |
 | Markdown preview reveal latency (cache-miss + cache-hit fast path, 3 fixture sizes) | `run-markdown-preview-latency` (MPL-*) + unit `preview-restore-settle` (PRS-U-*) |
 | Markdown LaTeX (KaTeX) rendering in preview | `run-markdown-latex-preview` (MLP-*) |
 | Mermaid pan / zoom / fullscreen in preview | `run-mermaid-panzoom` (MPZ-01..02) |

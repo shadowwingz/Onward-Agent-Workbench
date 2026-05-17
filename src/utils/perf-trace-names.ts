@@ -128,6 +128,7 @@ export const PERF_TRACE_EVENT = {
   MAIN_FILE_INDEX_UPDATE: 'main:file-index.update',
   MAIN_PROJECT_TREE_WATCH_EVENT: 'main:project-tree-watch.event',
   MAIN_PROJECT_TREE_WATCH_BATCH: 'main:project-tree-watch.batch',
+  MAIN_PROJECT_TREE_WATCH_IGNORED_SUMMARY: 'main:project-tree-watch.ignored-summary',
 
   // ───────── Workers — app-state ─────────
   WORKER_APP_STATE_LATENCY: 'main:app-state-worker-latency',
@@ -245,6 +246,7 @@ export const PERF_TRACE_EVENT = {
   // cause, hadWork (whether any markdown/worker/mermaid signal was pending
   // during this restore cycle), durationMs.
   RENDERER_MARKDOWN_PREVIEW_REVEAL: 'renderer:markdown.preview-reveal',
+  RENDERER_MARKDOWN_SESSION_CACHE_CAPTURE: 'renderer:markdown.session-cache-capture',
   RENDERER_MONACO_VIEWSTATE_RESTORE: 'renderer:monaco.viewstate-restore',
   RENDERER_XTERM_WEBGL_INIT: 'renderer:xterm.webgl-context-init',
 
@@ -268,12 +270,12 @@ export const PERF_TRACE_EVENT = {
   // index has nothing to show. The filter event records each submodule entry
   // decision at parse time so SQL can verify "kept iff c=C" against a trace.
   // Bug 2: the 3-second request cache returned stale data after FS mutations
-  // because invalidation was time-based. The new fs-watcher driven invalidator
-  // emits cache-hit / cache-invalidate / fs-watch-event so cache health is
-  // observable, plus subpage.freshness-check on Diff/Editor/History entry to
-  // record the watcher-bypass path.
+  // because invalidation was time-based. The GitStateMirror authority now
+  // emits the FS-driven freshness signal; this layer records cache-hit /
+  // cache-invalidate plus subpage.freshness-check on Diff/Editor/History entry.
   MAIN_GIT_DIFF_CACHE_HIT: 'main:git.diff.cache-hit',
   MAIN_GIT_DIFF_CACHE_INVALIDATE: 'main:git.diff.cache-invalidate',
+  // Retired: kept so old trace readers can parse historical captures.
   MAIN_GIT_DIFF_FS_WATCH_EVENT: 'main:git.diff.fs-watch-event',
   MAIN_GIT_DIFF_SUBMODULE_FILTER: 'main:git.diff.submodule-filter',
   MAIN_GIT_DIFF_CONTENT_CACHE_HIT: 'main:git.diff.content-cache.hit',
@@ -377,6 +379,7 @@ export const PERF_TRACE_EVENT = {
   WORKER_GIT_STATE_MIRROR_WATCHER_FILTERED: 'worker:git-state-mirror.watcher-filtered',
   WORKER_GIT_STATE_MIRROR_RECOMPUTE_DONE: 'worker:git-state-mirror.recompute-status-done',
   MAIN_GIT_STATE_MIRROR_FANOUT: 'main:git-state-mirror.fanout',
+  MAIN_GIT_STATE_MIRROR_WORKER_SHUTDOWN: 'main:git-state-mirror.worker-shutdown',
   RENDERER_TERMINAL_TITLE_BRANCH_RENDERED: 'renderer:terminal-title.branch-rendered',
   RENDERER_TERMINAL_TITLE_COLOR_RENDERED: 'renderer:terminal-title.color-rendered',
   RENDERER_GIT_DIFF_MANUAL_REFRESH: 'renderer:git-diff.manual-refresh',

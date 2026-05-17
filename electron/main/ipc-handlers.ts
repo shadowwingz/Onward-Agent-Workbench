@@ -7,7 +7,7 @@ import { app, ipcMain, BrowserWindow, Menu, dialog, shell, clipboard } from 'ele
 import { join, resolve, sep } from 'path'
 import { readFileSync, statSync, writeFileSync } from 'fs'
 import { ptyManager, PtyOptions } from './pty-manager'
-import { GitWatchManager } from './git-watch-manager'
+import { TerminalGitInfoBridge } from './terminal-git-info-bridge'
 import { getPromptStorage, Prompt } from './prompt-storage'
 import { getTerminalConfigStorage, TerminalWindowConfig } from './terminal-config-storage'
 import { getCommandPresetStorage, CommandPreset } from './command-preset-storage'
@@ -34,6 +34,7 @@ import {
   createProjectFolder,
   renameProjectPath,
   deleteProjectPath,
+  projectFilesExist,
 } from './project-editor-utils'
 import { projectFsWorkerClient } from './project-fs-worker-client'
 import { sqliteWorkerClient } from './sqlite-worker-client'
@@ -65,7 +66,7 @@ import { IPC } from '../shared/ipc-channels'
 import { performanceTrace, TraceContext } from './performance-trace'
 import { traceStore } from './trace-store'
 
-let gitWatchManager: GitWatchManager | null = null
+let gitWatchManager: TerminalGitInfoBridge | null = null
 let ripgrepSearchManager: RipgrepSearchManager | null = null
 let fileWatchManager: FileWatchManager | null = null
 let imageWatchManager: ImageWatchManager | null = null
@@ -468,12 +469,15 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   }
 
   // GitStateMirror router — pub/sub bridge to the mirror Worker Thread.
-  // Initialised before the legacy GitWatchManager so its IPC handlers can
-  // start serving subscriptions immediately; the mirror's own watcher /
-  // recompute logic comes online over commits 4-9.
+  // Must initialise BEFORE TerminalGitInfoBridge because the bridge
+  // registers main-process listeners on the router at construction time.
   gitStateMirrorRouter.init(mainWindow)
 
-  gitWatchManager = new GitWatchManager((terminalId, info) => {
+  // Bridge replaces the polling GitWatchManager. It subscribes each
+  // terminal to the Authority Worker for its current cwd and emits
+  // GIT_TERMINAL_INFO purely on event triggers (mirror-update / cwd-
+  // change). No periodic polling anywhere.
+  gitWatchManager = new TerminalGitInfoBridge((terminalId, info) => {
     if (mainWindow.isDestroyed()) return
     mainWindow.webContents.send(IPC.GIT_TERMINAL_INFO, terminalId, info)
   })
@@ -481,14 +485,13 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   imageWatchManager = new ImageWatchManager(mainWindow)
   projectTreeWatchManager = new ProjectTreeWatchManager(mainWindow)
 
-  // When main's FS watcher detects an external mutation we need to:
+  // When the GitStateMirror authority reports a repo mutation we need to:
   //   (1) drop the cached diff inside the git-ipc-worker (where getGitDiff
   //       and gitDiffRequestCache actually live in the normal IPC path), and
   //   (2) tell the renderer so an open GitDiffViewer can re-fetch.
   // Order matters: invalidate the worker cache BEFORE the renderer learns
   // about the change, so any reactive refetch the renderer kicks off lands
-  // on a worker whose cache is already empty. The invalidator already
-  // debounces, so this never spams either side.
+  // on a worker whose cache is already empty.
   gitDiffCacheInvalidator.addListener((cwd, reason) => {
     gitIpcWorkerClient.invalidateDiffCache(cwd, reason)
     if (mainWindow.isDestroyed()) return
@@ -496,8 +499,8 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   })
 
   // Content cache + precompute scheduler. Subscribes to the same invalidator
-  // signal above so per-project file-body cache stays in sync with fs.watch
-  // and the GitStateMirror's HEAD-change deltas.
+  // signal above so per-project file-body cache stays in sync with the
+  // GitStateMirror authority.
   installContentCacheInvalidatorOnce()
 
   ipcMain.on(IPC.DEBUG_LOG, (_event, payload: { message?: string; data?: unknown }) => {
@@ -821,10 +824,6 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
         dataBuffer.setVisible(pendingOutputVisibility)
       }
 
-      // Throttle git activity notifications from PTY output (500ms)
-      let lastGitActivityAt = 0
-      const GIT_ACTIVITY_THROTTLE_MS = 500
-
       const dataDisposable = ptyProcess.onData((data) => {
         // Parse OSC 9;9 CWD reports from shell integration (Windows)
         ptyManager.detectCwd(id, data)
@@ -839,12 +838,11 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
         }, 'pty')
         dataBuffer.push(data)
 
-        // Notify git watch on PTY output (throttled) instead of on every keystroke
-        const now = Date.now()
-        if (now - lastGitActivityAt >= GIT_ACTIVITY_THROTTLE_MS) {
-          lastGitActivityAt = now
-          gitWatchManager?.notifyTerminalActivity(id)
-        }
+        // PTY-output → git-activity nudge is no longer needed: the
+        // GitStateMirror Worker reacts to parcel-watcher events directly,
+        // so any tracked-file change inside the cwd already triggers a
+        // recompute. PTY output that isn't reflected in FS state (e.g.
+        // `cd` only) lands via OSC PUSH_CWD instead.
       })
 
       const exitDisposable = ptyProcess.onExit(({ exitCode, signal }) => {
@@ -1645,16 +1643,10 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   // Get Git diff for a directory
   ipcMain.handle(IPC.GIT_GET_DIFF, async (_, cwd: string, options?: { scope?: 'root-only' | 'full'; force?: boolean }) => {
     const result = await gitIpcWorkerClient.getDiff(cwd, options)
-    // Register the FS watcher on the MAIN process side, scoped to the
-    // resolved repo root rather than the input cwd. When callers open Git
-    // Diff from a subdirectory (e.g. `myrepo/src/components/`), the diff
-    // covers the whole repo, but a watcher on the subdirectory would miss
-    // changes in sibling paths under the same repo. Registering on
-    // `result.cwd` (the resolved repoRoot returned by getGitDiff) keeps the
-    // watcher's surface aligned with the data surface, so external edits
-    // anywhere in the repo trigger the auto-refresh path. Cwds already
-    // watched are no-ops here, and `result.cwd` falls back to the input
-    // cwd when the path is not a git repo.
+    // Register the resolved repo root with the invalidation bus for debug
+    // health / LRU visibility. No watcher starts here; the GitStateMirror
+    // Worker is the only FS-event authority. `result.cwd` falls back to the
+    // input cwd when the path is not a git repo.
     if (result?.cwd) {
       gitDiffCacheInvalidator.registerWatch(result.cwd)
       if (options?.force) {
@@ -1735,11 +1727,10 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   // Save file content to workspace
   // Mutating IPCs (stage / unstage / discard / save / index update) all
   // change the git working tree or index in ways that the renderer-facing
-  // diff view depends on. fs.watch in `gitDiffCacheInvalidator` excludes
-  // `.git/**` events, so .git/index changes don't fire its listener and
-  // our content cache would otherwise serve a pre-mutation snapshot until
-  // the next non-`.git` file event. Wipe the project bucket explicitly
-  // after every successful mutation so the next click refetches fresh.
+  // diff view depends on. The Mirror Worker observes both worktree and
+  // selected .git paths, but mutation IPCs already know the affected project.
+  // Wipe the project bucket explicitly after every successful mutation so the
+  // next click refetches fresh without waiting for the async mirror delta.
   ipcMain.handle(IPC.GIT_SAVE_FILE_CONTENT, async (_, cwd: string, filename: string, content: string) => {
     const result = await gitIpcWorkerClient.saveFileContent(cwd, filename, content)
     invalidateContentCacheForProject(cwd, 'invalidated-mutation')
@@ -1791,12 +1782,14 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     gitWatchManager?.unsubscribe(terminalId)
     return { success: true }
   })
-  ipcMain.handle(IPC.GIT_NOTIFY_TERMINAL_ACTIVITY, async (_event, terminalId: string) => {
-    gitWatchManager?.notifyTerminalActivity(terminalId)
+  // NOTIFY_TERMINAL_ACTIVITY / NOTIFY_TERMINAL_FOCUS were polling-era
+  // boost hints. The event-driven bridge no longer needs them — kept as
+  // no-op IPC handlers so old renderer builds don't error on unhandled
+  // invoke. They will be removed once renderer code stops calling them.
+  ipcMain.handle(IPC.GIT_NOTIFY_TERMINAL_ACTIVITY, async (_event, _terminalId: string) => {
     return { success: true }
   })
-  ipcMain.handle(IPC.GIT_NOTIFY_TERMINAL_FOCUS, async (_event, terminalId: string) => {
-    gitWatchManager?.notifyTerminalFocus(terminalId)
+  ipcMain.handle(IPC.GIT_NOTIFY_TERMINAL_FOCUS, async (_event, _terminalId: string) => {
     return { success: true }
   })
   ipcMain.handle(IPC.GIT_NOTIFY_TERMINAL_GIT_UPDATE, async (_event, terminalId: string) => {
@@ -1844,6 +1837,13 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
       durationMs: +(performance.now() - startedAt).toFixed(1)
     })
     return result
+  })
+
+  // Batch existence check — see projectFilesExist for rationale. The
+  // payload is a flat `boolean[]` aligned with the input `paths` array.
+  ipcMain.handle(IPC.PROJECT_FILES_EXIST, async (_, root: string, paths: string[]) => {
+    if (!Array.isArray(paths) || paths.length === 0) return []
+    return projectFilesExist(root, paths)
   })
 
   ipcMain.handle(IPC.PROJECT_READ_FILE_CHUNK, async (_, root: string, path: string, offset: number, length: number, mode: Parameters<typeof readProjectFileChunk>[4]) => {
@@ -2147,7 +2147,7 @@ export function setupWindowShortcuts(mainWindow: BrowserWindow): void {
   })
 }
 
-export function cleanupIpcHandlers(): void {
+export async function cleanupIpcHandlers(): Promise<void> {
   // Dispose all terminal data buffers
   for (const [, buf] of terminalDataBuffers) {
     buf.dispose()
@@ -2175,10 +2175,10 @@ export function cleanupIpcHandlers(): void {
   projectTreeWatchManager?.dispose()
   projectTreeWatchManager = null
   gitDiffCacheInvalidator.dispose()
-  // Tear down the GitStateMirror worker thread + parcel-watchers and remove
-  // the 5 mirror IPC handlers. Without this the worker keeps running after
-  // app quit, fds leak, and the main process hangs waiting for the thread.
-  gitStateMirrorRouter.dispose()
+  // Tear down the GitStateMirror worker thread and parcel-watchers before
+  // Electron starts tearing down Node worker isolates. Native watcher cleanup
+  // can still resolve async N-API promises, so shutdown must be awaited.
+  await gitStateMirrorRouter.dispose()
   ipcMain.removeHandler(IPC.GIT_STATE_MIRROR_SUBSCRIBE)
   ipcMain.removeAllListeners(IPC.GIT_STATE_MIRROR_UNSUBSCRIBE)
   ipcMain.removeHandler(IPC.GIT_STATE_MIRROR_GET)

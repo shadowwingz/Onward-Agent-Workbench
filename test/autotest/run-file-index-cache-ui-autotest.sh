@@ -32,7 +32,7 @@ fi
 # open ProjectEditor subpage pinned to a different cwd) from being restored
 # and clobbering our fixture cwd during startup.
 USER_DATA_DIR="$(mktemp -d "/tmp/onward-fic-userdata.XXXXXX")"
-trap 'rm -rf "$USER_DATA_DIR"; find "$FIXTURE_DIR" -name "onward-fic-*" -delete 2>/dev/null || true' EXIT
+trap 'rm -rf "$USER_DATA_DIR"; find "$FIXTURE_DIR" -name "onward-fic-*" -delete 2>/dev/null || true; rm -rf "$FIXTURE_DIR/.git" "$FIXTURE_DIR/node_modules" 2>/dev/null || true' EXIT
 
 rm -f "$LOG_FILE"
 
@@ -62,6 +62,9 @@ required_markers=(
   "FIC-15-mutations-did-not-rebuild"
   "FIC-17-nested-propagated"
   "FIC-18-nested-did-not-rebuild"
+  "FIC-24-git-index-lock-noise-ignored"
+  "FIC-25-node-modules-cache-noise-ignored"
+  "FIC-26-ignored-noise-did-not-rebuild"
   "FIC-20-force-refresh-triggered-rebuild"
   "FIC-22-folder-not-in-results"
 )

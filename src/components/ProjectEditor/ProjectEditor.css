@@ -1492,7 +1492,7 @@ body.project-editor-preview-resizing .project-editor-preview-resizer::after {
 .project-editor-preview-content {
   min-height: 100%;
   opacity: 1;
-  transition: opacity 0.15s ease-out;
+  transition: none;
 }
 
 .project-editor-preview-body.preview-phase-waiting-html .project-editor-preview-content,
@@ -1510,12 +1510,21 @@ body.project-editor-preview-resizing .project-editor-preview-resizer::after {
   justify-content: center;
   pointer-events: none;
   opacity: 0;
-  transition: opacity 0.12s ease;
+  transition: none;
+}
+
+.project-editor-preview-transition-indicator .preview-loading-dots span {
+  animation: none;
 }
 
 .project-editor-preview-body.preview-phase-waiting-html .project-editor-preview-transition-indicator,
 .project-editor-preview-body.preview-phase-restoring-layout .project-editor-preview-transition-indicator {
   opacity: 1;
+}
+
+.project-editor-preview-body.preview-phase-waiting-html .project-editor-preview-transition-indicator .preview-loading-dots span,
+.project-editor-preview-body.preview-phase-restoring-layout .project-editor-preview-transition-indicator .preview-loading-dots span {
+  animation: preview-dot-bounce 1.2s ease-in-out infinite;
 }
 
 .project-editor-preview-body.preview-phase-revealing .project-editor-preview-transition-indicator {

@@ -19,6 +19,7 @@ import type {
 import { useSettings } from '../../contexts/SettingsContext'
 import { DEFAULT_GIT_DIFF_FONT_SIZE } from '../../constants/gitDiff'
 import { useSubpageEscape } from '../../hooks/useSubpageEscape'
+import { useGitStateMirror } from '../../hooks/useGitStateMirror'
 import { useI18n } from '../../i18n/useI18n'
 import { useAppState } from '../../hooks/useAppState'
 import type { ProjectEditorOpenEventDetail, SubpageId, SubpageNavigateEventDetail } from '../../types/subpage'
@@ -113,8 +114,14 @@ const DIFF_INLINE_BREAKPOINT = 900
 const DIFF_REVEAL_TIMEOUT_MS = 2000
 const TOKENIZE_SETTLE_QUIET_MS = 100
 const TOKENIZE_SETTLE_CAP_MS = 5000
-const HUNK_ACTION_INSTALL_RETRY_DELAY_MS = 60
-const HUNK_ACTION_INSTALL_RETRY_LIMIT = 12
+// Hunk widget installation is bounded to the selected-file/model settle
+// window. Monaco can reuse the same diff models when the Git Diff view is
+// closed and reopened, and in that case `onDidUpdateDiff` may not fire again
+// even though `getLineChanges()` becomes available shortly after selection.
+// A frame-bounded settle keeps the install deterministic without reviving the
+// old open-ended timer retry loop.
+const HUNK_ACTION_INSTALL_SETTLE_FRAME_LIMIT = 90
+const HUNK_ACTION_INSTALL_SETTLE_MAX_MS = 1500
 const HUNK_ACTION_HOVER_HIDE_DELAY_MS = 140
 
 // Monaco theme aligned with @pierre/diffs' pierre-dark palette so Git Diff
@@ -1281,11 +1288,13 @@ export function GitDiffViewer({
   const diffEditorBindingDisposablesRef = useRef<Array<{ dispose: () => void }>>([])
   const diffHunkActionDisposablesRef = useRef<Array<{ dispose: () => void }>>([])
   const diffHunkActionWidgetHandlesRef = useRef<DiffHunkActionWidgetHandle[]>([])
+  const hunkActionInstallIdentityRef = useRef<{ modelId: string | null; identityKey: string } | null>(null)
+  const hunkActionInstallSettleFrameRef = useRef<number | null>(null)
+  const hunkActionInstallSettleRunIdRef = useRef(0)
   const visibleHunkActionWidgetIdRef = useRef<string | null>(null)
   const diffSplitMeasureFrameRef = useRef<number | null>(null)
   const diffNavigationIndexRef = useRef(-1)
   const hunkActionInFlightRef = useRef(false)
-  const hunkActionInstallRetryTimerRef = useRef<number | null>(null)
   const hunkActionHoverHideTimerRef = useRef<number | null>(null)
   const lastHunkActionPromiseRef = useRef<Promise<boolean> | null>(null)
   const runDiffHunkActionRef = useRef<((action: DiffHunkAction, range: DiffHunkActionRange) => Promise<boolean>) | null>(null)
@@ -1321,6 +1330,10 @@ export function GitDiffViewer({
   const repoFilterRef = useRef<string | null>(null)
   const [expandedRepoRoots, setExpandedRepoRoots] = useState<Set<string>>(() => new Set())
   const activeCwd = useMemo(() => diffResult?.cwd || cwd, [diffResult?.cwd, cwd])
+  // Keep the Mirror subscription alive for the last diff cwd even while the
+  // panel is closed. Closed-window mutations must still invalidate renderer
+  // body caches before a same-cwd re-entry.
+  const { snapshot: mirrorSnapshot } = useGitStateMirror(activeCwd || null)
   const getFileKey = useCallback((file: GitFileStatus, repoRoot = activeCwd || '') => {
     return buildFileKey(file.repoRoot || repoRoot, file)
   }, [activeCwd])
@@ -1344,6 +1357,12 @@ export function GitDiffViewer({
   }, [activeCwd, terminalId])
 
   const selectedFileKey = selectedFile ? getFileKey(selectedFile) : null
+  const mirrorGeneration = mirrorSnapshot?.generation ?? 0
+  const diffEditorIdentityKey = `${activeCwd || 'no-cwd'}::${selectedFileKey || 'empty'}::g${mirrorGeneration}::n${diffEditorResetNonce}`
+  const currentDiffIdentityRef = useRef(diffEditorIdentityKey)
+  useEffect(() => {
+    currentDiffIdentityRef.current = diffEditorIdentityKey
+  }, [diffEditorIdentityKey])
   const selectedFileState = selectedFileKey ? fileContents[selectedFileKey] : null
   const statusText = useMemo(() => ({
     M: t('gitDiff.status.modified'),
@@ -1764,13 +1783,6 @@ export function GitDiffViewer({
     return true
   }, [activeCwd, terminalId])
 
-  const clearHunkActionInstallRetry = useCallback(() => {
-    if (hunkActionInstallRetryTimerRef.current !== null) {
-      window.clearTimeout(hunkActionInstallRetryTimerRef.current)
-      hunkActionInstallRetryTimerRef.current = null
-    }
-  }, [])
-
   const clearHunkActionHoverHideTimer = useCallback(() => {
     if (hunkActionHoverHideTimerRef.current !== null) {
       window.clearTimeout(hunkActionHoverHideTimerRef.current)
@@ -1798,6 +1810,14 @@ export function GitDiffViewer({
       setVisibleDiffHunkActionWidget(null)
     }, delayMs)
   }, [clearHunkActionHoverHideTimer, setVisibleDiffHunkActionWidget])
+
+  const cancelHunkActionInstallSettling = useCallback(() => {
+    hunkActionInstallSettleRunIdRef.current += 1
+    if (hunkActionInstallSettleFrameRef.current !== null) {
+      window.cancelAnimationFrame(hunkActionInstallSettleFrameRef.current)
+      hunkActionInstallSettleFrameRef.current = null
+    }
+  }, [])
 
   const revealDiffHunkActionForLine = useCallback((line: number | null | undefined): boolean => {
     if (typeof line !== 'number' || !Number.isFinite(line)) return false
@@ -1836,6 +1856,7 @@ export function GitDiffViewer({
     }
     diffHunkActionDisposablesRef.current = []
     diffHunkActionWidgetHandlesRef.current = []
+    hunkActionInstallIdentityRef.current = null
     if (count > 0) {
       debugLog('editor:hunk-actions:disposed', { count })
     }
@@ -2049,58 +2070,78 @@ export function GitDiffViewer({
     installDiffHunkActionWidgetsRef.current = installDiffHunkActionWidgets
   }, [installDiffHunkActionWidgets])
 
-  const scheduleDiffHunkActionWidgetInstall = useCallback((reason: string, attempt = 0) => {
-    clearHunkActionInstallRetry()
-    hunkActionInstallRetryTimerRef.current = window.setTimeout(() => {
-      hunkActionInstallRetryTimerRef.current = null
+  const shouldContinueHunkActionInstallSettling = useCallback((
+    editor: monacoTypes.editor.IStandaloneDiffEditor
+  ): boolean => {
+    const file = selectedFileRef.current
+    if (!file || file.isSubmoduleEntry || file.changeType === 'untracked' || file.status === 'D') return false
+    if (isDraftDirtyRef.current) return false
+    const key = getFileKey(file)
+    const state = fileContentsRef.current[key]
+    if (!state || state.loading || state.error || state.isBinary) return false
+    const expectedModifiedContent = state.draftContent ?? state.modifiedContent ?? ''
+    const expectedOriginalContent = state.originalContent ?? ''
+    if (expectedOriginalContent !== expectedModifiedContent) return true
+    return editor.getOriginalEditor().getValue() !== editor.getModifiedEditor().getValue()
+  }, [getFileKey])
+
+  // Event-driven install with a bounded frame settle. The synchronous path
+  // still handles normal Monaco `onDidUpdateDiff` events immediately; the
+  // frame path only runs while the selected file has real text deltas and
+  // Monaco has not exposed line changes yet.
+  const scheduleDiffHunkActionWidgetInstall = useCallback((reason: string) => {
+    if (hunkActionInstallSettleFrameRef.current !== null) {
+      window.cancelAnimationFrame(hunkActionInstallSettleFrameRef.current)
+      hunkActionInstallSettleFrameRef.current = null
+    }
+    const runId = hunkActionInstallSettleRunIdRef.current + 1
+    hunkActionInstallSettleRunIdRef.current = runId
+    const startedAt = performance.now()
+
+    const run = (frameCount: number) => {
+      if (hunkActionInstallSettleRunIdRef.current !== runId) return
+      hunkActionInstallSettleFrameRef.current = null
       const editor = diffEditorRef.current
       const monaco = monacoRef.current
-      if (!isOpen || !editor || !monaco) return
+      if (!editor || !monaco) return
 
-      const result = installDiffHunkActionWidgets(editor, monaco)
-      const file = selectedFileRef.current
-      const key = file ? getFileKey(file) : null
-      const state = key ? fileContentsRef.current[key] : null
-      const liveModifiedContent = state?.draftContent ?? state?.modifiedContent
-      const hasTextDelta = typeof state?.originalContent === 'string' &&
-        typeof liveModifiedContent === 'string' &&
-        state.originalContent !== liveModifiedContent
-      const eligibleFile = Boolean(file) &&
-        !file?.isSubmoduleEntry &&
-        file?.changeType !== 'untracked' &&
-        file?.status !== 'D' &&
-        !isDraftDirtyRef.current &&
-        !state?.loading &&
-        !state?.error &&
-        !state?.isBinary
-      const lineChangeCount = editor.getLineChanges()?.length ?? 0
-      const shouldRetry = attempt < HUNK_ACTION_INSTALL_RETRY_LIMIT && (
-        result === 'retry' ||
-        (result === 'skipped' && eligibleFile && hasTextDelta && lineChangeCount === 0)
-      )
-      if (shouldRetry) {
-        perfTrace(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_HUNK_WIDGET_INSTALL, {
-          cwd: activeCwd,
-          terminalId,
-          filename: file?.filename,
-          changeType: file?.changeType,
-          result: 'retry',
-          reason,
-          attempt,
-          lineChangeCount,
-          durationMs: 0
-        })
-        scheduleDiffHunkActionWidgetInstall(reason, attempt + 1)
+      const modelId = editor.getModifiedEditor().getModel()?.id ?? null
+      const identityKey = currentDiffIdentityRef.current
+      const installedFor = hunkActionInstallIdentityRef.current
+      if (
+        installedFor?.modelId === modelId &&
+        installedFor.identityKey === identityKey &&
+        diffHunkActionWidgetHandlesRef.current.length > 0
+      ) {
+        return
       }
-    }, attempt === 0 ? 0 : HUNK_ACTION_INSTALL_RETRY_DELAY_MS)
-  }, [
-    activeCwd,
-    clearHunkActionInstallRetry,
-    getFileKey,
-    installDiffHunkActionWidgets,
-    isOpen,
-    terminalId
-  ])
+
+      const hasFrameBudget =
+        frameCount < HUNK_ACTION_INSTALL_SETTLE_FRAME_LIMIT &&
+        performance.now() - startedAt < HUNK_ACTION_INSTALL_SETTLE_MAX_MS
+      const lineChanges = editor.getLineChanges() ?? []
+      if (
+        lineChanges.length === 0 &&
+        hasFrameBudget &&
+        shouldContinueHunkActionInstallSettling(editor)
+      ) {
+        hunkActionInstallSettleFrameRef.current = window.requestAnimationFrame(() => run(frameCount + 1))
+        return
+      }
+
+      void reason // kept for future perfTrace breadcrumb; install path is uniform
+      const result = installDiffHunkActionWidgets(editor, monaco)
+      if (result === 'installed') {
+        hunkActionInstallIdentityRef.current = { modelId, identityKey }
+        return
+      }
+      if (result === 'retry' && hasFrameBudget) {
+        hunkActionInstallSettleFrameRef.current = window.requestAnimationFrame(() => run(frameCount + 1))
+      }
+    }
+
+    run(0)
+  }, [installDiffHunkActionWidgets, shouldContinueHunkActionInstallSettling])
 
   const cancelTokenizeSettleTracking = useCallback(() => {
     tokenizeSettleRunIdRef.current += 1
@@ -2204,7 +2245,7 @@ export function GitDiffViewer({
       window.clearTimeout(diffScrollCaptureTimerRef.current)
       diffScrollCaptureTimerRef.current = null
     }
-    clearHunkActionInstallRetry()
+    cancelHunkActionInstallSettling()
     disposeDiffHunkActionWidgets()
     for (const disposable of diffEditorBindingDisposablesRef.current) {
       try {
@@ -2214,7 +2255,7 @@ export function GitDiffViewer({
       }
     }
     diffEditorBindingDisposablesRef.current = []
-  }, [cancelTokenizeSettleTracking, clearHunkActionInstallRetry, disposeDiffHunkActionWidgets])
+  }, [cancelHunkActionInstallSettling, cancelTokenizeSettleTracking, disposeDiffHunkActionWidgets])
 
   const measureDiffSplitState = useCallback((
     editorOverride?: monacoTypes.editor.IStandaloneDiffEditor | null
@@ -2789,6 +2830,16 @@ export function GitDiffViewer({
       const retainedDrafts = retainDirtyDrafts(fileContentsRef.current)
       setFileContents(retainedDrafts)
       fileContentsRef.current = retainedDrafts
+      // Phase 5 PART 2: Refresh Changes cascade — bump the local
+      // DiffEditor reset nonce so React re-mounts the editor, AND
+      // signal the Worker to bump its mirror generation so any other
+      // listener on the same cwd also sees a fresh identity.
+      setDiffEditorResetNonce((n) => n + 1)
+      try {
+        await window.electronAPI?.git?.forceRefresh?.(cwd)
+      } catch (error) {
+        debugLog('refresh:force-refresh-mirror:error', { error: String(error) })
+      }
       await loadDiff({ silent: true, force: true })
       const file = selectedFileRef.current
       if (file && !isDraftDirtyRef.current) {
@@ -2848,6 +2899,10 @@ export function GitDiffViewer({
       if (shouldReset) {
         resetViewerState()
       } else if (openingFromClosed) {
+        const retainedDrafts = retainDirtyDrafts(fileContentsRef.current)
+        fileContentsRef.current = retainedDrafts
+        setFileContents(retainedDrafts)
+        staleFileContentKeysRef.current.clear()
         clearActiveDiffSelection({ detachEditor: true })
       }
     }
@@ -3525,10 +3580,12 @@ export function GitDiffViewer({
     // changeType === 'changed'
     if (!selectedFile) return
 
-    // Don't overwrite unsaved user edits.
-    if (isDraftDirtyRef.current) {
-      debugLog('auto-refresh:skip:draft-dirty')
-      return
+    // Keep reloading the underlying modified side even when the user has a
+    // dirty draft. ensureFileContent preserves draftContent, so the editor
+    // keeps showing the draft while metadata/debug APIs see the fresh file.
+    const preserveDirtyDraft = isDraftDirtyRef.current
+    if (preserveDirtyDraft) {
+      debugLog('auto-refresh:preserve-draft')
     }
 
     // Skip watcher-driven refresh for a short window after a local save —
@@ -3960,6 +4017,12 @@ export function GitDiffViewer({
       const originalEditor = editor.getOriginalEditor()
       const modifiedEditor = editor.getModifiedEditor()
 
+      const disposeWidgetsForModelSwap = () => {
+        disposeDiffHunkActionWidgets()
+      }
+      diffEditorBindingDisposablesRef.current.push(originalEditor.onDidChangeModel(disposeWidgetsForModelSwap))
+      diffEditorBindingDisposablesRef.current.push(modifiedEditor.onDidChangeModel(disposeWidgetsForModelSwap))
+
       diffEditorBindingDisposablesRef.current.push(modifiedEditor.onMouseMove((event) => {
         const line = event.target.position?.lineNumber
         if (typeof line === 'number') {
@@ -4131,10 +4194,18 @@ export function GitDiffViewer({
 
       // Scroll restoration is now handled by the DiffRevealPhase useLayoutEffect
       // when onDidUpdateDiff fires → restoring-scroll → synchronous scroll + reveal.
+      const mountInstallFrame = window.requestAnimationFrame(() => {
+        if (diffEditorRef.current !== editor) return
+        scheduleDiffHunkActionWidgetInstall('editor-mounted')
+      })
+      diffEditorBindingDisposablesRef.current.push({
+        dispose: () => window.cancelAnimationFrame(mountInstallFrame)
+      })
     },
     [
       activeCwd,
       disposeDiffEditorBindings,
+      disposeDiffHunkActionWidgets,
       enterDiffWaiting,
       getFileKey,
       revealDiffHunkActionForLine,
@@ -4203,14 +4274,14 @@ export function GitDiffViewer({
     const editor = diffEditorRef.current
     const monaco = monacoRef.current
     if (!isOpen || !editor || !monaco) {
-      clearHunkActionInstallRetry()
+      cancelHunkActionInstallSettling()
       disposeDiffHunkActionWidgets()
       return
     }
     scheduleDiffHunkActionWidgetInstall('selection-state')
   }, [
-    clearHunkActionInstallRetry,
     disposeDiffHunkActionWidgets,
+    cancelHunkActionInstallSettling,
     isOpen,
     isDraftDirty,
     scheduleDiffHunkActionWidgetInstall,
@@ -5223,7 +5294,7 @@ export function GitDiffViewer({
 	          widgetDomCount: document.querySelectorAll('.git-diff-hunk-actions').length,
 	          visibleWidgetDomCount: document.querySelectorAll('.git-diff-hunk-actions.is-visible').length,
 	          widgetDisposableCount: diffHunkActionDisposablesRef.current.length,
-	          installRetryPending: hunkActionInstallRetryTimerRef.current !== null
+	          installRetryPending: false
 	        }
       },
       revealFirstHunkActionForTest: () => {
@@ -5440,7 +5511,7 @@ export function GitDiffViewer({
     if (selectedFileState.error || selectedFileState.isBinary || selectedFileState.isSvg) return null
     return (
       <DiffEditor
-        key={`text-${selectedFileKey || 'empty'}::${diffEditorResetNonce}`}
+        key={`text-${diffEditorIdentityKey}`}
         original={selectedFileState.originalContent}
         modified={effectiveModifiedContent}
         language={language}
@@ -5456,7 +5527,7 @@ export function GitDiffViewer({
         height="100%"
       />
     )
-  }, [selectedFile, selectedFileKey, selectedFileState, language, diffEditorOptions, diffEditorResetNonce, effectiveModifiedContent, handleEditorDidMount, modifiedModelPath, originalModelPath])
+  }, [selectedFile, selectedFileState, language, diffEditorOptions, diffEditorIdentityKey, effectiveModifiedContent, handleEditorDidMount, modifiedModelPath, originalModelPath])
 
   const fileGroups = useMemo(() => {
     const groups: Record<GitFileStatus['changeType'], GitFileStatus[]> = {
@@ -5611,7 +5682,7 @@ export function GitDiffViewer({
     return (
       <div className="git-diff-editor-container">
         <DiffEditor
-          key={`svg-text-${selectedFileKey || 'empty'}::${diffEditorResetNonce}`}
+          key={`svg-text-${diffEditorIdentityKey}`}
           original={fileState.originalContent}
           modified={effectiveModifiedContent}
           language="xml"
@@ -5623,7 +5694,7 @@ export function GitDiffViewer({
         />
       </div>
     )
-  }, [diffEditorOptions, effectiveModifiedContent, handleEditorDidMount, selectedFileKey, diffEditorResetNonce])
+  }, [diffEditorOptions, diffEditorIdentityKey, effectiveModifiedContent, handleEditorDidMount])
 
   const renderImagePreview = useCallback((fileState: FileContentState, file: GitFileStatus) => {
     const status = file.status === 'A' || file.status === '?'

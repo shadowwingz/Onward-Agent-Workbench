@@ -25,6 +25,7 @@ import assert from 'node:assert/strict'
 
 import {
   isPreviewWorkPending,
+  shouldRevealSettledPreview,
   type PreviewWorkSignals
 } from '../../src/components/ProjectEditor/utils/previewRestoreSettle.ts'
 
@@ -134,4 +135,75 @@ test('PRS-U-13 input signals object is not mutated', () => {
   const snapshot = { ...input }
   isPreviewWorkPending(input)
   assert.deepEqual(input, snapshot)
+})
+
+// ─────────────── PRS-U-14: existing rendered HTML can leave waiting-html ───────────────
+test('PRS-U-14 rendered HTML + idle signals reveals from waiting-html', () => {
+  assert.equal(
+    shouldRevealSettledPreview({
+      ...idleSignals,
+      isMarkdownRenderAllowed: true,
+      renderedHtmlLength: 1024,
+      phase: 'waiting-html'
+    }),
+    true
+  )
+})
+
+test('PRS-U-15 rendered HTML + idle signals reveals from restoring-layout', () => {
+  assert.equal(
+    shouldRevealSettledPreview({
+      ...idleSignals,
+      isMarkdownRenderAllowed: true,
+      renderedHtmlLength: 1024,
+      phase: 'restoring-layout'
+    }),
+    true
+  )
+})
+
+test('PRS-U-16 idle/revealing phases do not requeue reveal', () => {
+  assert.equal(
+    shouldRevealSettledPreview({
+      ...idleSignals,
+      isMarkdownRenderAllowed: true,
+      renderedHtmlLength: 1024,
+      phase: 'idle'
+    }),
+    false
+  )
+  assert.equal(
+    shouldRevealSettledPreview({
+      ...idleSignals,
+      isMarkdownRenderAllowed: true,
+      renderedHtmlLength: 1024,
+      phase: 'revealing'
+    }),
+    false
+  )
+})
+
+test('PRS-U-17 rendered HTML does not reveal while any work is pending', () => {
+  assert.equal(
+    shouldRevealSettledPreview({
+      ...idleSignals,
+      markdownRenderPending: true,
+      isMarkdownRenderAllowed: true,
+      renderedHtmlLength: 1024,
+      phase: 'waiting-html'
+    }),
+    false
+  )
+})
+
+test('PRS-U-18 missing rendered HTML does not reveal', () => {
+  assert.equal(
+    shouldRevealSettledPreview({
+      ...idleSignals,
+      isMarkdownRenderAllowed: true,
+      renderedHtmlLength: 0,
+      phase: 'waiting-html'
+    }),
+    false
+  )
 })

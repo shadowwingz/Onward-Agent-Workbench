@@ -904,7 +904,7 @@ const en = {
   'gitDiff.debug.terms.listCache.title': 'List cache',
   'gitDiff.debug.terms.listCache.body': 'Caches the changed-file list per project. The panel shows your current project: file count, line totals, and when the list was last produced — either reused from the in-memory cache, fetched fresh from Git, or force-refreshed (you pressed Refresh Changes). If "Last fetched" shows a different project, your current project\'s entry was either evicted or never fetched.',
   'gitDiff.debug.terms.watcher.title': 'Watcher health',
-  'gitDiff.debug.terms.watcher.body': 'Main-process Parcel watcher health for active Git Diff projects. Watcher errors invalidate caches immediately and trigger a best-effort re-subscribe so the next refresh is active, not silently stale.',
+  'gitDiff.debug.terms.watcher.body': 'GitStateMirror authority health for active Git Diff projects. Watcher errors invalidate caches immediately and surface a manual refresh action so the next refresh is active, not silently stale.',
   'gitDiff.debug.terms.scheduler.title': 'Precompute scheduler',
   'gitDiff.debug.terms.scheduler.body': 'Background worker that pre-warms the per-file content cache after a list invalidation so the next click lands on cached data. Status shows the live state for this project. Last burst summarises the most recent completed wave (when, how long, completion vs error counts). Funnel shows how aggressively eligibility filtering trimmed the working set — large "filtered" counts mean many submodules / deletions / binaries; large "capped" counts mean the per-burst cap (100 files) is too tight.',
   'gitDiff.debug.terms.history.title': 'History',
@@ -1379,7 +1379,15 @@ const en = {
   'mermaid.fitToScreen': 'Fit to screen',
   'mermaid.fullscreen': 'Enter fullscreen',
   'mermaid.exitFullscreen': 'Exit fullscreen',
-  'mermaid.dragHint': 'Drag to pan · Scroll to zoom · Double-click to fit'
+  'mermaid.dragHint': 'Drag to pan · Scroll to zoom · Double-click to fit',
+
+  // Phase 5: parcel-watcher failure banner. Shown when the mirror worker
+  // cannot subscribe to FS events (NFS / sandboxing / OS limits) so the
+  // user knows the title-bar / diff state may go stale until they refresh.
+  'gitState.watcherError.title': 'Git status auto-refresh unavailable',
+  'gitState.watcherError.body': 'File-system watch failed for {{repo}}. The Git status shown may be stale. Refresh Git status manually to retry.',
+  'gitState.watcherError.dismiss': 'Dismiss',
+  'gitState.watcherError.reload': 'Refresh Git status'
 } as const satisfies TranslationDictionary
 
 export type TranslationKey = keyof typeof en
@@ -2272,7 +2280,7 @@ const zhCN: LocaleTranslations = {
   'gitDiff.debug.terms.listCache.title': '列表缓存',
   'gitDiff.debug.terms.listCache.body': '按项目缓存"变更文件列表"。面板展示的是当前项目的情况：文件数、行数总和，以及这份列表的来源——是在内存缓存里复用、刚去 git 真拉、还是 Refresh 触发的强制刷新。如果"上次拉取"显示的是另一个项目，说明当前项目的条目要么被淘汰、要么从来没拉过。',
   'gitDiff.debug.terms.watcher.title': 'Watcher 健康状态',
-  'gitDiff.debug.terms.watcher.body': '主进程里针对活跃 Git Diff 项目的 Parcel watcher 健康状态。watcher 出错会立即失效缓存并尝试重新订阅，下一次刷新走主动重取，不会静默沿用旧数据。',
+  'gitDiff.debug.terms.watcher.body': 'GitStateMirror 权威路径针对活跃 Git Diff 项目的健康状态。watcher 出错会立即失效缓存并显示手动刷新入口，下一次刷新走主动重取，不会静默沿用旧数据。',
   'gitDiff.debug.terms.scheduler.title': '预计算调度器',
   'gitDiff.debug.terms.scheduler.body': '在文件列表失效之后，后台预热"每文件正文"缓存的 worker，让你下一次点击变更文件时直接落到已缓存的数据上。状态展示当前项目的实时阶段。上次预热汇总当前项目最近一次完成的批次（多久前完成、耗时、完成 vs 错误数）。筛选漏斗反映 isEligible 把工作集筛得多狠——筛掉数大说明 submodule / 已删除 / 二进制多；截断数大说明每批 100 上限不够用。',
   'gitDiff.debug.terms.history.title': '历史',
@@ -2747,7 +2755,13 @@ const zhCN: LocaleTranslations = {
   'mermaid.fitToScreen': '适应窗口',
   'mermaid.fullscreen': '进入全屏',
   'mermaid.exitFullscreen': '退出全屏',
-  'mermaid.dragHint': '拖拽以平移 · 滚轮缩放 · 双击适应窗口'
+  'mermaid.dragHint': '拖拽以平移 · 滚轮缩放 · 双击适应窗口',
+
+  // Phase 5: parcel-watcher failure banner.
+  'gitState.watcherError.title': 'Git 状态自动刷新不可用',
+  'gitState.watcherError.body': '{{repo}} 的文件系统监听失败,显示的 Git 状态可能已过时。手动刷新 Git 状态可重试。',
+  'gitState.watcherError.dismiss': '关闭',
+  'gitState.watcherError.reload': '刷新 Git 状态'
 }
 
 const translations: Record<AppLocale, LocaleTranslations> = {

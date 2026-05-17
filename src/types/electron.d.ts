@@ -415,6 +415,7 @@ export interface GitStateMirrorSnapshot {
   repos?: GitRepoContext[]
   submodulesLoading?: boolean
   capturedAt: number
+  generation: number
 }
 
 /**
@@ -690,8 +691,21 @@ export interface GitAPI {
   unsubscribeMirror: (cwd: string) => void
   getMirror: (cwd: string) => Promise<GitStateMirrorSnapshot | null>
   onMirrorUpdate: (callback: (cwd: string, delta: GitStateMirrorDelta) => void) => () => void
+  /**
+   * Listen for parcel-watcher failure events from the mirror worker.
+   * Renderer should surface a banner ("FS watch unavailable, refresh
+   * manually") — there is no silent polling fallback by design.
+   */
+  onMirrorWatcherError: (callback: (cwd: string, message: string) => void) => () => void
   pushCwd: (terminalId: string, newCwd: string | null) => void
   requestFileBody: (cwd: string, fileKey: string, force: boolean) => Promise<GitFileContentResult | null>
+  /**
+   * Phase 5 PART 2 — Refresh Changes. Forces the Worker to bump the
+   * mirror's `generation` for `cwd` and recompute. The next
+   * `mirror-update` event carries the new generation, which the
+   * renderer uses to remount the DiffEditor (identity-keyed cascade).
+   */
+  forceRefresh: (cwd: string) => Promise<boolean>
 }
 
 // Project Editor API
@@ -701,6 +715,12 @@ export interface ProjectAPI {
   searchFilenames: (root: string, query: string, limit?: number) => Promise<string[]>
   invalidateFileIndex: (root: string) => Promise<{ success: boolean }>
   readFile: (root: string, path: string, options?: ProjectReadOptions) => Promise<ProjectReadResult>
+  /**
+   * Batch existence check. Returns a parallel boolean[] aligned with the
+   * input paths. Designed for quick-file list validation — replaces the
+   * antipattern of `readFile` (full content) just to check presence.
+   */
+  filesExist: (root: string, paths: string[]) => Promise<boolean[]>
   readFileChunk: (root: string, path: string, offset: number, length: number, mode: ProjectFileChunkMode) => Promise<ProjectFileChunkResult>
   saveFile: (root: string, path: string, content: string) => Promise<ProjectSaveResult>
   createFile: (root: string, path: string, content?: string) => Promise<ProjectActionResult>
@@ -948,12 +968,12 @@ export interface GitDiffDebugStats {
     }
   }
   watcher: {
-    backend: 'parcel'
+    backend: 'mirror'
     active: number
     maxProjects: number
     projects: Array<{
       cwd: string
-      status: 'starting' | 'watching' | 'error' | 'disposed'
+      status: 'registered' | 'disposed'
       eventCount: number
       resyncCount: number
       lastEventAt: number | null

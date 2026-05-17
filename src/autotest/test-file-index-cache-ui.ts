@@ -33,6 +33,10 @@ export async function testFileIndexCacheUi(ctx: AutotestContext): Promise<TestRe
     const stats = getApi()?.getFileIndexStats?.()
     return stats ?? { entries: [], totalBuilds: Number.NaN }
   }
+  const getReadyFileCount = () => {
+    const entry = getFileIndexStats().entries.find((candidate) => candidate.status === 'ready')
+    return typeof entry?.fileCount === 'number' ? entry.fileCount : null
+  }
 
   // Recover the editor root if an earlier phase (cd + terminal-activity poll)
   // momentarily dropped the cwd prop to null. Without this the rest of the
@@ -55,11 +59,25 @@ export async function testFileIndexCacheUi(ctx: AutotestContext): Promise<TestRe
   const fileC = `onward-fic-c-${stamp}.ts`
   const fileD = `onward-fic-d-${stamp}.ts`
   const fileRenamed = `onward-fic-a-renamed-${stamp}.ts`
+  const nestedName = `src/components/onward-fic-nested-${stamp}.tsx`
+  const folderName = `onward-fic-dir-${stamp}`
+  const ignoredGitDir = '.git'
+  const ignoredNodeModulesDir = 'node_modules'
 
   const tsBody = `// autotest fixture ${stamp}\nexport const MARKER = '${stamp}'\n`
 
   const cleanup = async () => {
-    for (const candidate of [fileA, fileB, fileC, fileD, fileRenamed]) {
+    for (const candidate of [
+      fileA,
+      fileB,
+      fileC,
+      fileD,
+      fileRenamed,
+      nestedName,
+      folderName,
+      ignoredGitDir,
+      ignoredNodeModulesDir
+    ]) {
       await window.electronAPI.project.deletePath(rootPath, candidate).catch(() => {})
     }
   }
@@ -243,7 +261,6 @@ export async function testFileIndexCacheUi(ctx: AutotestContext): Promise<TestRe
     // We keep this scoped to the fixture cwd by using project.createFile which
     // resolves relative to rootPath (unlike git.saveFileContent, which would
     // escape to the enclosing git root and pollute the real repo).
-    const nestedName = `src/components/onward-fic-nested-${stamp}.tsx`
     const nestedCreate = await window.electronAPI.project.createFile(
       rootPath,
       nestedName,
@@ -282,10 +299,65 @@ export async function testFileIndexCacheUi(ctx: AutotestContext): Promise<TestRe
       { buildsAfterFirst: buildsAfterFirstOpen, buildsAfterNested }
     )
 
-    // === 6b. Folder creation must NOT surface the folder path as a search hit ===
+    // === 6b. Ignored watcher noise must not enter the renderer file-index ===
+    // Regression guard for the CPU feedback loop where the app's own Git
+    // polling flickered .git/index.lock and made the renderer repeatedly
+    // apply file-index events while markdown preview was otherwise idle.
+    const ignoredGitSetup = await window.electronAPI.project.createFolder(rootPath, ignoredGitDir)
+    const ignoredNodeSetup = await window.electronAPI.project.createFolder(rootPath, `${ignoredNodeModulesDir}/.cache`)
+    record('FIC-23-ignored-noise-dirs-created', ignoredGitSetup.success && ignoredNodeSetup.success, {
+      gitError: ignoredGitSetup.error,
+      nodeModulesError: ignoredNodeSetup.error
+    })
+
+    const ignoredBaselineCount = getReadyFileCount()
+    const ignoredBaselineBuilds = getFileIndexStats().totalBuilds
+    const gitNoiseCounts: Array<number | null> = []
+    const nodeNoiseCounts: Array<number | null> = []
+
+    if (ignoredGitSetup.success && ignoredNodeSetup.success && ignoredBaselineCount !== null) {
+      for (let iter = 0; iter < 5; iter += 1) {
+        const gitNoiseFile = `${ignoredGitDir}/index-${stamp}-${iter}.lock`
+        const nodeNoiseFile = `${ignoredNodeModulesDir}/.cache/onward-fic-noise-${stamp}-${iter}.js`
+
+        await window.electronAPI.project.createFile(rootPath, gitNoiseFile, 'lock')
+        await sleep(500)
+        gitNoiseCounts.push(getReadyFileCount())
+        await window.electronAPI.project.deletePath(rootPath, gitNoiseFile).catch(() => {})
+        await sleep(250)
+
+        await window.electronAPI.project.createFile(rootPath, nodeNoiseFile, `export const ignored = ${iter}\n`)
+        await sleep(500)
+        nodeNoiseCounts.push(getReadyFileCount())
+        await window.electronAPI.project.deletePath(rootPath, nodeNoiseFile).catch(() => {})
+        await sleep(250)
+      }
+    }
+
+    const ignoredAfterBuilds = getFileIndexStats().totalBuilds
+    const gitNoiseIgnored = ignoredBaselineCount !== null &&
+      gitNoiseCounts.length === 5 &&
+      gitNoiseCounts.every((count) => count === ignoredBaselineCount)
+    const nodeNoiseIgnored = ignoredBaselineCount !== null &&
+      nodeNoiseCounts.length === 5 &&
+      nodeNoiseCounts.every((count) => count === ignoredBaselineCount)
+    record('FIC-24-git-index-lock-noise-ignored', gitNoiseIgnored, {
+      baselineCount: ignoredBaselineCount,
+      counts: gitNoiseCounts
+    })
+    record('FIC-25-node-modules-cache-noise-ignored', nodeNoiseIgnored, {
+      baselineCount: ignoredBaselineCount,
+      counts: nodeNoiseCounts
+    })
+    record(
+      'FIC-26-ignored-noise-did-not-rebuild',
+      ignoredAfterBuilds === ignoredBaselineBuilds,
+      { before: ignoredBaselineBuilds, after: ignoredAfterBuilds }
+    )
+
+    // === 6c. Folder creation must NOT surface the folder path as a search hit ===
     // Regression guard for the reviewer-reported issue where the tree watcher
     // enqueued every added path without first checking `statSync(...).isDirectory()`.
-    const folderName = `onward-fic-dir-${stamp}`
     const folderCreate = await window.electronAPI.project.createFolder(rootPath, folderName)
     record('FIC-21-folder-create-ok', folderCreate.success, {
       error: folderCreate.error

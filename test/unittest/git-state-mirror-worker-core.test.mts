@@ -12,6 +12,7 @@ import {
   beginMirrorRecompute,
   classifyEventPath,
   completeMirrorAttach,
+  computeMirrorDelta,
   createMirrorWorkerEntry,
   finishMirrorRecomputeIfCurrent,
   requestMirrorAttach,
@@ -39,7 +40,8 @@ function snapshot(cwd: string, status: MirrorState['status'], capturedAt: number
           originalRef: 'index',
           modifiedRef: 'workingTree'
         }],
-    capturedAt
+    capturedAt,
+    generation: 1
   }
 }
 
@@ -131,4 +133,62 @@ test('newer recompute wins over stale in-flight recompute completion', () => {
   assert.equal(oldDelta, null)
   assert.equal(entry.state?.status, 'modified')
   assert.equal(entry.state?.capturedAt, 200)
+})
+
+// ---------------------------------------------------------------------------
+// computeMirrorDelta — Phase 2 generation propagation
+// ---------------------------------------------------------------------------
+
+function stateWithGen(cwd: string, status: MirrorState['status'], generation: number): MirrorState {
+  return {
+    cwd,
+    repoRoot: cwd,
+    repoName: 'repo',
+    branch: 'main',
+    status,
+    files: [],
+    capturedAt: Date.now(),
+    generation
+  }
+}
+
+test('computeMirrorDelta seeds generation on the first snapshot (prev === null)', () => {
+  const next = stateWithGen('/repo', 'clean', 7)
+  const delta = computeMirrorDelta(null, next)
+  // First snapshot is treated as a full carry-through; generation must
+  // be present so the renderer can seed its identity-key correctly.
+  assert.equal((delta as MirrorState).generation, 7)
+})
+
+test('computeMirrorDelta carries generation only when it changed', () => {
+  const prev = stateWithGen('/repo', 'clean', 5)
+  const sameGen = stateWithGen('/repo', 'modified', 5)
+  const bumpedGen = stateWithGen('/repo', 'modified', 6)
+
+  const sameDelta = computeMirrorDelta(prev, sameGen)
+  // status flipped clean → modified, but generation stayed the same:
+  // the delta carries the status change without re-stating generation.
+  assert.equal(sameDelta.status, 'modified')
+  assert.equal((sameDelta as Partial<MirrorState>).generation, undefined)
+
+  const bumpDelta = computeMirrorDelta(prev, bumpedGen)
+  // Both status AND generation changed — both surface in the delta so
+  // the renderer can both update branch chip AND remount the editor.
+  assert.equal(bumpDelta.status, 'modified')
+  assert.equal((bumpDelta as MirrorState).generation, 6)
+})
+
+test('computeMirrorDelta surfaces a pure-generation bump even when content is byte-identical', () => {
+  // This is the "Refresh Changes" path. State is structurally the same
+  // (same branch / status / files) — only generation incremented.
+  // The delta MUST carry the new generation so the renderer's
+  // DiffEditor key changes and the mount lifecycle resets.
+  const prev = stateWithGen('/repo', 'modified', 3)
+  const next = stateWithGen('/repo', 'modified', 4)
+  const delta = computeMirrorDelta(prev, next)
+  assert.equal((delta as MirrorState).generation, 4)
+  // Other fields are unchanged and should NOT bloat the delta.
+  assert.equal(delta.status, undefined)
+  assert.equal(delta.repoRoot, undefined)
+  assert.equal(delta.files, undefined)
 })

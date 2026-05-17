@@ -533,7 +533,8 @@ export const TerminalGrid = memo(function TerminalGrid({
           branch: null,
           status: null,
           files: [],
-          capturedAt: 0
+          capturedAt: 0,
+          generation: 0
         }
         return {
           ...prev,
@@ -759,8 +760,13 @@ export const TerminalGrid = memo(function TerminalGrid({
       const normalizedCwd = normalizeCwd(cwd)
       const mirror = normalizedCwd ? mirrorSnapshots[normalizedCwd] : null
       const legacyMatchesCwd = terminalInfo?.cwd === cwd
-      const branch = mirror?.branch ?? (legacyMatchesCwd ? terminalInfo?.branch : null) ?? null
-      const status = mirror?.status ?? (legacyMatchesCwd ? terminalInfo?.status : null) ?? null
+      const rawBranchSig = mirror?.branch ?? (legacyMatchesCwd ? terminalInfo?.branch : null) ?? null
+      const rawStatusSig = mirror?.status ?? (legacyMatchesCwd ? terminalInfo?.status : null) ?? null
+      // Apply autotest override on top of the mirror/legacy union — see
+      // the parallel block in the render pass (~line 2380) for rationale.
+      const sigOverride = terminalInfoOverridesRef.current.get(termInfo.id)
+      const branch = sigOverride?.branch !== undefined ? sigOverride.branch : rawBranchSig
+      const status = sigOverride?.status !== undefined ? sigOverride.status : rawStatusSig
       const signal = { cwd: normalizedCwd ?? cwd, branch, status }
       const previous = lastRenderedGitSignalRef.current[termInfo.id]
       if (!previous || previous.branch !== signal.branch) {
@@ -2375,10 +2381,20 @@ export const TerminalGrid = memo(function TerminalGrid({
             // bug the OSC path is meant to fix). When neither has fresh
             // data we display blanks; the chip's colour reverts to the
             // default green dot, which is at least not misleading.
+            //
+            // Autotest override always takes precedence: `mirror` is the
+            // raw Worker output and bypasses the legacy `applyTerminal-
+            // InfoUpdate → mergeOverride` path. Re-applying the override
+            // here keeps the autotest pin-state contract intact (TTM-06,
+            // TTM-07) regardless of which source supplies the branch.
             const legacyMatchesCwd = terminalInfo?.cwd === cwd
-            const branch = mirror?.branch ?? (legacyMatchesCwd ? terminalInfo?.branch : null) ?? null
-            const repoName = mirror?.repoName ?? (legacyMatchesCwd ? terminalInfo?.repoName : null) ?? null
-            const status = mirror?.status ?? (legacyMatchesCwd ? terminalInfo?.status : null) ?? null
+            const rawBranch = mirror?.branch ?? (legacyMatchesCwd ? terminalInfo?.branch : null) ?? null
+            const rawRepoName = mirror?.repoName ?? (legacyMatchesCwd ? terminalInfo?.repoName : null) ?? null
+            const rawStatus = mirror?.status ?? (legacyMatchesCwd ? terminalInfo?.status : null) ?? null
+            const renderOverride = terminalInfoOverridesRef.current.get(termInfo.id)
+            const branch = renderOverride?.branch !== undefined ? renderOverride.branch : rawBranch
+            const repoName = renderOverride?.repoName !== undefined ? renderOverride.repoName : rawRepoName
+            const status = renderOverride?.status !== undefined ? renderOverride.status : rawStatus
             const compactCwd = cwd ? formatCompactPath(cwd) : ''
             const branchStatusClass = status && status !== 'clean'
               ? `terminal-grid-branch--${status}`

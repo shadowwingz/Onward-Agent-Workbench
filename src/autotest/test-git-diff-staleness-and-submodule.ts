@@ -23,8 +23,8 @@ import type { AutotestContext, TestResult } from './types'
  * counts as a parent-side change.
  *
  * Bug 2 (staleness): a request-cache hit followed by an FS mutation must yield
- * fresh data on the next call, driven by the file-watcher cache invalidator
- * and a force-on-entry hop emitted as `renderer:subpage.freshness-check`.
+ * fresh data on the next call, driven by the GitStateMirror-backed cache
+ * invalidator and a force-on-entry hop emitted as `renderer:subpage.freshness-check`.
  *
  * The core GDS assertions cover both bugs plus their trace-event signatures so
  * regressions land both in the visible behavior and the observable surface.
@@ -585,27 +585,26 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     })
   }
 
-  // ─────────────── GDS-15: subdir entry watches the resolved repo root ───────────────
+  // ─────────────── GDS-15: subdir entry tracks the resolved repo root ───────────────
   // When the user opens Git Diff from a subdirectory (e.g.
   // `cleanRoot/src/components/`), getGitDiff resolves up to `cleanRoot` and
-  // returns a diff covering the WHOLE repo. The watcher must be registered
-  // on the resolved repoRoot — not the subdir — otherwise an external edit
+  // returns a diff covering the WHOLE repo. The invalidation scope must be
+  // the resolved repoRoot — not the subdir — otherwise an external edit
   // to a sibling path under the same repo would be silently missed.
   // Sequence: open Diff with `cwd=cleanRoot/src` (a subdir), wait for it to
   // load, then mutate `cleanRoot/<parentFile>` (a path NOT under `src/`),
-  // and verify the watcher-driven cache invalidation eventually surfaces
-  // that file. If the watcher were scoped to `cleanRoot/src/`, the
+  // and verify the Mirror-driven cache invalidation eventually surfaces
+  // that file. If the scope were `cleanRoot/src/`, the
   // assertion would time out.
   if (!cancelled()) {
     await restoreBaseline()
     const subdirCwd = `${cleanRoot}/src`
-    // First call: register watcher (P3 fix means it watches `cleanRoot`,
-    // not `subdirCwd`).
+    // First call: register the resolved repo with the invalidation bus.
     await callDiff(subdirCwd, true)
     await sleep(250)
     // Mutate a path NOT under `src/` — README.md lives at the parent root.
     await window.electronAPI.git.saveFileContent(cleanRoot, 'README.md', '# Clean parent\n\nGDS-15 root-level edit\n')
-    await sleep(450) // 180 ms watcher debounce + slack for fs.watch coalescing
+    await sleep(450) // Mirror debounce + git recompute slack
     const followup = await callDiff(subdirCwd, false)
     const sawRootEdit = followup.success && followup.files.some((f) => f.filename === 'README.md')
     record('GDS-15-subdir-entry-watches-resolved-repo-root', sawRootEdit, {
@@ -620,7 +619,7 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
   // PREVIOUS open's diff body even after the file changed on disk:
   //   1. Modify <parentFile> to V1, open Diff -> renderer caches Monaco's
   //      original/modified content under fileContents[fileKey].
-  //   2. Close Diff. The fs-watcher chain clears the worker-side caches but
+  //   2. Close Diff. The Mirror invalidation chain clears worker-side caches but
   //      the renderer's per-file content map is preserved across same-cwd
   //      re-entries by applyLoadedDiffResult.
   //   3. Modify the same file to V2 while Diff is closed.
@@ -635,7 +634,7 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     const v2Modified = 'parent source line\nGDS-17 v2 SECOND edit (must surface)\n'
 
     await window.electronAPI.git.saveFileContent(cleanRoot, parentFile, v1Modified)
-    await sleep(280) // > 180 ms watcher debounce so any cached worker entry is dropped
+    await sleep(280) // Mirror debounce slack so any cached worker entry is dropped
 
     window.dispatchEvent(new CustomEvent('git-diff:open', { detail: { terminalId } }))
     await waitFor('GDS-17-first-open', () => Boolean(window.__onwardGitDiffDebug?.isOpen()), 6000)
@@ -655,11 +654,11 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     await waitFor('GDS-17-close', () => !window.__onwardGitDiffDebug?.isOpen(), 4000)
 
     // Mutate while Diff is closed — the per-file watcher in the renderer
-    // is unsubscribed in this window. The L1 fs.watch in main DOES fire,
-    // clears the worker-side caches, sends 'git:diff-cache-invalidated'
-    // to the renderer, but the renderer's listener is gated on isOpen.
+    // is unsubscribed in this window. The Mirror invalidation bus clears
+    // worker-side caches and sends 'git:diff-cache-invalidated' to the
+    // renderer, but the renderer's listener is gated on isOpen.
     await window.electronAPI.git.saveFileContent(cleanRoot, parentFile, v2Modified)
-    await sleep(320) // 180 ms debounce + slack for fs.watch coalescing
+    await sleep(320) // Mirror debounce + recompute slack
 
     window.dispatchEvent(new CustomEvent('git-diff:open', { detail: { terminalId } }))
     await waitFor('GDS-17-second-open', () => Boolean(window.__onwardGitDiffDebug?.isOpen()), 6000)
@@ -1519,7 +1518,7 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
       tracePath: traceInfo?.logPath ?? null,
       enabled: traceInfo?.enabled ?? null,
       eventsToVerifyInRunner: [
-        'main:git.diff.fs-watch-event',
+        'main:git-state-mirror.fanout',
         'renderer:subpage.freshness-check'
       ]
     })

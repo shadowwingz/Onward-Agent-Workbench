@@ -120,6 +120,13 @@ export const IPC = {
   GIT_STATE_MIRROR_REQUEST_FILE_BODY: 'git-state-mirror:request-file-body',
   GIT_STATE_MIRROR_FILE_BODY_UPDATE: 'git-state-mirror:file-body-update',
   GIT_STATE_PUSH_CWD: 'git-state-mirror:push-cwd',
+  // Phase 5: Worker thread → main → renderer broadcast for parcel-watcher
+  // failures. Renderer surfaces a banner (no silent fallback).
+  GIT_STATE_MIRROR_WATCHER_ERROR: 'git-state-mirror:watcher-error',
+  // Phase 5 PART 2: Refresh Changes button → main → Worker. Forces a
+  // recompute + bumps mirror generation so the renderer's DiffEditor
+  // key changes and the full chain re-mounts cleanly.
+  GIT_STATE_MIRROR_FORCE_REFRESH: 'git-state-mirror:force-refresh',
 
   // project
   PROJECT_BUILD_FILE_INDEX: 'project:build-file-index',
@@ -131,6 +138,9 @@ export const IPC = {
   PROJECT_INVALIDATE_FILE_INDEX: 'project:invalidate-file-index',
   PROJECT_LIST_DIRECTORY: 'project:list-directory',
   PROJECT_READ_FILE: 'project:read-file',
+  // Batch existence check. Used by quick-file list restore — avoids the
+  // antipattern of `readFile` (full content) just to verify presence.
+  PROJECT_FILES_EXIST: 'project:files-exist',
   PROJECT_READ_FILE_CHUNK: 'project:read-file-chunk',
   PROJECT_RENAME_PATH: 'project:rename-path',
   PROJECT_SAVE_FILE: 'project:save-file',

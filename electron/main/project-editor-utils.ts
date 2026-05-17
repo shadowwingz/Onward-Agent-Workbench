@@ -452,6 +452,37 @@ export async function listDirectory(root: string, path: string) {
   }
 }
 
+/**
+ * Batch existence check for project files.
+ *
+ * Architectural rationale: validating "does this file still exist" used to
+ * fan out N `readProjectFile` calls per Promise.all (one per pinned/recent
+ * file). Each of those returned the full file contents — 100-300 KB per
+ * file — to the renderer just so the renderer could discard everything
+ * except `result.success`. With 14 candidate files that meant ~3 MB of
+ * IPC payload + N renderer-side parse passes blocking the main thread
+ * for several hundred ms (the smoking gun in the CPU trace at PE mount).
+ *
+ * This helper performs `fs.access` against each path in one main-process
+ * call and returns a parallel boolean array. The renderer keeps the same
+ * "validate quick-file list" semantics but pays a single round-trip with
+ * ~14 bytes of payload instead of ~3 MB.
+ */
+export async function projectFilesExist(root: string, paths: string[]): Promise<boolean[]> {
+  const rootPath = resolve(root)
+  return Promise.all(paths.map(async (path) => {
+    const fullPath = resolveInRoot(rootPath, path)
+    if (!fullPath) return false
+    try {
+      // F_OK is enough — we only care about presence, not readability.
+      await access(fullPath)
+      return true
+    } catch {
+      return false
+    }
+  }))
+}
+
 export async function readProjectFile(root: string, path: string, options: ProjectReadOptions = {}) {
   const rootPath = resolve(root)
   const fullPath = resolveInRoot(rootPath, path)

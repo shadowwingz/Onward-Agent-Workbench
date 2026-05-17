@@ -13,6 +13,7 @@ import { FeedbackModal } from './components/FeedbackModal'
 import { PromptNotebook } from './components/PromptNotebook/PromptNotebook'
 import { TerminalGrid } from './components/TerminalGrid/TerminalGrid'
 import { Settings } from './components/Settings'
+import { GitWatcherErrorBanner } from './components/common/GitWatcherErrorBanner'
 import { ChangeLogModal } from './components/ChangeLogModal'
 import { useScheduleEngine } from './hooks/useScheduleEngine'
 import type { ScheduleNotification } from './hooks/useScheduleEngine'
@@ -1814,6 +1815,7 @@ function AppContent({
       {telemetryConsent === null && (
         <ConsentDialog onConsent={handleTelemetryConsent} />
       )}
+      <GitWatcherErrorBanner />
       <TabBar />
       <div className="app-body">
         <Sidebar

@@ -93,38 +93,35 @@ function normalizeLine(value: number): number | null {
 
 function normalizeLineSide(
   startValue: number,
-  endValue: number,
-  maxLineCount?: number
+  endValue: number
 ): { start: number; end: number } | null {
+  // Validate / clamp to positive line numbers. Monaco's diff service
+  // already guarantees LineChange entries are inside the model bounds —
+  // no defensive maxLineCount check here (that check was the race entry:
+  // when the install path read getLineCount() in a setTimeout window
+  // before the new model was attached, the stale small value falsely
+  // tripped this branch). Trust Monaco's invariant; verify via the
+  // `onDidUpdateDiff` model identity check at the install site.
   let start = normalizeLine(startValue)
   let end = normalizeLine(endValue)
   if (start === null || end === null) return null
-  const max = maxLineCount !== undefined ? Math.max(1, Math.floor(maxLineCount)) : null
 
   if (end === 0) {
     if (start <= 0) return null
-    if (max !== null) start = Math.max(1, Math.min(start, max))
     return { start, end: 0 }
   }
   if (start <= 0 && end <= 0) return null
   if (start <= 0) start = end
   if (end <= 0) end = start
   if (start > end) return null
-  if (max !== null) {
-    if (start > max + 1 && end > max + 1) return null
-    start = Math.max(1, Math.min(start, max))
-    end = Math.max(1, Math.min(end, max))
-  }
-  if (start > end) return null
   return { start, end }
 }
 
 export function normalizeHunkActionLineChange(
-  change: HunkActionLineChange,
-  lineCount: number
+  change: HunkActionLineChange
 ): HunkActionLineChange | null {
   const original = normalizeLineSide(change.originalStartLineNumber, change.originalEndLineNumber)
-  const modified = normalizeLineSide(change.modifiedStartLineNumber, change.modifiedEndLineNumber, lineCount)
+  const modified = normalizeLineSide(change.modifiedStartLineNumber, change.modifiedEndLineNumber)
   if (!original || !modified) return null
   return {
     originalStartLineNumber: original.start,
@@ -147,7 +144,7 @@ export function buildHunkActionWidgetPlan(params: {
 } {
   const lineCount = Math.max(1, params.lineCount)
   const normalizedChanges = params.changes
-    .map((change, originalIndex) => ({ change: normalizeHunkActionLineChange(change, lineCount), originalIndex }))
+    .map((change, originalIndex) => ({ change: normalizeHunkActionLineChange(change), originalIndex }))
     .filter((entry): entry is { change: HunkActionLineChange; originalIndex: number } => entry.change !== null)
   const eligibility = getHunkActionWidgetEligibility({
     file: params.file,
