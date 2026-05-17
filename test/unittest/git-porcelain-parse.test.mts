@@ -1,0 +1,240 @@
+/*
+ * SPDX-FileCopyrightText: 2026 OPPO
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Usage: node --experimental-strip-types --test test/unittest/git-porcelain-parse.test.mts
+ *
+ * Covers the porcelain v2 parser used by the GitStateMirror worker.
+ * Behaviour is intentionally identical to the legacy main-process
+ * `git-utils.ts:parseStatusPorcelainV2Z` so the renderer sees the same
+ * shape from either source.
+ */
+
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+
+import {
+  buildGitResourceFields,
+  makeGitFileStatus,
+  normalizeGitStatusCode,
+  parseStatusPorcelainV2Z
+} from '../../electron/main/git-porcelain-parse.ts'
+
+// ---------------------------------------------------------------------------
+// normalizeGitStatusCode
+// ---------------------------------------------------------------------------
+
+test('normalizeGitStatusCode passes through valid single-letter codes', () => {
+  for (const code of ['M', 'A', 'D', 'R', 'C', '?', '!'] as const) {
+    assert.equal(normalizeGitStatusCode(code), code)
+  }
+})
+
+test('normalizeGitStatusCode folds U (unmerged) into ! (conflict)', () => {
+  assert.equal(normalizeGitStatusCode('U'), '!')
+})
+
+test('normalizeGitStatusCode defaults unknown codes to M', () => {
+  assert.equal(normalizeGitStatusCode(''), 'M')
+  assert.equal(normalizeGitStatusCode('Z'), 'M')
+  assert.equal(normalizeGitStatusCode('XY'), 'M')
+})
+
+// ---------------------------------------------------------------------------
+// buildGitResourceFields
+// ---------------------------------------------------------------------------
+
+test('buildGitResourceFields maps staged + modified to index ref pair', () => {
+  assert.deepEqual(buildGitResourceFields('staged', 'M'), {
+    resourceGroup: 'index',
+    originalRef: 'HEAD',
+    modifiedRef: 'index'
+  })
+})
+
+test('buildGitResourceFields maps staged + added to empty → index', () => {
+  // Newly-added file: HEAD side has no content; index has the new entry.
+  assert.deepEqual(buildGitResourceFields('staged', 'A'), {
+    resourceGroup: 'index',
+    originalRef: 'empty',
+    modifiedRef: 'index'
+  })
+})
+
+test('buildGitResourceFields maps staged + deleted to HEAD → empty', () => {
+  assert.deepEqual(buildGitResourceFields('staged', 'D'), {
+    resourceGroup: 'index',
+    originalRef: 'HEAD',
+    modifiedRef: 'empty'
+  })
+})
+
+test('buildGitResourceFields maps unstaged + modified to index → workingTree', () => {
+  assert.deepEqual(buildGitResourceFields('unstaged', 'M'), {
+    resourceGroup: 'workingTree',
+    originalRef: 'index',
+    modifiedRef: 'workingTree'
+  })
+})
+
+test('buildGitResourceFields maps untracked to empty → workingTree', () => {
+  assert.deepEqual(buildGitResourceFields('untracked', '?'), {
+    resourceGroup: 'untracked',
+    originalRef: 'empty',
+    modifiedRef: 'workingTree'
+  })
+})
+
+test('buildGitResourceFields maps conflict to merge group', () => {
+  assert.deepEqual(buildGitResourceFields('conflict', '!'), {
+    resourceGroup: 'merge',
+    originalRef: null,
+    modifiedRef: 'workingTree'
+  })
+})
+
+// ---------------------------------------------------------------------------
+// makeGitFileStatus
+// ---------------------------------------------------------------------------
+
+test('makeGitFileStatus produces a complete GitFileStatus with zero numstat', () => {
+  const file = makeGitFileStatus({
+    filename: 'src/app.ts',
+    status: 'M',
+    changeType: 'unstaged',
+    repoRoot: '/repo'
+  })
+  assert.equal(file.filename, 'src/app.ts')
+  assert.equal(file.status, 'M')
+  assert.equal(file.changeType, 'unstaged')
+  assert.equal(file.additions, 0)
+  assert.equal(file.deletions, 0)
+  assert.equal(file.resourceGroup, 'workingTree')
+  assert.equal(file.originalRef, 'index')
+  assert.equal(file.modifiedRef, 'workingTree')
+  assert.equal(file.repoRoot, '/repo')
+})
+
+test('makeGitFileStatus tags submodule entries with submoduleFlags', () => {
+  const file = makeGitFileStatus({
+    filename: 'modules/x',
+    status: 'M',
+    changeType: 'unstaged',
+    repoRoot: '/repo',
+    isSubmoduleEntry: true,
+    submoduleFlags: { commitChanged: true, workTreeModified: false, untrackedContent: false }
+  })
+  assert.equal(file.isSubmoduleEntry, true)
+  assert.deepEqual(file.submoduleFlags, { commitChanged: true, workTreeModified: false, untrackedContent: false })
+})
+
+// ---------------------------------------------------------------------------
+// parseStatusPorcelainV2Z
+// ---------------------------------------------------------------------------
+
+test('parseStatusPorcelainV2Z handles empty output', () => {
+  const result = parseStatusPorcelainV2Z('', '/repo')
+  assert.equal(result.branch, null)
+  assert.equal(result.status, 'clean')
+  assert.deepEqual(result.files, [])
+})
+
+test('parseStatusPorcelainV2Z parses branch header from concatenated chunk', () => {
+  // Porcelain v2 header chunks are LF-separated and packed before the
+  // first NUL; we accept either pattern.
+  const out = '# branch.oid abc123def\n# branch.head main\n\0'
+  const result = parseStatusPorcelainV2Z(out, '/repo')
+  assert.equal(result.branch, 'main')
+  assert.equal(result.status, 'clean')
+})
+
+test('parseStatusPorcelainV2Z reports short SHA for detached HEAD', () => {
+  const out = '# branch.oid abcdef0123456789\n# branch.head (detached)\n\0'
+  const result = parseStatusPorcelainV2Z(out, '/repo')
+  assert.equal(result.branch, 'abcdef0')
+})
+
+test('parseStatusPorcelainV2Z emits an untracked file row with status=?', () => {
+  // "? path\0" — a single NUL-terminated untracked record.
+  const out = '? newfile.md\0'
+  const result = parseStatusPorcelainV2Z(out, '/repo')
+  assert.equal(result.files.length, 1)
+  assert.equal(result.files[0].filename, 'newfile.md')
+  assert.equal(result.files[0].status, '?')
+  assert.equal(result.files[0].changeType, 'untracked')
+  assert.equal(result.status, 'added')
+})
+
+test('parseStatusPorcelainV2Z emits TWO rows when both index and worktree are non-clean', () => {
+  // "1 MM N... 100644 100644 100644 hash1 hash2 src/app.ts\0"
+  // — index 'M' AND worktree 'M' → one staged + one unstaged row.
+  const out = '1 MM N... 100644 100644 100644 hash1 hash2 src/app.ts\0'
+  const result = parseStatusPorcelainV2Z(out, '/repo')
+  assert.equal(result.files.length, 2)
+  const staged = result.files.find((f) => f.changeType === 'staged')
+  const unstaged = result.files.find((f) => f.changeType === 'unstaged')
+  assert.ok(staged, 'expected a staged row')
+  assert.ok(unstaged, 'expected an unstaged row')
+  assert.equal(staged?.filename, 'src/app.ts')
+  assert.equal(unstaged?.filename, 'src/app.ts')
+  assert.equal(staged?.status, 'M')
+  assert.equal(unstaged?.status, 'M')
+})
+
+test('parseStatusPorcelainV2Z emits only one row when only worktree side is dirty', () => {
+  // "1 .M N... ..." — index clean, worktree modified.
+  const out = '1 .M N... 100644 100644 100644 hash1 hash2 docs/readme.md\0'
+  const result = parseStatusPorcelainV2Z(out, '/repo')
+  assert.equal(result.files.length, 1)
+  assert.equal(result.files[0].changeType, 'unstaged')
+  assert.equal(result.files[0].status, 'M')
+  assert.equal(result.files[0].filename, 'docs/readme.md')
+})
+
+test('parseStatusPorcelainV2Z handles rename: type-2 record uses two NUL slots', () => {
+  // "2 R. N... 100644 100644 100644 hash1 hash2 R100 newName.md\0oldName.md\0"
+  const out = '2 R. N... 100644 100644 100644 hash1 hash2 R100 newName.md\0oldName.md\0'
+  const result = parseStatusPorcelainV2Z(out, '/repo')
+  assert.equal(result.files.length, 1)
+  const renamed = result.files[0]
+  assert.equal(renamed.filename, 'newName.md')
+  assert.equal(renamed.originalFilename, 'oldName.md')
+  assert.equal(renamed.status, 'R')
+})
+
+test('parseStatusPorcelainV2Z carries submoduleFlags through to the row', () => {
+  // sub field starts at offset 5: S<c><m><u>. Here: SC.. → commitChanged=true
+  const out = '1 .M SC.. 160000 160000 160000 hash1 hash2 modules/x\0'
+  const result = parseStatusPorcelainV2Z(out, '/repo')
+  assert.equal(result.files.length, 1)
+  assert.equal(result.files[0].isSubmoduleEntry, true)
+  assert.deepEqual(result.files[0].submoduleFlags, {
+    commitChanged: true,
+    workTreeModified: false,
+    untrackedContent: false
+  })
+})
+
+test('parseStatusPorcelainV2Z marks unmerged (u) rows with status=! changeType=conflict', () => {
+  // u XY N... mH mI mW hH hI hO path
+  // type 'u' has 10 leading whitespace-separated fields before the path.
+  const out = 'u UU N... 100644 100644 100644 100644 hashH hashI hashO conflict.txt\0'
+  const result = parseStatusPorcelainV2Z(out, '/repo')
+  assert.equal(result.files.length, 1)
+  assert.equal(result.files[0].status, '!')
+  assert.equal(result.files[0].changeType, 'conflict')
+  assert.equal(result.files[0].filename, 'conflict.txt')
+  assert.equal(result.status, 'modified')
+})
+
+test('parseStatusPorcelainV2Z status aggregation: any "added" wins over "modified"', () => {
+  const out = '? untracked.md\0' + '1 .M N... 100644 100644 100644 a b modified.md\0'
+  const result = parseStatusPorcelainV2Z(out, '/repo')
+  assert.equal(result.status, 'added')
+})
+
+test('parseStatusPorcelainV2Z status aggregation: modified wins when no untracked / add / del / rename', () => {
+  const out = '1 .M N... 100644 100644 100644 a b modified.md\0'
+  const result = parseStatusPorcelainV2Z(out, '/repo')
+  assert.equal(result.status, 'modified')
+})

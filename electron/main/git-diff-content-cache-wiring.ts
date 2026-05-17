@@ -246,8 +246,8 @@ export const gitDiffPrecomputeScheduler = new GitDiffPrecomputeScheduler({
 let invalidatorInstalled = false
 
 /**
- * Install the once-per-process listener that links the existing fs.watch +
- * mirror-delta invalidator to our content cache and scheduler. Idempotent —
+ * Install the once-per-process listener that links the GitStateMirror-backed
+ * invalidator to our content cache and scheduler. Idempotent —
  * subsequent calls are no-ops so test harnesses can call freely.
  */
 export function installContentCacheInvalidatorOnce(): void {

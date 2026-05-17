@@ -21,6 +21,12 @@ export type PreviewWorkSignals = {
   mermaidInFlight: boolean
 }
 
+export type PreviewRevealSignals = PreviewWorkSignals & {
+  isMarkdownRenderAllowed: boolean
+  renderedHtmlLength: number
+  phase: 'idle' | 'waiting-html' | 'restoring-layout' | 'revealing'
+}
+
 export function isPreviewWorkPending(signals: PreviewWorkSignals): boolean {
   return (
     signals.markdownRenderPending ||
@@ -29,4 +35,11 @@ export function isPreviewWorkPending(signals: PreviewWorkSignals): boolean {
     signals.mermaidInFlight ||
     signals.mermaidPending > 0
   )
+}
+
+export function shouldRevealSettledPreview(signals: PreviewRevealSignals): boolean {
+  if (!signals.isMarkdownRenderAllowed) return false
+  if (signals.renderedHtmlLength <= 0) return false
+  if (signals.phase === 'idle' || signals.phase === 'revealing') return false
+  return !isPreviewWorkPending(signals)
 }

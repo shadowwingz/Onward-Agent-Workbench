@@ -193,6 +193,7 @@ export async function requestQuit(): Promise<void> {
         `[PTY] shutdown timed out: ${shutdownResult.timedOut}/${shutdownResult.total}`
       )
     }
+    await cleanupIpcHandlers()
     flushPerformanceTrace('quit')
     app.quit()
   }
@@ -223,6 +224,7 @@ export async function requestRestartToApplyUpdate(): Promise<{ success: boolean;
     )
   }
 
+  await cleanupIpcHandlers()
   flushPerformanceTrace('restart-to-update')
   app.quit()
   return { success: true }
@@ -247,6 +249,7 @@ export async function requestQuitForDebug(): Promise<{ success: boolean; error?:
     )
   }
 
+  await cleanupIpcHandlers()
   flushPerformanceTrace('debug-quit')
   app.quit()
   return { success: true }
@@ -682,8 +685,10 @@ app.whenReady().then(async () => {
   })
 })
 
-app.on('window-all-closed', () => {
-  cleanupIpcHandlers()
+app.on('window-all-closed', async () => {
+  await cleanupIpcHandlers().catch((error) => {
+    console.warn('[Lifecycle] window-all-closed cleanup failed:', error)
+  })
   if (process.platform !== 'darwin') {
     app.quit()
   }
@@ -696,11 +701,19 @@ app.on('before-quit', async (e) => {
   })
   // If you have confirmed to exit, continue directly.
   if (isQuitting) return
+  if (!app.isReady()) {
+    isQuitting = true
+    return
+  }
 
   // Prevent default exit and show confirmation dialog
   e.preventDefault()
 
-  await requestQuit()
+  try {
+    await requestQuit()
+  } catch (error) {
+    console.warn('[Lifecycle] before-quit confirmation failed:', error)
+  }
 })
 
 // Move the cleanup logic to will-quit (it will be triggered after confirming the exit)
@@ -713,11 +726,12 @@ app.on('will-quit', () => {
   }
   getUpdateService().stop()
   stopApiServer()
-  cleanupIpcHandlers()
+  void cleanupIpcHandlers().catch((error) => {
+    console.warn('[Lifecycle] will-quit cleanup failed:', error)
+  })
   performanceTrace.stop()
   // Close the shared trace store last so any final performanceTrace.stop()
-  // / cleanupIpcHandlers() events are written before we fsync + unlink the
-  // active chunk's stream.
+  // events are written before we fsync + unlink the active chunk's stream.
   traceStore.close()
   getTrayManager().destroy()
 })

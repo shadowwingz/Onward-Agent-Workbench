@@ -53,6 +53,19 @@ export interface MirrorState {
   submodulesLoading?: boolean
   /** Captured `Date.now()` when the worker generated this state. */
   capturedAt: number
+  /**
+   * Monotonic generation counter, incremented by the Worker on every
+   * recompute that produces a state change. Renderer uses this as a
+   * lifecycle key (DiffEditor `key` prop, fileContentsRef cache bucket)
+   * so a Refresh Changes click — or any other "force-refresh" path —
+   * cascades through to a clean re-mount of every layer below.
+   *
+   * Phase 2 of the GitState refactor: identity-keyed propagation. Same
+   * cwd + same content + same generation → renderer treats it as the
+   * same view; bumping generation forces remount even when underlying
+   * data is byte-identical.
+   */
+  generation: number
 }
 
 /**
@@ -97,8 +110,13 @@ export type MainToMirrorMessage =
 
 export type MirrorToMainMessage =
   | { kind: 'ready' }
+  | { kind: 'shutdown-complete' }
   | { kind: 'mirror-update'; cwd: string; state: MirrorState; delta: MirrorDelta }
   | { kind: 'file-body-update'; replyId: number; body: MirrorFileBody | null; error?: string }
+  // Phase 5: explicit watcher failure signal. parcel-watcher errors here
+  // are non-silent — renderer surfaces a banner so the user can manually
+  // refresh rather than silently miss FS changes.
+  | { kind: 'watcher-error'; cwd: string; message: string }
   | { kind: 'log'; level: 'info' | 'warn' | 'error'; message: string; data?: Record<string, unknown> }
 
 /**

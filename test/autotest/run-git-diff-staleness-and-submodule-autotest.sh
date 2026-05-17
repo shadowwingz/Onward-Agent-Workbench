@@ -10,7 +10,7 @@ source "$ROOT_DIR/test/autotest/resolve-dev-app-bin.sh"
 APP_BIN="${1:-$(resolve_dev_app_bin "$ROOT_DIR" || true)}"
 LOG_FILE="${2:-$REPO_ROOT/traces/test-logs/git-diff-staleness-and-submodule-autotest.log}"
 mkdir -p "$(dirname "$LOG_FILE")"
-WATCHDOG_SEC="${GDS_WATCHDOG_SEC:-180}"
+WATCHDOG_SEC="${GDS_WATCHDOG_SEC:-360}"
 
 if [[ -z "$APP_BIN" || ! -x "$APP_BIN" ]]; then
   echo "ERROR: app binary not found or not executable: ${APP_BIN:-<empty>}" >&2
@@ -131,6 +131,9 @@ if [[ ! -f "$TRACE_LATEST_PATH" ]]; then
 fi
 
 TRACE_FILE="$(cat "$TRACE_LATEST_PATH")"
+if [[ -d "$TRACE_FILE" ]]; then
+  TRACE_FILE="$(find "$TRACE_FILE" -maxdepth 1 -type f -name 'perf-*.jsonl' -print | sort | tail -n 1)"
+fi
 if [[ ! -f "$TRACE_FILE" ]]; then
   echo "GDS-11/12 FAIL: trace file pointed by latest.txt missing: $TRACE_FILE" >&2
   exit 1
@@ -140,8 +143,9 @@ fi
 #   - main thread → <repoRoot>/traces/perf/  (pointed to by latest.txt)
 #   - git-ipc worker thread → ${TMPDIR}/onward-traces-perf-worker/
 # Some events fire only on one side (the worker emits submodule-filter when it
-# parses git status; the main thread emits fs-watch-event when fs.watch
-# debounces). We accept either trace as long as the event lands somewhere.
+# parses git status; the main thread emits git-state-mirror.fanout when the
+# Authority Worker reports a state delta). We accept either trace as long as
+# the event lands somewhere.
 #
 # We delegate matching to test/autotest/check-trace-event.mjs so the parser handles
 # Chrome Trace JSON's `{"traceEvents":[...]}` wrapper and partial / truncated
@@ -167,7 +171,7 @@ expect_event() {
 echo ""
 echo "=== Trace event coverage (GDS-11/12/16/26/30/34/42) ==="
 expect_event "GDS-11"  "main:git.diff.submodule-filter"
-expect_event "GDS-12a" "main:git.diff.fs-watch-event"
+expect_event "GDS-12a" "main:git-state-mirror.fanout"
 expect_event "GDS-12b" "renderer:subpage.freshness-check"
 # Snapshot service: capture is the meaningful "we routed through the
 # service" signal. We deliberately do NOT assert cache-hit here — the

@@ -73,8 +73,10 @@ SCRIPTS: List[str] = [
     "test/autotest/run-file-watch-autotest.sh",
     "test/autotest/run-git-cross-platform-autotest.sh",
     "test/autotest/run-git-diff-click-latency-autotest.sh",
+    "test/autotest/run-git-diff-identical-blob-autotest.sh",
     "test/autotest/run-git-diff-recursive-submodules-autotest.sh",
     "test/autotest/run-git-diff-staleness-and-submodule-autotest.sh",
+    "test/autotest/run-git-state-mirror-quit-autotest.sh",
     "test/autotest/run-git-state-mirror-latency-autotest.sh",
     "test/autotest/run-git-diff-subdir-autotest.sh",
     "test/autotest/run-git-diff-submodules-autotest.sh",
@@ -83,6 +85,7 @@ SCRIPTS: List[str] = [
     "test/autotest/run-global-search-autotest.sh",
     "test/autotest/run-image-diff-autotest.sh",
     "test/autotest/run-markdown-latex-preview-autotest.sh",
+    "test/autotest/run-markdown-preview-cpu-autotest.sh",
     "test/autotest/run-markdown-preview-latency-autotest.sh",
     "test/autotest/run-mermaid-panzoom-autotest.sh",
     "test/autotest/run-pdf-epub-diff-autotest.sh",
@@ -126,7 +129,22 @@ SCRIPTS: List[str] = [
 WINDOWS_ONLY_SKIP = "test/autotest/run-auto-update-windows-e2e.sh"
 
 PER_SCRIPT_TIMEOUT_SEC = 180
-PER_SCRIPT_TIMEOUT_OVERRIDES_SEC = {}
+# Per-script timeout overrides for runners whose end-to-end flow legitimately
+# exceeds the 180s default. Add entries here (not by patching the runner) so
+# the orchestrator's authority remains the single source of truth.
+PER_SCRIPT_TIMEOUT_OVERRIDES_SEC = {
+    # GitDiff staleness + submodule walks through 46 distinct GDS-* cases;
+    # ~270s end-to-end after the GitStateMirror Worker bring-up overhead.
+    "test/autotest/run-git-diff-staleness-and-submodule-autotest.sh": 360,
+    # GitDiff click-latency suite measures multi-trial first-click vs
+    # cache-warm latencies; needs more headroom than 180s allows.
+    "test/autotest/run-git-diff-click-latency-autotest.sh": 300,
+    # PDF / EPUB preview + search are I/O-heavy on large fixtures.
+    "test/autotest/run-pdf-epub-preview-autotest.sh": 300,
+    "test/autotest/run-preview-search-autotest.sh": 300,
+    # CPU gate samples preview idle, post-scroll recovery, split mode, and editor-only idle windows.
+    "test/autotest/run-markdown-preview-cpu-autotest.sh": 300,
+}
 INTER_SCRIPT_SLEEP_SEC = 2
 
 IS_WINDOWS = platform.system() == "Windows"

@@ -279,7 +279,6 @@ class GitIpcWorkerClient {
   dispose(): void {
     for (const [id, pending] of this.pending) {
       clearTimeout(pending.timer)
-      pending.reject(new Error('Git IPC worker disposed'))
       this.pending.delete(id)
     }
     if (this.worker) {

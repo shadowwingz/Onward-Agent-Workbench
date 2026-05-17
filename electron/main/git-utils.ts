@@ -223,10 +223,9 @@ export interface GitDiffResult {
 
 export interface GitDiffLoadOptions {
   scope?: 'root-only' | 'full'
-  // When true, bypass the request-level cache (the watcher-driven
-  // invalidator is the primary freshness mechanism, but force is the
-  // deterministic backstop for subpage entry where the watcher may not
-  // yet have observed an FS event before the call lands).
+  // When true, bypass the request-level cache. GitStateMirror invalidation is
+  // the primary freshness mechanism, but force is the deterministic backstop
+  // for subpage entry before the first mirror delta has landed.
   force?: boolean
 }
 
@@ -1897,11 +1896,10 @@ async function getSingleRepoDiff(
  * Get Git Diff information
  */
 export async function getGitDiff(cwd: string, options?: GitDiffLoadOptions): Promise<GitDiffResult> {
-  // Watcher registration happens in the main-process IPC handler; here we
-  // only wire the local listener (no-op when called inside the worker
-  // thread, since the worker's invalidator never receives FS events — but
-  // the listener wiring is still useful when getGitDiff is invoked from
-  // the main-process side for non-IPC callers).
+  // The main-process IPC handler registers the project with the invalidation
+  // bus for diagnostics. Freshness events now come from GitStateMirror, but
+  // this local listener is still useful when getGitDiff is invoked from
+  // main-process non-IPC callers.
   wireGitDiffCacheInvalidatorOnce()
 
   const cacheKey = getGitDiffRequestKey(cwd, options)

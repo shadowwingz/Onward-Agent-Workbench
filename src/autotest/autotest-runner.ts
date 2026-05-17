@@ -33,6 +33,7 @@ import { testGitDiffSubmodules } from './test-git-diff-submodules'
 import { testGitDiffRecursiveSubmodules } from './test-git-diff-recursive-submodules'
 import { testGitDiffStalenessAndSubmodule } from './test-git-diff-staleness-and-submodule'
 import { testGitDiffClickLatency } from './test-git-diff-click-latency'
+import { testGitDiffIdenticalBlob } from './test-git-diff-identical-blob'
 import { testGitStateMirrorLatency } from './test-git-state-mirror-latency'
 import { testGitNestedSubmodules } from './test-git-nested-submodules'
 import { testGitCrossPlatform } from './test-git-cross-platform'
@@ -587,6 +588,16 @@ export async function runAllTests(ctx: AutotestContext): Promise<void> {
       const results = await testGitDiffClickLatency(ctx)
       collectSuiteResults('GitDiffClickLatency', results)
       await ctx.reopenProjectEditor('phase5.493-cleanup')
+      await sleep(500)
+    }
+
+    if (!ctx.cancelled() && shouldRun('git-diff-identical-blob')) {
+      log('phase5.494:begin')
+      await ctx.reopenProjectEditor('phase5.494-setup')
+      await sleep(300)
+      const results = await testGitDiffIdenticalBlob(ctx)
+      collectSuiteResults('GitDiffIdenticalBlob', results)
+      await ctx.reopenProjectEditor('phase5.494-cleanup')
       await sleep(500)
     }
 

@@ -116,6 +116,12 @@ if ! grep -q "GSM-13-trace-marker-mirror-events-expected" "$LOG_FILE"; then
   exit 1
 fi
 
+if ! grep -q "GSM-14-force-refresh-bumps-generation" "$LOG_FILE"; then
+  echo "Missing GSM-14 marker; the generation refresh test did not run to completion" >&2
+  tail -n 40 "$LOG_FILE" >&2
+  exit 1
+fi
+
 if ! grep -q "git-state-mirror-latency:done" "$LOG_FILE"; then
   echo "Missing git-state-mirror-latency:done marker; the suite did not finish cleanly" >&2
   tail -n 40 "$LOG_FILE" >&2

@@ -30,6 +30,13 @@ import { perfTrace } from '../utils/perf-trace'
 import { PERF_TRACE_EVENT } from '../utils/perf-trace-names'
 type PerfTraceEventName = typeof PERF_TRACE_EVENT[keyof typeof PERF_TRACE_EVENT]
 
+function normalizeMirrorCwd(cwd: string): string {
+  let normalized = cwd.replace(/\\/g, '/')
+  if (normalized.startsWith('/private/')) normalized = normalized.slice('/private'.length)
+  if (normalized.length > 1 && normalized.endsWith('/')) normalized = normalized.slice(0, -1)
+  return normalized
+}
+
 export interface UseGitStateMirrorResult {
   /** Latest snapshot, or null until the first delta lands. */
   snapshot: GitStateMirrorSnapshot | null
@@ -56,7 +63,8 @@ function mergeDelta(prev: GitStateMirrorSnapshot | null, cwd: string, delta: Git
     branch: null,
     status: null,
     files: [],
-    capturedAt: 0
+    capturedAt: 0,
+    generation: 0
   }
   return {
     ...base,
@@ -96,7 +104,8 @@ export function useGitStateMirror(cwd: string | null): UseGitStateMirrorResult {
 
     const listenerDispose = api.onMirrorUpdate((updateCwd, delta) => {
       if (cancelled) return
-      if (updateCwd !== cwdRef.current) return
+      const currentCwd = cwdRef.current
+      if (!currentCwd || normalizeMirrorCwd(updateCwd) !== normalizeMirrorCwd(currentCwd)) return
       setSnapshot((prev) => mergeDelta(prev, updateCwd, delta))
     })
 
@@ -117,15 +126,11 @@ export function useGitStateMirror(cwd: string | null): UseGitStateMirrorResult {
   }, [cwd])
 
   const refresh = useCallback(() => {
-    // Focus-resync emits via the existing IPC. Renderer may not always
-    // need this; expose for debug surfaces and future auto-resync UX.
     const api = (window as unknown as { electronAPI: { git: Record<string, unknown> } }).electronAPI?.git as
       | undefined
-      | { pushCwd?: (terminalId: string, cwd: string | null) => void }
-    if (cwd && api?.pushCwd) {
-      // Reusing pushCwd as a focus-resync trigger: pushing the same cwd
-      // makes the worker treat it as a switch-cwd → recompute.
-      api.pushCwd('focus-resync', cwd)
+      | { forceRefresh?: (cwd: string) => Promise<boolean> }
+    if (cwd && api?.forceRefresh) {
+      void api.forceRefresh(cwd)
     }
   }, [cwd])
 

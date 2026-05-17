@@ -788,6 +788,13 @@ export interface GitAPI {
    */
   onMirrorUpdate: (callback: (cwd: string, delta: unknown) => void) => () => void
   /**
+   * Listen for explicit parcel-watcher failures. Phase 5: renderer is
+   * expected to surface a banner so the user can manually refresh, since
+   * the no-polling architecture has no silent fallback. `cwd` is the repo
+   * whose watcher failed; `message` is the system error text.
+   */
+  onMirrorWatcherError: (callback: (cwd: string, message: string) => void) => () => void
+  /**
    * Push a cwd-changed notification (e.g. parsed from an OSC 633 / 7
    * sequence in the renderer's xterm.js). Fire-and-forget — the mirror
    * router routes to the worker.
@@ -795,6 +802,13 @@ export interface GitAPI {
   pushCwd: (terminalId: string, newCwd: string | null) => void
   /** Request the diff body for a single file via the mirror's stat-token cache. */
   requestFileBody: (cwd: string, fileKey: string, force: boolean) => Promise<unknown | null>
+  /**
+   * Phase 5 PART 2 — Refresh Changes path. Bumps the mirror's generation
+   * counter for `cwd` and forces a recompute. The renderer should react
+   * to the next mirror-update by re-mounting its DiffEditor (the new
+   * generation cascades into the React key).
+   */
+  forceRefresh: (cwd: string) => Promise<boolean>
 }
 
 // Project Editor API
@@ -804,6 +818,12 @@ export interface ProjectAPI {
   searchFilenames: (root: string, query: string, limit?: number) => Promise<string[]>
   invalidateFileIndex: (root: string) => Promise<{ success: boolean }>
   readFile: (root: string, path: string, options?: ProjectReadOptions) => Promise<ProjectReadResult>
+  /**
+   * Batch existence check for project files. Returns a parallel boolean
+   * array indicating whether each path exists. Use this for quick-file
+   * list validation — never `readFile` (which transfers the whole content).
+   */
+  filesExist: (root: string, paths: string[]) => Promise<boolean[]>
   readFileChunk: (root: string, path: string, offset: number, length: number, mode: ProjectFileChunkMode) => Promise<ProjectFileChunkResult>
   saveFile: (root: string, path: string, content: string) => Promise<ProjectSaveResult>
   createFile: (root: string, path: string, content?: string) => Promise<ProjectActionResult>
@@ -1115,12 +1135,12 @@ export interface GitDiffDebugStats {
     }
   }
   watcher: {
-    backend: 'parcel'
+    backend: 'mirror'
     active: number
     maxProjects: number
     projects: Array<{
       cwd: string
-      status: 'starting' | 'watching' | 'error' | 'disposed'
+      status: 'registered' | 'disposed'
       eventCount: number
       resyncCount: number
       lastEventAt: number | null
@@ -1664,12 +1684,32 @@ const gitAPI: GitAPI = {
     }
   },
 
+  // Phase 5: subscribe to parcel-watcher failure events. Renderer is
+  // expected to surface a banner ("FS watch unavailable — refresh
+  // manually") rather than silently degrade.
+  onMirrorWatcherError: (callback: (cwd: string, message: string) => void) => {
+    const listener = (_: Electron.IpcRendererEvent, cwd: string, message: string) => {
+      callback(cwd, message)
+    }
+    ipcRenderer.on(IPC.GIT_STATE_MIRROR_WATCHER_ERROR, listener)
+    return () => {
+      ipcRenderer.removeListener(IPC.GIT_STATE_MIRROR_WATCHER_ERROR, listener)
+    }
+  },
+
   pushCwd: (terminalId: string, newCwd: string | null) => {
     ipcRenderer.send(IPC.GIT_STATE_PUSH_CWD, terminalId, newCwd)
   },
 
   requestFileBody: (cwd: string, fileKey: string, force: boolean) => {
     return ipcRenderer.invoke(IPC.GIT_STATE_MIRROR_REQUEST_FILE_BODY, cwd, fileKey, force)
+  },
+
+  // Phase 5 PART 2: Refresh Changes → Worker generation bump.
+  // Fire-and-forget; the renderer will see the new generation in the
+  // next mirror-update broadcast.
+  forceRefresh: (cwd: string) => {
+    return ipcRenderer.invoke(IPC.GIT_STATE_MIRROR_FORCE_REFRESH, cwd)
   }
 }
 
@@ -1696,6 +1736,12 @@ const projectAPI: ProjectAPI = {
       { pathLen: path.length, openMode: options?.openMode ?? 'auto', confirmed: Boolean(options?.confirmLargeText) },
       () => ipcRenderer.invoke(IPC.PROJECT_READ_FILE, root, path, options)
     )
+  },
+
+  // Batch existence check. Hot path on PE mount (quick-file list validate)
+  // — was previously the largest single contributor to mount-time CPU.
+  filesExist: (root: string, paths: string[]): Promise<boolean[]> => {
+    return ipcRenderer.invoke(IPC.PROJECT_FILES_EXIST, root, paths)
   },
 
   readFileChunk: (root: string, path: string, offset: number, length: number, mode: ProjectFileChunkMode) => {
@@ -1949,8 +1995,15 @@ const updaterAPI: UpdaterAPI = {
 }
 
 const debugEnabled = process.env.ONWARD_DEBUG === '1' || process.env.ELECTRON_ENABLE_LOGGING === '1'
-// Default-on diagnostic capture matches the main-process trace-store gate.
-const perfTraceEnabled = process.env.ONWARD_PERF_TRACE !== '0'
+// Opt-in. The renderer-side `perfMonitor` (src/utils/perf-monitor.ts) used
+// to auto-start in every dev launch because this flag defaulted to true,
+// and its `tick()` runs `requestAnimationFrame` recursively to count fps —
+// which itself drives the renderer at vsync (120 Hz on supporting displays)
+// and pegs renderer CPU at 60-80% even with zero user activity. The flag
+// is now strict opt-in (set ONWARD_PERF_TRACE=1 to enable); main-process
+// trace-store retains its own gate via `ONWARD_PERF_TRACE` so callers
+// keep one knob.
+const perfTraceEnabled = process.env.ONWARD_PERF_TRACE === '1'
 const debugProfileEnabled = process.env.ONWARD_PROFILE === '1'
 const debugProfileCwd = process.env.ONWARD_PROFILE_CWD || null
 const debugAutotestEnabled = process.env.ONWARD_AUTOTEST === '1'

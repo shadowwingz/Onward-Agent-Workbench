@@ -44,7 +44,8 @@ function summarizeMirror(snapshot: unknown | null): Record<string, unknown> | nu
     branch: typed.branch ?? null,
     status: typed.status ?? null,
     fileCount: Array.isArray(typed.files) ? typed.files.length : null,
-    capturedAt: typed.capturedAt ?? null
+    capturedAt: typed.capturedAt ?? null,
+    generation: typed.generation ?? null
   }
 }
 
@@ -114,6 +115,22 @@ export async function testGitStateMirrorLatency(ctx: AutotestContext): Promise<T
       const snapshot = await getMirror(cwd)
       const status = (snapshot as Partial<GitStateMirrorSnapshot> | null)?.status ?? null
       if (status === expectedStatus) return snapshot
+      await sleep(50)
+    }
+    return null
+  }
+
+  const waitForMirrorGenerationAbove = async (
+    cwd: string,
+    generation: number,
+    timeoutMs = 5000
+  ): Promise<unknown | null> => {
+    const start = performance.now()
+    while (performance.now() - start < timeoutMs) {
+      if (cancelled()) return null
+      const snapshot = await getMirror(cwd)
+      const nextGeneration = (snapshot as Partial<GitStateMirrorSnapshot> | null)?.generation ?? 0
+      if (nextGeneration > generation) return snapshot
       await sleep(50)
     }
     return null
@@ -289,6 +306,20 @@ export async function testGitStateMirrorLatency(ctx: AutotestContext): Promise<T
       description: 'Mirror snapshot carries branch, status, and changed-file list for downstream Diff reuse',
       mirror: summarizeMirror(mirror),
       files: typed?.files?.map((f) => f.filename) ?? null
+    })
+  }
+
+  if (!cancelled()) {
+    await pushOscCwd(terminalId, repoA.abs)
+    const before = await waitForMirrorStatus(repoA.abs, 'clean')
+    const beforeGeneration = (before as Partial<GitStateMirrorSnapshot> | null)?.generation ?? 0
+    const refreshOk = await window.electronAPI.git.forceRefresh(repoA.abs).catch(() => false)
+    const after = refreshOk ? await waitForMirrorGenerationAbove(repoA.abs, beforeGeneration) : null
+    const afterGeneration = (after as Partial<GitStateMirrorSnapshot> | null)?.generation ?? 0
+    record('GSM-14-force-refresh-bumps-generation', Boolean(refreshOk && after && afterGeneration > beforeGeneration), {
+      description: 'Manual refresh must bump Mirror generation even when branch/status/files are unchanged',
+      before: summarizeMirror(before),
+      after: summarizeMirror(after)
     })
   }
 

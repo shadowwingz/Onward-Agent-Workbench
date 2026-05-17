@@ -4,7 +4,7 @@
  */
 
 import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { createPortal } from 'react-dom'
+import { createPortal, flushSync } from 'react-dom'
 import { Editor } from '@monaco-editor/react'
 import DOMPurify from 'dompurify'
 import { hexy } from 'hexy'
@@ -18,7 +18,7 @@ import { useI18n } from '../../i18n/useI18n'
 import { perfTrace } from '../../utils/perf-trace'
 import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
 import { shouldRetainProjectEditorViewOnClose } from './utils/projectEditorCloseRetention'
-import { isPreviewWorkPending } from './utils/previewRestoreSettle'
+import { isPreviewWorkPending, shouldRevealSettledPreview } from './utils/previewRestoreSettle'
 import { runAllTests } from '../../autotest/autotest-runner'
 import type { AutotestContext, CpuSummary, ProjectEditorDebugApi, TestResult } from '../../autotest/types'
 import 'katex/dist/katex.min.css'
@@ -1496,8 +1496,10 @@ export function ProjectEditor({
       }
       if (previewRestorePhaseRef.current === 'idle') return
       suppressPreviewSyncOnRestoreRef.current = false
-      previewRestorePhaseRef.current = 'idle'
-      setPreviewRestorePhase('idle')
+      flushSync(() => {
+        previewRestorePhaseRef.current = 'idle'
+        setPreviewRestorePhase('idle')
+      })
       const finalizedAt = performance.now()
       const durationMs = +(finalizedAt - revealStart).toFixed(1)
       const cause = 'fast-path' as const
@@ -3517,12 +3519,17 @@ export function ProjectEditor({
       return
     }
 
-    const existing = await Promise.all(candidates.map(async (path) => {
-      const result = await window.electronAPI.project.readFile(root, path)
-      if (result.success) return path
-      if (!isMissingFileError(result.error || '')) return path
-      return null
-    }))
+    // CPU root-cause fix: previously this fanned out one full `readFile`
+    // call per candidate path, which transferred 100-300 KB of content
+    // back to the renderer for every pinned / recent file just to check
+    // `result.success`. With 14 candidates that put ~3 MB of IPC payload
+    // + N renderer-side parse passes on PE mount — the single largest
+    // contributor to the ~80% renderer CPU spike captured by the
+    // CDP-driven trace harness. `project.filesExist` is one IPC
+    // roundtrip returning `boolean[]`, so the payload is bounded and the
+    // renderer no longer parses content it then discards.
+    const existsFlags = await window.electronAPI.project.filesExist(root, candidates)
+    const existing = candidates.map((path, idx) => existsFlags[idx] ? path : null)
 
     if (normalizePath(rootRef.current ?? '') !== normalizePath(root)) {
       return
@@ -5592,8 +5599,10 @@ export function ProjectEditor({
     if (previewRestorePhaseRef.current !== 'idle') return
     const preview = previewRef.current
     if (!preview) return
+    const startedAt = performance.now()
     const contentElement = preview.querySelector('.project-editor-preview-content') as HTMLElement | null
-    const renderedHtml = contentElement?.innerHTML || markdownRenderedHtmlRef.current
+    const renderedHtml = markdownRenderedHtmlRef.current || contentElement?.innerHTML || ''
+    const renderedHtmlSource = markdownRenderedHtmlRef.current ? 'state' : 'dom'
     if (!renderedHtml) return
 
     capturePreviewScrollMemoryRef.current()
@@ -5642,6 +5651,13 @@ export function ProjectEditor({
         dwellMs: Math.round(entry.dwellMs)
       })
     }
+    const durationMs = +(performance.now() - startedAt).toFixed(1)
+    perfTrace(PERF_TRACE_EVENT.RENDERER_MARKDOWN_SESSION_CACHE_CAPTURE, {
+      reason,
+      durationMs,
+      htmlLength: renderedHtml.length,
+      source: renderedHtmlSource
+    })
   }, [capturePreviewScrollMemory, markdownImagePaths])
 
   useEffect(() => {
@@ -5837,6 +5853,30 @@ export function ProjectEditor({
     restorePreviewFromMemory,
     schedulePreviewSync,
     syncPreviewScroll
+  ])
+
+  useEffect(() => {
+    const mermaidState = getMermaidPreviewState()
+    if (!shouldRevealSettledPreview({
+      isMarkdownRenderAllowed,
+      renderedHtmlLength: markdownRenderedHtml.length,
+      phase: previewRestorePhase,
+      markdownRenderPending,
+      workerInFlight: markdownWorkerInFlightRef.current,
+      workerQueued: markdownWorkerQueuedRef.current,
+      mermaidPending: mermaidState.pending,
+      mermaidInFlight: mermaidRenderInFlightRef.current
+    })) {
+      return
+    }
+    queuePreviewReveal()
+  }, [
+    getMermaidPreviewState,
+    isMarkdownRenderAllowed,
+    markdownRenderedHtml,
+    markdownRenderPending,
+    previewRestorePhase,
+    queuePreviewReveal
   ])
 
   useEffect(() => {

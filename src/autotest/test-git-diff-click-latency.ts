@@ -674,7 +674,7 @@ export async function testGitDiffClickLatency(ctx: AutotestContext): Promise<Tes
   // 6. Cache invalidation verification (user spec point 3).
   //    Pick a small text file that is in the working set, snapshot its
   //    current content, mutate it via the saveFileContent IPC, wait for
-  //    the fs.watch / mirror invalidator chain to fire, then re-click
+  //    the Mirror invalidator chain to fire, then re-click
   //    and assert the new content reaches the renderer. We do not assert
   //    cache HIT/MISS state directly (that is a main-process concern);
   //    instead we verify the user-visible invariant: a background
@@ -737,13 +737,13 @@ export async function testGitDiffClickLatency(ctx: AutotestContext): Promise<Tes
             })
             return results
           }
-          // Give the invalidator chain (fs.watch debounce 180ms +
-          // mirror update + cache wipe + precompute requeue) time to
+          // Give the invalidator chain (Mirror debounce + cache wipe +
+          // precompute requeue) time to
           // settle, then click again and confirm the renderer sees the
           // new content. This proves the cache invalidates on background
           // mutation rather than serving stale.
           // Poll for the sentinel to appear in the renderer's view of the
-          // file. The invalidation chain is fs.watch (180 ms debounce) →
+          // file. The invalidation chain is Mirror Worker debounce →
           // GIT_DIFF_CACHE_INVALIDATED IPC → renderer-side listener →
           // ensureFileContent(force=true) → fresh body lands in
           // fileContentsRef. The exact end-to-end latency varies with git

@@ -85,11 +85,20 @@ interface FileBodyPending {
 }
 
 const WORKER_REQUEST_TIMEOUT_MS = 30_000
+const WORKER_SHUTDOWN_TIMEOUT_MS = 5_000
+
+type MirrorUpdateListener = (cwd: string, state: MirrorState, delta: MirrorDelta) => void
+type CwdChangeListener = (terminalId: string, prevCwd: string | null, nextCwd: string | null) => void
 
 class GitStateMirrorRouter {
   private worker: Worker | null = null
   private workerReady = false
   private respawnAttempt = 0
+  private disposingWorkers = new WeakSet<Worker>()
+  private workerShutdownTimers = new WeakMap<Worker, ReturnType<typeof setTimeout>>()
+  private workerShutdownStartedAt = new WeakMap<Worker, number>()
+  private workerShutdownTimedOut = new WeakSet<Worker>()
+  private disposePromise: Promise<void> | null = null
 
   /** webContents.id → set of subscribed cwds. */
   private subs = new Map<number, Set<string>>()
@@ -99,6 +108,10 @@ class GitStateMirrorRouter {
   private latest = new Map<string, MirrorState>()
   /** terminalId → last cwd pushed through OSC/native cwd detection. */
   private terminalCwds = new Map<string, string | null>()
+
+  /** Main-process subscribers (e.g. terminal-git-info-bridge). */
+  private mirrorUpdateListeners = new Set<MirrorUpdateListener>()
+  private cwdChangeListeners = new Set<CwdChangeListener>()
 
   /** request-file-body reply correlation. */
   private nextReplyId = 1
@@ -110,14 +123,51 @@ class GitStateMirrorRouter {
     this.registerWebContentsCleanup()
   }
 
-  dispose(): void {
-    if (this.worker) {
-      try {
-        this.postToWorker({ kind: 'shutdown' })
-      } catch { /* ignore */ }
-      this.worker.terminate().catch(() => { /* ignore */ })
-      this.worker = null
+  dispose(): Promise<void> {
+    if (this.disposePromise) {
+      this.clearLocalState()
+      return this.disposePromise
     }
+    const worker = this.worker
+    this.clearLocalState()
+    if (!worker) return Promise.resolve()
+
+    this.disposingWorkers.add(worker)
+    this.workerShutdownStartedAt.set(worker, Date.now())
+    this.worker = null
+    this.workerReady = false
+
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const exitPromise = new Promise<void>((resolve) => {
+      worker.once('exit', () => {
+        if (timer) clearTimeout(timer)
+        resolve()
+      })
+      timer = setTimeout(() => {
+        this.workerShutdownTimedOut.add(worker)
+        worker.terminate().catch(() => { /* ignore */ })
+      }, WORKER_SHUTDOWN_TIMEOUT_MS)
+      timer.unref?.()
+      this.workerShutdownTimers.set(worker, timer)
+    })
+
+    try {
+      worker.postMessage({ kind: 'shutdown' } satisfies MainToMirrorMessage)
+    } catch {
+      worker.terminate().catch(() => { /* ignore */ })
+    }
+    worker.unref()
+
+    const disposePromise = exitPromise.finally(() => {
+      if (this.disposePromise === disposePromise) {
+        this.disposePromise = null
+      }
+    })
+    this.disposePromise = disposePromise
+    return disposePromise
+  }
+
+  private clearLocalState(): void {
     this.subs.clear()
     this.refCounts.clear()
     this.latest.clear()
@@ -142,7 +192,8 @@ class GitStateMirrorRouter {
       this.worker = null
       return
     }
-    this.worker.on('message', (msg: unknown) => {
+    const worker = this.worker
+    worker.on('message', (msg: unknown) => {
       // Worker → main perf-trace forwarding lands on the dedicated tid
       // lane so Perfetto UI shows "git-state-mirror-worker" as its own row
       // (matches the convention used by git-ipc-worker / ripgrep-search).
@@ -155,21 +206,43 @@ class GitStateMirrorRouter {
       }
       this.handleWorkerMessage(msg as MirrorToMainMessage)
     })
-    this.worker.on('error', (error) => {
+    worker.on('error', (error) => {
       // Loud — anything that hits this is a true worker-thread exception
       // (uncaught throw, native module crash). Always log with the full
       // error and stack so the autotest log captures it.
       console.error('[GitStateMirrorRouter] worker error:', error, error?.stack)
     })
-    this.worker.on('exit', (code) => {
-      this.workerReady = false
-      this.worker = null
+    worker.on('exit', (code) => {
+      const shutdownTimer = this.workerShutdownTimers.get(worker)
+      if (shutdownTimer) clearTimeout(shutdownTimer)
+      this.workerShutdownTimers.delete(worker)
+
+      const wasDisposing = this.disposingWorkers.delete(worker)
+      const shutdownStartedAt = this.workerShutdownStartedAt.get(worker)
+      this.workerShutdownStartedAt.delete(worker)
+      const shutdownTimedOut = this.workerShutdownTimedOut.delete(worker)
+      if (wasDisposing && shutdownStartedAt !== undefined) {
+        performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_STATE_MIRROR_WORKER_SHUTDOWN, {
+          code,
+          result: shutdownTimedOut
+            ? 'terminated-after-timeout'
+            : code === 0 ? 'clean-exit' : 'nonzero-exit',
+          durationMs: Date.now() - shutdownStartedAt
+        })
+      }
+      if (this.worker === worker) {
+        this.workerReady = false
+        this.worker = null
+      }
       // Loud — every exit gets logged with the exit code and a stack
       // capture of the call site that observed the exit, so we can
       // distinguish "main posted shutdown via dispose()" from "worker
       // crashed silently". Without this, a single death between tests
       // is invisible until 5 in a row trip the giveup branch.
       console.error('[GitStateMirrorRouter] worker EXITED', { code, respawnAttempt: this.respawnAttempt, exitedAt: new Date().toISOString() })
+      if (wasDisposing || this.worker !== null) {
+        return
+      }
       // Reject every pending file-body request — the renderer will retry.
       for (const [, pending] of this.pendingBodies) {
         pending.reject(new Error(`mirror worker exited (code=${code}) before reply`))
@@ -183,6 +256,7 @@ class GitStateMirrorRouter {
       }
       this.respawnAttempt += 1
       setTimeout(() => {
+        if (this.worker) return
         this.spawnWorker()
         this.reattachAllAfterRespawn()
       }, Math.min(2000, 100 * this.respawnAttempt))
@@ -203,6 +277,8 @@ class GitStateMirrorRouter {
         this.workerReady = true
         this.respawnAttempt = 0
         return
+      case 'shutdown-complete':
+        return
       case 'mirror-update':
         this.latest.set(msg.cwd, msg.state)
         performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_STATE_MIRROR_FANOUT, {
@@ -211,16 +287,24 @@ class GitStateMirrorRouter {
           deltaKeys: Object.keys(msg.delta).filter((k) => k !== 'capturedAt')
         })
         this.fanout(msg.cwd, msg.delta)
+        // Notify main-process listeners (e.g. terminal-git-info-bridge).
+        for (const listener of this.mirrorUpdateListeners) {
+          try {
+            listener(msg.cwd, msg.state, msg.delta)
+          } catch (error) {
+            console.warn('[GitStateMirrorRouter] mirror-update listener threw:', error)
+          }
+        }
         // Phase 2 (Codex review P1-1): drive the diff-cache invalidation
         // chain off the worker's authoritative mirror-update signal
-        // instead of leaning on the main-process `git-diff-cache-
-        // invalidator` fs.watch to detect `.git/**` changes. The worker
+        // instead of leaning on a main-process `git-diff-cache-
+        // invalidator` watcher to detect `.git/**` changes. The worker
         // already (a) applied the .git event allowlist correctly, (b)
         // debounced via DEBOUNCE_MS, (c) computed a real `MirrorDelta`
         // via `computeDelta` — so by the time we get here, we KNOW
         // state actually changed (the worker only emits mirror-update
         // when delta has > capturedAt). That breaks the feedback loop
-        // the cache invalidator's fs.watch was trapped in: our own
+        // the old cache invalidator watcher was trapped in: our own
         // `git status` writes to `.git/index` no longer drive a
         // GitDiffViewer refetch chain that re-runs `git status`,
         // because the worker's `computeDelta` step short-circuits when
@@ -245,6 +329,21 @@ class GitStateMirrorRouter {
           console.warn('[git-state-mirror-worker]', msg.message, msg.data ?? '')
         } else if (process.env.ONWARD_DEBUG === '1') {
           console.log('[git-state-mirror-worker]', msg.message, msg.data ?? '')
+        }
+        return
+      case 'watcher-error':
+        // Phase 5: surface FS-watcher failure to all renderers as an
+        // explicit banner-eligible event. No silent retry / polling.
+        console.error('[GitStateMirrorRouter] watcher-error', { cwd: msg.cwd, message: msg.message })
+        gitDiffCacheInvalidator.notifyWatcherError(msg.cwd)
+        for (const [wcId] of this.subs) {
+          const wc = webContents.fromId(wcId)
+          if (!wc || wc.isDestroyed()) continue
+          try {
+            wc.send(IPC.GIT_STATE_MIRROR_WATCHER_ERROR, msg.cwd, msg.message)
+          } catch (error) {
+            console.warn('[GitStateMirrorRouter] watcher-error send failed:', error)
+          }
         }
         return
       default: {
@@ -310,11 +409,28 @@ class GitStateMirrorRouter {
         nextCwd: newCwd
       })
       this.postToWorker({ kind: 'switch-cwd', terminalId, newCwd })
+      // Notify main-process listeners after worker is informed so the
+      // bridge can swap its mirror subscription onto the new cwd.
+      for (const listener of this.cwdChangeListeners) {
+        try {
+          listener(terminalId, prevCwd, newCwd)
+        } catch (error) {
+          console.warn('[GitStateMirrorRouter] cwd-change listener threw:', error)
+        }
+      }
     })
 
     ipcMain.handle(IPC.GIT_STATE_MIRROR_REQUEST_FILE_BODY, (_event, rawCwd: string, fileKey: string, force: boolean) => {
       if (typeof rawCwd !== 'string' || !rawCwd) return null
       return this.requestFileBody(canonicalise(rawCwd), fileKey, Boolean(force))
+    })
+
+    // Phase 5 PART 2: Refresh Changes — renderer triggers a full
+    // recompute + identity bump. Idempotent; safe to call repeatedly.
+    ipcMain.handle(IPC.GIT_STATE_MIRROR_FORCE_REFRESH, (_event, rawCwd: string) => {
+      if (typeof rawCwd !== 'string' || !rawCwd) return false
+      this.internalForceRecompute(rawCwd)
+      return true
     })
   }
 
@@ -395,6 +511,74 @@ class GitStateMirrorRouter {
       subscribers: Array.from(this.subs.values()).reduce((acc, s) => acc + s.size, 0),
       cwds: Array.from(this.refCounts.keys())
     }
+  }
+
+  // ---------------------------------------------------------------------
+  // Main-process API for in-process subscribers (terminal-git-info-bridge,
+  // future Authority bridges). Same ref-count semantics as the IPC path
+  // but bypasses the per-webContents tracking.
+  // ---------------------------------------------------------------------
+
+  /**
+   * Subscribe to a cwd from main process. Returns the latest known
+   * snapshot (or null if none yet — the worker will compute one and
+   * deliver via the mirror-update listener path).
+   */
+  internalSubscribe(rawCwd: string): MirrorState | null {
+    if (!rawCwd) return null
+    const cwd = canonicalise(rawCwd)
+    const next = (this.refCounts.get(cwd) ?? 0) + 1
+    this.refCounts.set(cwd, next)
+    if (next === 1) this.postToWorker({ kind: 'attach-watch', cwd })
+    return this.latest.get(cwd) ?? null
+  }
+
+  /** Symmetric unsubscribe; sends detach-watch when refCount hits 0. */
+  internalUnsubscribe(rawCwd: string): void {
+    if (!rawCwd) return
+    const cwd = canonicalise(rawCwd)
+    const next = (this.refCounts.get(cwd) ?? 1) - 1
+    if (next <= 0) {
+      this.refCounts.delete(cwd)
+      this.postToWorker({ kind: 'detach-watch', cwd })
+    } else {
+      this.refCounts.set(cwd, next)
+    }
+  }
+
+  /**
+   * Force a recompute for an attached cwd. Use sparingly — this is the
+   * "Refresh Changes" / focus-resync path. Pure event-driven (the call
+   * itself IS the event), not a polled retry.
+   */
+  internalForceRecompute(rawCwd: string): void {
+    if (!rawCwd) return
+    const cwd = canonicalise(rawCwd)
+    if (!this.refCounts.has(cwd)) return
+    this.postToWorker({ kind: 'focus-resync', cwd })
+  }
+
+  /** Read-only access to the last-pushed cwd for a terminal (for bridge cold-start). */
+  getTerminalCwd(terminalId: string): string | null {
+    return this.terminalCwds.get(terminalId) ?? null
+  }
+
+  /** Read-only access to the last-known snapshot for a cwd. */
+  getLatest(rawCwd: string): MirrorState | null {
+    if (!rawCwd) return null
+    return this.latest.get(canonicalise(rawCwd)) ?? null
+  }
+
+  /** Register a listener for mirror-update events. Returns dispose fn. */
+  onMirrorUpdate(listener: MirrorUpdateListener): () => void {
+    this.mirrorUpdateListeners.add(listener)
+    return () => { this.mirrorUpdateListeners.delete(listener) }
+  }
+
+  /** Register a listener for terminal cwd-change events (PUSH_CWD). */
+  onCwdChange(listener: CwdChangeListener): () => void {
+    this.cwdChangeListeners.add(listener)
+    return () => { this.cwdChangeListeners.delete(listener) }
   }
 }
 

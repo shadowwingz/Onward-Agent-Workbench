@@ -210,8 +210,8 @@ append new names, never rename existing ones.
 | Constant | Name | Phase | Emitted at |
 |---|---|---|---|
 | `MAIN_GIT_DIFF_CACHE_HIT` | `main:git.diff.cache-hit` | `i` | `electron/main/git-utils.ts::getGitDiff` — request-level cache served without spawning git. Tagged `cwd`, `scope`, `ageMs`. |
-| `MAIN_GIT_DIFF_CACHE_INVALIDATE` | `main:git.diff.cache-invalidate` | `i` | Same file — cleared on watcher debounce, force=true entry, or project queue eviction. Tagged `cwd`, `reason: 'watcher' \| 'watcher-error' \| 'force' \| 'lru' \| 'manual' \| 'mirror'`, `entriesCleared`. |
-| `MAIN_GIT_DIFF_FS_WATCH_EVENT` | `main:git.diff.fs-watch-event` | `i` | `electron/main/git-diff-cache-invalidator.ts` — one event per 180 ms debounce window per watched cwd. Tagged `cwd`, `pendingMs`, `backend: 'parcel'`, `eventCount`. |
+| `MAIN_GIT_DIFF_CACHE_INVALIDATE` | `main:git.diff.cache-invalidate` | `i` | Same file — cleared on Mirror delta, watcher-error, force=true entry, manual refresh, or project queue eviction. Tagged `cwd`, `reason: 'watcher-error' \| 'force' \| 'lru' \| 'manual' \| 'mirror'`, `entriesCleared`. |
+| `MAIN_GIT_DIFF_FS_WATCH_EVENT` | `main:git.diff.fs-watch-event` | `i` | Retired historical event. The main-process diff invalidator no longer owns a Parcel watcher; use `worker:git-state-mirror.watcher-fire` plus `main:git-state-mirror.fanout` for the Authority path. |
 | `MAIN_GIT_DIFF_SUBMODULE_FILTER` | `main:git.diff.submodule-filter` | `i` | `electron/main/git-utils.ts::filterMeaninglessSubmoduleEntries` — one event per submodule entry decision (kept iff `<c>=C` OR `changeType==='staged'`). Tagged `repoRoot`, `repoLabel`, `path`, `flags`, `changeType`, `kept`. |
 | `MAIN_IPC_GIT_GET_FILE_CONTENT` | `main:ipc.git.get-file-content` | `X` (duration) | `electron/main/ipc-handlers.ts` — wraps the Git Diff per-file body IPC request, including worker queue + Git read time. Tagged `cwd`, `repoRoot`, `filename`, `status`, `changeType`, `cacheState`, `cacheSource`, `cacheMissReason`, `result`, `durationMs`. |
 
@@ -227,7 +227,7 @@ that derives the legacy `GitSubmoduleInfo[]` shape from the snapshot.
 |---|---|---|---|
 | `MAIN_GIT_SNAPSHOT_CAPTURE` | `main:git.snapshot.capture` | `i` | `electron/main/git-repository-snapshot-service.ts` — first call for a cwd or `force: true`. Tagged `cwd`, `isRepo`, `submoduleCount`, `validSubmoduleCount`, `fingerprint`. |
 | `MAIN_GIT_SNAPSHOT_CACHE_HIT` | `main:git.snapshot.cache-hit` | `i` | Same file — cached snapshot returned without re-running git. Tagged `cwd`, `fingerprint`, `ageMs`, `submoduleCount`. |
-| `MAIN_GIT_SNAPSHOT_INVALIDATE` | `main:git.snapshot.invalidate` | `i` | Same file — entry dropped because `invalidateGitDiffCache(cwd)` was called (watcher fan-out, force, manual). Tagged `cwd`. |
+| `MAIN_GIT_SNAPSHOT_INVALIDATE` | `main:git.snapshot.invalidate` | `i` | Same file — entry dropped because `invalidateGitDiffCache(cwd)` was called (Mirror fanout, force, manual). Tagged `cwd`. |
 
 The snapshot service emits these events from BOTH main and the
 git-ipc-worker — the worker's events forward through the existing
@@ -260,6 +260,7 @@ whitelist drops it) → `recompute-status-done` → `fanout` →
 | `WORKER_GIT_STATE_MIRROR_WATCHER_FILTERED` | `worker:git-state-mirror.watcher-filtered` | `i` | Same file — event dropped by the .git whitelist. Tagged `cwd`, `path`, `reason` (`gitObjects` / `lockfile` / `tmpfile`). Used by GDS-39 to assert the feedback-loop guard. |
 | `WORKER_GIT_STATE_MIRROR_RECOMPUTE_DONE` | `worker:git-state-mirror.recompute-status-done` | `X` (duration) | `git-state-mirror-worker-entry.ts` — wraps a single `git status --porcelain=v2 -z` run plus delta computation. Payload: `cwd`, `reason` (`watcher` / `osc-switch` / `focus-resync`), `fileCount`, `branch`, `status`, `durationMs`. |
 | `MAIN_GIT_STATE_MIRROR_FANOUT` | `main:git-state-mirror.fanout` | `i` | `git-state-mirror-router.ts` — fanout to N subscribers. Tagged `cwd`, `subscriberCount`, `deltaKeys` (e.g. `['fileList','branch']`). |
+| `MAIN_GIT_STATE_MIRROR_WORKER_SHUTDOWN` | `main:git-state-mirror.worker-shutdown` | `X` (duration) | `git-state-mirror-router.ts` — graceful worker shutdown during app quit. Tagged `result` (`clean-exit` / `nonzero-exit` / `terminated-after-timeout`), `code`, `durationMs`. |
 | `RENDERER_TERMINAL_TITLE_BRANCH_RENDERED` | `renderer:terminal-title.branch-rendered` | `i` | `src/components/TerminalGrid/TerminalGrid.tsx` — DOM commit landed with new branch text. Tagged `terminalId`, `cwd`, `branch`. |
 | `RENDERER_TERMINAL_TITLE_COLOR_RENDERED` | `renderer:terminal-title.color-rendered` | `i` | Same file — DOM `terminal-grid-branch--{status}` className committed. Tagged `terminalId`, `status` (`clean` / `modified` / `added` / `unknown`). |
 | `RENDERER_GIT_DIFF_MANUAL_REFRESH` | `renderer:git-diff.manual-refresh` | `X` (duration) | `src/components/GitDiffViewer/GitDiffViewer.tsx` — user invoked Refresh Changes, clearing renderer diff caches and re-reading list/body with `force: true`. Tagged `cwd`, `terminalId`, `result`, `durationMs`. |
@@ -271,7 +272,7 @@ whitelist drops it) → `recompute-status-done` → `fanout` →
 | `RENDERER_GIT_DIFF_CACHE_INVALIDATION` | `renderer:git-diff.cache-invalidation` | `i` | Same file — renderer received a backend Git Diff cache invalidation and either marked visible file bodies stale for background refresh or cleared closed-view caches. Tagged `cwd`, `terminalId`, `invalidatedCwd`, `reason`, `isOpen`, `retainedEntries`, `staleEntries`. |
 | `MAIN_GIT_DIFF_CONTENT_CACHE_HIT` | `main:git.diff.content-cache.hit` | `i` | `electron/main/git-diff-content-cache-wiring.ts` — the per-project file content cache served `getFileContent` from memory, no worker round-trip. Tagged `project`, `filename`, `changeType`, `source`. |
 | `MAIN_GIT_DIFF_CONTENT_CACHE_MISS` | `main:git.diff.content-cache.miss` | `i` | Same file — cache lookup missed; the worker IPC was invoked and the result stored back into the cache. Tagged `project`, `filename`, `changeType`, `reason`, `force`. |
-| `MAIN_GIT_DIFF_CONTENT_CACHE_INVALIDATE_PROJECT` | `main:git.diff.content-cache.invalidate-project` | `i` | Same file — `gitDiffCacheInvalidator` fired (Parcel watcher / mirror delta / explicit refresh / mutation), wiping the project bucket. Tagged `project`, `reason`, `droppedEntries`. |
+| `MAIN_GIT_DIFF_CONTENT_CACHE_INVALIDATE_PROJECT` | `main:git.diff.content-cache.invalidate-project` | `i` | Same file — `gitDiffCacheInvalidator` fired (Mirror delta / explicit refresh / mutation), wiping the project bucket. Tagged `project`, `reason`, `droppedEntries`. |
 | `MAIN_GIT_DIFF_CONTENT_CACHE_INVALIDATE_LRU` | `main:git.diff.content-cache.invalidate-lru` | `i` | Same file — the recent-project queue evicted a project, so the corresponding content cache bucket was dropped too. Tagged `project`, `reason: 'project-queue-evicted'`. |
 | `MAIN_GIT_DIFF_PRECOMPUTE_SCHEDULE` | `main:git.diff.precompute.schedule` | `i` | Same file — precompute scheduler began a burst for a project (after debounce). Tagged `project`, `candidateCount`. |
 | `MAIN_GIT_DIFF_PRECOMPUTE_SKIP_TOO_LARGE` | `main:git.diff.precompute.skip-too-large` | `i` | Same file — a candidate was skipped because its content exceeded the single-file cap. Tagged `project`, `filename`, `bytes`, `reason`. |
@@ -479,6 +480,7 @@ so every call through `window.electronAPI.<domain>.<method>()` gets a
 | `RENDERER_MARKDOWN_SANITIZE` | `renderer:markdown.dompurify-sanitize` | `X` | Same, DOMPurify call |
 | `RENDERER_MARKDOWN_MERMAID` | `renderer:markdown.mermaid-render` | `i`/`X` | `src/utils/mermaidRenderer.ts` |
 | `RENDERER_MARKDOWN_PREVIEW_REVEAL` | `renderer:markdown.preview-reveal` | `i` | `ProjectEditor.tsx::queuePreviewReveal::finalize` — duration of the preview-restore phase machine (from `queuePreviewReveal` entry to `phase:idle`). Payload: `cause` (`fast-path`), `hadWork` (bool), `durationMs`. The user-perceived loading window when entering Markdown preview. |
+| `RENDERER_MARKDOWN_SESSION_CACHE_CAPTURE` | `renderer:markdown.session-cache-capture` | `X` | `ProjectEditor.tsx::captureMarkdownSessionCache` — captures rendered Markdown preview state without serializing the live DOM when `markdownRenderedHtmlRef` is available. Payload: `reason`, `durationMs`, `htmlLength`, `source`. |
 | `WORKER_MARKDOWN_RENDER_COMPLETE` | `worker.markdown:render-complete` | `X` | Worker-measured duration reported to renderer via `worker.onmessage` — parse + katex + highlight |
 | `RENDERER_MONACO_VIEWSTATE_RESTORE` | `renderer:monaco.viewstate-restore` | `X` | `ProjectEditor.tsx::editor.restoreViewState` |
 | `RENDERER_XTERM_WEBGL_INIT` | `renderer:xterm.webgl-context-init` | `X` | `src/components/Terminal/Terminal.tsx` WebGL addon attach |
@@ -541,6 +543,7 @@ so every call through `window.electronAPI.<domain>.<method>()` gets a
 | `MAIN_FILE_INDEX_UPDATE` | `main:file-index.update` | `i` | Same, `PROJECT_INVALIDATE_FILE_INDEX` handler |
 | `MAIN_PROJECT_TREE_WATCH_EVENT` | `main:project-tree-watch.event` | `i` | `project-tree-watch-manager.ts::scheduleFlush` — one per debounce-window start (not per raw FSEvent) |
 | `MAIN_PROJECT_TREE_WATCH_BATCH` | `main:project-tree-watch.batch` | `i` | Same, `flush()` — coalesced batch shipped to renderer |
+| `MAIN_PROJECT_TREE_WATCH_IGNORED_SUMMARY` | `main:project-tree-watch.ignored-summary` | `i` | Same, `recordIgnoredEvent()` — 1 s aggregate of high-frequency watcher events dropped at the boundary (`.git`, `node_modules`, cache dirs, `.DS_Store`) |
 
 ---
 
@@ -556,8 +559,9 @@ and the known background ops.
    `RENDERER_IPC_*` spans against main-side execution time for
    bandwidth analysis.
 2. **Raw FSEvent sampling** — `MAIN_PROJECT_TREE_WATCH_EVENT` emits at
-   debounce-window start (good signal-to-noise). If a deeper analysis
-   of FSEvent storms is ever needed, add a separate `.raw-event` span
+   debounce-window start and `MAIN_PROJECT_TREE_WATCH_IGNORED_SUMMARY`
+   aggregates dropped high-frequency paths. If a deeper analysis
+   of non-ignored FSEvent storms is ever needed, add a separate `.raw-event` span
    inside `handleRawEvent` with a 1/N sampler to keep volume bounded.
 3. **Monaco dispose / mount** — restoreViewState is covered; the heavy
    Monaco model attach/detach around subpage navigation is not. Adding

@@ -11,6 +11,8 @@ import { join, normalize } from 'path'
 import { IPC } from '../shared/ipc-channels'
 import { performanceTrace } from './performance-trace'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
+import { getIgnoredRelReason, isIgnoredRel } from './project-tree-watch-ignore'
+import type { ProjectTreeWatchIgnoreReason } from './project-tree-watch-ignore'
 
 interface TreeEntry {
   watcher: FSWatcher | null
@@ -18,6 +20,8 @@ interface TreeEntry {
   pendingRemoved: Set<string>
   pendingResync: boolean
   flushTimer: NodeJS.Timeout | null
+  ignoredFlushTimer: NodeJS.Timeout | null
+  ignoredEventCounts: Map<ProjectTreeWatchIgnoreReason, number>
   inflightWalks: number
   // Directory paths whose contents we have already enumerated at least once.
   // macOS FSEvents delivers a parent-directory "changed" event for nearly
@@ -30,8 +34,12 @@ interface TreeEntry {
 }
 
 const FLUSH_DEBOUNCE_MS = 180
+const IGNORED_SUMMARY_MS = 1000
 // Upper cap so a runaway rename loop cannot unbounded-queue events.
 const MAX_PENDING = 5000
+
+// Ignore filter lives in `project-tree-watch-ignore.ts` so it can be
+// unit-tested without Electron's main-process imports.
 
 function toRendererCwd(fullPath: string): string {
   return fullPath.replace(/\\/g, '/')
@@ -64,6 +72,8 @@ export class ProjectTreeWatchManager {
       pendingRemoved: new Set(),
       pendingResync: false,
       flushTimer: null,
+      ignoredFlushTimer: null,
+      ignoredEventCounts: new Map(),
       inflightWalks: 0,
       walkedDirs: new Set(),
       disposed: false,
@@ -102,6 +112,10 @@ export class ProjectTreeWatchManager {
       clearTimeout(entry.flushTimer)
       entry.flushTimer = null
     }
+    if (entry.ignoredFlushTimer) {
+      clearTimeout(entry.ignoredFlushTimer)
+      entry.ignoredFlushTimer = null
+    }
     if (entry.watcher) {
       try {
         entry.watcher.close()
@@ -132,7 +146,45 @@ export class ProjectTreeWatchManager {
     const abs = join(fullPath, filename)
     const rel = toRelativeRendererPath(fullPath, abs)
     if (!rel) return
+    // Drop high-frequency uninteresting paths (e.g. `.git/index.lock`,
+    // `node_modules/.cache/**`) at the source. Without this, the app's own
+    // git-status polling flickers `.git/objects/**` continuously and pegs
+    // the renderer chasing FS events for paths Cmd+P / File Browser never
+    // surfaces anyway.
+    const ignoredReason = getIgnoredRelReason(rel)
+    if (ignoredReason) {
+      this.recordIgnoredEvent(entry, ignoredReason)
+      return
+    }
     void this.classifyAndQueuePath(fullPath, entry, abs, rel)
+  }
+
+  private recordIgnoredEvent(entry: TreeEntry, reason: ProjectTreeWatchIgnoreReason): void {
+    if (!performanceTrace.isEnabled()) return
+    entry.ignoredEventCounts.set(reason, (entry.ignoredEventCounts.get(reason) ?? 0) + 1)
+    if (entry.ignoredFlushTimer) return
+    entry.ignoredFlushTimer = setTimeout(() => {
+      entry.ignoredFlushTimer = null
+      this.flushIgnoredEvents(entry)
+    }, IGNORED_SUMMARY_MS)
+    entry.ignoredFlushTimer.unref?.()
+  }
+
+  private flushIgnoredEvents(entry: TreeEntry): void {
+    if (entry.disposed || entry.ignoredEventCounts.size === 0) return
+    const git = entry.ignoredEventCounts.get('git') ?? 0
+    const nodeModules = entry.ignoredEventCounts.get('nodeModules') ?? 0
+    const cache = entry.ignoredEventCounts.get('cache') ?? 0
+    const dsStore = entry.ignoredEventCounts.get('dsStore') ?? 0
+    entry.ignoredEventCounts.clear()
+    performanceTrace.record(PERF_TRACE_EVENT.MAIN_PROJECT_TREE_WATCH_IGNORED_SUMMARY, {
+      cwd: entry.cwdForRenderer,
+      total: git + nodeModules + cache + dsStore,
+      git,
+      nodeModules,
+      cache,
+      dsStore
+    })
   }
 
   private async classifyAndQueuePath(fullPath: string, entry: TreeEntry, abs: string, rel: string): Promise<void> {
@@ -210,6 +262,7 @@ export class ProjectTreeWatchManager {
         }
         for (const child of children) {
           const childRel = `${current}/${child.name}`.replace(/\\/g, '/')
+          if (isIgnoredRel(childRel)) continue
           if (child.isDirectory()) {
             stack.push(childRel)
           } else if (child.isFile() || child.isSymbolicLink()) {

@@ -171,6 +171,7 @@ export function computeMirrorDelta(prev: MirrorState | null, next: MirrorState):
     out.files = next.files
     out.repos = next.repos
     out.submodulesLoading = next.submodulesLoading
+    out.generation = next.generation
     return out
   }
   if (prev.repoRoot !== next.repoRoot) out.repoRoot = next.repoRoot
@@ -180,6 +181,10 @@ export function computeMirrorDelta(prev: MirrorState | null, next: MirrorState):
   if (prev.submodulesLoading !== next.submodulesLoading) out.submodulesLoading = next.submodulesLoading
   if (!sameFileList(prev.files, next.files)) out.files = next.files
   if (!sameRepos(prev.repos, next.repos)) out.repos = next.repos
+  // Generation is always included when it changed — Refresh Changes
+  // is the trigger that bumps generation even when underlying data
+  // (branch/status/files) is byte-identical.
+  if (prev.generation !== next.generation) out.generation = next.generation
   return out
 }
 

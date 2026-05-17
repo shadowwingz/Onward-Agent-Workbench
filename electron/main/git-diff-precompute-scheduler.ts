@@ -5,7 +5,7 @@
 
 // Eager-prefetch scheduler that fills the per-project diff content cache
 // **before** the user clicks any specific file. Driven by the existing
-// `gitDiffCacheInvalidator` events (fs.watch + state-mirror deltas), so a
+// `gitDiffCacheInvalidator` events (GitStateMirror deltas + manual refresh), so a
 // burst of file changes triggers exactly one rebuild rather than a flood.
 //
 // Lifecycle:

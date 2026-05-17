@@ -1,0 +1,8 @@
+<!-- SPDX-FileCopyrightText: 2026 OPPO -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<svg xmlns="http://www.w3.org/2000/svg" width="120" height="80" viewBox="0 0 120 80" role="img" aria-label="CPU preview fixture">
+  <rect width="120" height="80" rx="8" fill="#111827"/>
+  <circle cx="28" cy="40" r="14" fill="#38bdf8"/>
+  <circle cx="60" cy="40" r="14" fill="#22c55e"/>
+  <circle cx="92" cy="40" r="14" fill="#f97316"/>
+</svg>

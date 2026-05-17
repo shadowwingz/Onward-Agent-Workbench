@@ -42,6 +42,13 @@
   transition: opacity 0.16s ease, visibility 0s linear 0.16s;
 }
 
+.git-history-overlay.panel.is-hidden *,
+.git-history-overlay.panel.is-hidden *::before,
+.git-history-overlay.panel.is-hidden *::after {
+  animation-play-state: paused !important;
+  transition: none !important;
+}
+
 .git-history-modal {
   position: relative;
   background-color: var(--panel);

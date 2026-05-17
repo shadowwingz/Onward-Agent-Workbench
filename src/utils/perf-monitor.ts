@@ -259,11 +259,16 @@ class PerfMonitor {
 // Singleton instance
 export const perfMonitor = new PerfMonitor()
 
-// Auto-start when debug mode is enabled
+// Auto-start ONLY when perf-trace is explicitly enabled (ONWARD_PERF_TRACE=1).
+// The previous gate `debugAPI?.enabled || debugAPI?.perfTraceEnabled` meant
+// every ONWARD_DEBUG=1 launch booted a `requestAnimationFrame` self-recursion
+// loop that pegged renderer CPU at vsync — even when no UI work was active.
+// PerfMonitor is a measurement tool; it must not run unless the user opts
+// in to measurement. ONWARD_DEBUG remains a separate concern (verbose logs).
 if (typeof window !== 'undefined') {
   try {
     const debugAPI = (window as any).electronAPI?.debug
-    if (debugAPI?.enabled || debugAPI?.perfTraceEnabled) {
+    if (debugAPI?.perfTraceEnabled) {
       perfMonitor.start()
     }
   } catch {
