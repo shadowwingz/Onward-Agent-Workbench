@@ -1099,6 +1099,7 @@ export interface BrowserAPI {
   onEscapePressed: (callback: (id: string) => void) => () => void
   onFoundInPage: (callback: (id: string, result: BrowserFoundInPageResult) => void) => () => void
   onFindShortcutPressed: (callback: (id: string) => void) => () => void
+  onReloadShortcutPressed: (callback: (id: string) => void) => () => void
   onZoomFactorChanged: (callback: (id: string, zoomFactor: number, source: 'renderer' | 'shortcut') => void) => () => void
 }
 

@@ -189,7 +189,14 @@ export async function testProjectEditorHtmlPreview(ctx: AutotestContext): Promis
   record('PHTML-06b-force-refresh-is-icon-only', forceRefreshButtonText === '', {
     buttonText: forceRefreshButtonText
   })
-  if (!forceRefreshVisibleWithoutEditor || forceRefreshButtonText !== '' || cancelled()) return results
+  const forceRefreshButtonTitle = document.querySelector('.project-editor-html-force-refresh-btn')?.getAttribute('title') ?? ''
+  const expectedRefreshShortcut = window.electronAPI.platform === 'darwin' ? '⌘R' : 'Ctrl+R'
+  const forceRefreshShortcutTitleOk = forceRefreshButtonTitle.includes(expectedRefreshShortcut)
+  record('PHTML-06c-force-refresh-title-shows-shortcut', forceRefreshShortcutTitleOk, {
+    title: forceRefreshButtonTitle,
+    expectedRefreshShortcut
+  })
+  if (!forceRefreshVisibleWithoutEditor || forceRefreshButtonText !== '' || !forceRefreshShortcutTitleOk || cancelled()) return results
 
   getApi()?.setMarkdownEditorVisible?.(true)
   const editorRestored = await waitFor(
@@ -408,7 +415,8 @@ export async function testProjectEditorHtmlPreview(ctx: AutotestContext): Promis
     (state) => (state.scrollY ?? 0) >= 600,
     5000
   )
-  record('PHTML-15-save-rerenders-fresh-document-and-restores-scroll', Boolean(rerendered.ok && restoredScroll.ok), {
+  const saveRerenderedAndRestored = Boolean(rerendered.ok && restoredScroll.ok)
+  record('PHTML-15-save-rerenders-fresh-document-and-restores-scroll', saveRerenderedAndRestored, {
     beforeReader,
     afterReader,
     saveMarker: rerendered.state?.saveMarker ?? null,
@@ -416,6 +424,41 @@ export async function testProjectEditorHtmlPreview(ctx: AutotestContext): Promis
     externalReady: rerendered.state?.externalReady ?? false,
     localReady: rerendered.state?.localReady ?? false,
     restoredScrollY: restoredScroll.state?.scrollY ?? null
+  })
+  if (!saveRerenderedAndRestored || cancelled()) return results
+
+  const beforeShortcutReader = getApi()?.getHtmlReaderState?.() ?? null
+  document.dispatchEvent(new KeyboardEvent('keydown', {
+    bubbles: true,
+    cancelable: true,
+    key: 'r',
+    metaKey: window.electronAPI.platform === 'darwin',
+    ctrlKey: window.electronAPI.platform !== 'darwin'
+  }))
+  const reloadedByShortcut = await waitFor(
+    'phtml-html-refresh-shortcut',
+    () => {
+      const reader = getApi()?.getHtmlReaderState?.()
+      return Boolean(
+        beforeShortcutReader &&
+        reader &&
+        reader.reloadKey > beforeShortcutReader.reloadKey &&
+        reader.browserId !== beforeShortcutReader.browserId
+      )
+    },
+    15000,
+    100
+  )
+  const shortcutRendered = await waitForDocumentState(
+    'phtml-refresh-shortcut-rendered',
+    (state) => state.title === expectedTitle && Boolean(state.bodyText?.includes(UPDATED_MARKER)),
+    10000
+  )
+  record('PHTML-16-html-preview-refresh-shortcut-reloads', Boolean(reloadedByShortcut && shortcutRendered.ok), {
+    beforeShortcutReader,
+    afterShortcutReader: getApi()?.getHtmlReaderState?.() ?? null,
+    renderedTitle: shortcutRendered.state?.title ?? null,
+    hasUpdatedMarker: Boolean(shortcutRendered.state?.bodyText?.includes(UPDATED_MARKER))
   })
 
   return results

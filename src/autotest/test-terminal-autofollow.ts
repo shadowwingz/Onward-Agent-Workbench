@@ -271,6 +271,27 @@ export async function testTerminalAutofollow(ctx: AutotestContext): Promise<Test
   })
   if (!fixtureCompleted || cancelled()) return results
 
+  if (platform !== 'win32' && window.electronAPI.debug.autotestFixtureExtra === 'terminal-zsh-chain') {
+    await execCommand(
+      'printf "ONWARD_ZSH_CHAIN_RESULT shell=%s zprofile=%s zshrc=%s\\n" "$SHELL" "${ONWARD_AUTOTEST_ZPROFILE_MARKER:-}" "${ONWARD_AUTOTEST_ZSHRC_MARKER:-}"',
+      'zsh-user-zdotdir-chain',
+      250
+    )
+    const zshChainReady = await waitFor('terminal-zsh-chain-result', () => {
+      return readTail(api, 60).includes('ONWARD_ZSH_CHAIN_RESULT')
+    }, 8000, 120)
+    const zshChainTail = readTail(api, 60)
+    record(
+      'TA-00c-zsh-user-zdotdir-chain',
+      zshChainReady &&
+        /ONWARD_ZSH_CHAIN_RESULT .*shell=\/.*zsh/.test(zshChainTail) &&
+        zshChainTail.includes('zprofile=loaded-zprofile') &&
+        zshChainTail.includes('zshrc=loaded-zshrc'),
+      { tail: zshChainTail }
+    )
+    if (!zshChainReady || cancelled()) return results
+  }
+
   let colorOutput = ''
   const unsubscribeColorCapture = window.electronAPI.terminal.onData((termId, data) => {
     if (termId === terminalId) colorOutput += data

@@ -1326,6 +1326,7 @@ export interface BrowserAPI {
   onEscapePressed: (callback: (id: string) => void) => () => void
   onFoundInPage: (callback: (id: string, result: BrowserFoundInPageResult) => void) => () => void
   onFindShortcutPressed: (callback: (id: string) => void) => () => void
+  onReloadShortcutPressed: (callback: (id: string) => void) => () => void
   onZoomFactorChanged: (callback: (id: string, zoomFactor: number, source: 'renderer' | 'shortcut') => void) => () => void
 }
 
@@ -2286,6 +2287,15 @@ const browserAPI: BrowserAPI = {
     ipcRenderer.on(IPC.BROWSER_FIND_SHORTCUT_PRESSED, listener)
     return () => {
       ipcRenderer.removeListener(IPC.BROWSER_FIND_SHORTCUT_PRESSED, listener)
+    }
+  },
+  onReloadShortcutPressed: (callback: (id: string) => void) => {
+    const listener = (_: Electron.IpcRendererEvent, id: string) => {
+      callback(id)
+    }
+    ipcRenderer.on(IPC.BROWSER_RELOAD_SHORTCUT_PRESSED, listener)
+    return () => {
+      ipcRenderer.removeListener(IPC.BROWSER_RELOAD_SHORTCUT_PRESSED, listener)
     }
   },
   onZoomFactorChanged: (callback: (id: string, zoomFactor: number, source: 'renderer' | 'shortcut') => void) => {

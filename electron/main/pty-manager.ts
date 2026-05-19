@@ -12,7 +12,7 @@ import { app } from 'electron'
 import { getApiPort } from './api-server'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 import { performanceTrace } from './performance-trace'
-import { buildColorCapableTerminalEnv } from './terminal-env'
+import { buildColorCapableTerminalEnv, resolveUserZdotdirForShellIntegration } from './terminal-env'
 
 export interface PtyOptions {
   cols?: number
@@ -88,6 +88,7 @@ export class PtyManager {
     const execCommand = command || shell
     let execArgs = command ? (args || []) : []
     const shellKind = this.detectShellKind(execCommand)
+    const inheritedEnv = env ? { ...env } : buildColorCapableTerminalEnv(process.env)
 
     // On macOS/Linux, launch the default shell as a login shell so that
     // profile files (.zprofile, .bash_profile, .profile) are sourced.
@@ -127,7 +128,7 @@ export class PtyManager {
     // sub-50ms latency. Falls back to the legacy lsof / cmd-PROMPT path when
     // the user opts out via ONWARD_SHELL_INTEGRATION=0.
     if (!command && process.env.ONWARD_SHELL_INTEGRATION !== '0') {
-      const injection = this.prepareShellIntegrationInjection(shell)
+      const injection = this.prepareShellIntegrationInjection(shell, inheritedEnv)
       if (injection) {
         // argsReplace wins over the caller's defaults: bash specifically
         // needs to drop the `-l` login flag so `--rcfile` is honoured.
@@ -149,7 +150,6 @@ export class PtyManager {
     }
 
     const initialCwd = cwd || process.env.HOME || process.env.USERPROFILE || process.cwd()
-    const inheritedEnv = env ? { ...env } : buildColorCapableTerminalEnv(process.env)
 
     const spawnStartMs = Date.now()
     const spawnStartUs = performanceTrace.nowUs()
@@ -589,7 +589,7 @@ export class PtyManager {
    * `cleanupPath` is the temp directory the caller should `rm -rf` when
    * the PTY exits — currently only zsh's ZDOTDIR injection produces one.
    */
-  private prepareShellIntegrationInjection(shellPath: string): {
+  private prepareShellIntegrationInjection(shellPath: string, baseEnv: NodeJS.ProcessEnv): {
     argsPrepend?: string[]
     argsAppend?: string[]
     /**
@@ -671,7 +671,7 @@ export class PtyManager {
       // the user's real config.
       const zdotdir = join(integrationDir, 'zsh-zdotdir')
       const env: Record<string, string> = { ZDOTDIR: zdotdir }
-      const userZdot = process.env.ZDOTDIR || homedir()
+      const userZdot = resolveUserZdotdirForShellIntegration(baseEnv, homedir(), zdotdir)
       if (userZdot) env.USER_ZDOTDIR = userZdot
       return { env, cleanupPath: null }
     }

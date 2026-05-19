@@ -9,6 +9,7 @@ import assert from 'node:assert/strict'
 import {
   formatHtmlPreviewZoomPercent,
   getHtmlFileExtension,
+  isHtmlPreviewRefreshShortcut,
   isHtmlPath,
   normalizeHtmlPreviewScrollState,
   normalizeHtmlPreviewZoomFactor,
@@ -98,4 +99,13 @@ test('PEHTML-U-09 formats HTML preview zoom percent', () => {
   assert.equal(formatHtmlPreviewZoomPercent(1), '100%')
   assert.equal(formatHtmlPreviewZoomPercent(1.25), '125%')
   assert.equal(formatHtmlPreviewZoomPercent(0.5), '50%')
+})
+
+test('PEHTML-U-10 detects browser-aligned HTML preview refresh shortcuts', () => {
+  assert.equal(isHtmlPreviewRefreshShortcut({ key: 'r', metaKey: true }), true)
+  assert.equal(isHtmlPreviewRefreshShortcut({ key: 'R', ctrlKey: true }), true)
+  assert.equal(isHtmlPreviewRefreshShortcut({ key: 'r', metaKey: true, shiftKey: true }), false)
+  assert.equal(isHtmlPreviewRefreshShortcut({ key: 'r', ctrlKey: true, altKey: true }), false)
+  assert.equal(isHtmlPreviewRefreshShortcut({ key: 'r' }), false)
+  assert.equal(isHtmlPreviewRefreshShortcut({ key: 'f', metaKey: true }), false)
 })

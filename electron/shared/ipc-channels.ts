@@ -40,6 +40,7 @@ export const IPC = {
   BROWSER_NAV_STATE_CHANGED: 'browser:nav-state-changed',
   BROWSER_NAVIGATE: 'browser:navigate',
   BROWSER_RELOAD: 'browser:reload',
+  BROWSER_RELOAD_SHORTCUT_PRESSED: 'browser:reload-shortcut-pressed',
   BROWSER_RESTORE_SCROLL_STATE: 'browser:restore-scroll-state',
   BROWSER_SET_BOUNDS: 'browser:set-bounds',
   BROWSER_SET_REMEMBER_COOKIES: 'browser:set-remember-cookies',

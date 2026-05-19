@@ -62,6 +62,48 @@ export function buildColorCapableTerminalEnv(baseEnv: NodeJS.ProcessEnv): NodeJS
   return env
 }
 
+function normalizePathForEnvComparison(value: string | undefined): string | null {
+  const trimmed = (value ?? '').trim()
+  if (!trimmed) return null
+  return trimmed.replace(/[\\/]+$/g, '').replace(/\\/g, '/')
+}
+
+export function isOnwardZshIntegrationZdotdir(value: string | undefined, currentIntegrationZdotdir?: string): boolean {
+  const normalized = normalizePathForEnvComparison(value)
+  if (!normalized) return false
+
+  const current = normalizePathForEnvComparison(currentIntegrationZdotdir)
+  if (current && normalized === current) return true
+
+  const parts = normalized.split('/').filter(Boolean)
+  const last = parts[parts.length - 1]
+  const parent = parts[parts.length - 2]
+  if (last !== 'zsh-zdotdir' || parent !== 'shell-integration') return false
+
+  return parts.includes('resources') || parts.includes('Resources')
+}
+
+export function resolveUserZdotdirForShellIntegration(
+  baseEnv: NodeJS.ProcessEnv,
+  fallbackHome: string | undefined,
+  currentIntegrationZdotdir?: string
+): string | null {
+  const candidates = [
+    baseEnv.USER_ZDOTDIR,
+    baseEnv.ZDOTDIR,
+    fallbackHome
+  ]
+
+  for (const candidate of candidates) {
+    const normalized = normalizePathForEnvComparison(candidate)
+    if (!normalized) continue
+    if (isOnwardZshIntegrationZdotdir(normalized, currentIntegrationZdotdir)) continue
+    return candidate!.trim()
+  }
+
+  return null
+}
+
 export function applyTerminalUserEnvVars(
   baseEnv: NodeJS.ProcessEnv,
   userEnvVars: ReadonlyArray<TerminalEnvVarEntry>

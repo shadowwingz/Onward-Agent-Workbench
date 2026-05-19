@@ -267,6 +267,15 @@ export function BrowserPanel({
     void window.electronAPI.browser.reload(id)
   }, [isLoading])
 
+  useEffect(() => {
+    if (!isOpen) return
+    const unsubscribe = window.electronAPI.browser.onReloadShortcutPressed((id) => {
+      if (id !== browserIdRef.current) return
+      handleReload()
+    })
+    return unsubscribe
+  }, [handleReload, isOpen])
+
   const handleShowCookieMenu = useCallback(async () => {
     const result = await window.electronAPI.browser.showCookieMenu({
       rememberCookies,

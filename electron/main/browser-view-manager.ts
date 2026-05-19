@@ -7,7 +7,11 @@ import { BrowserWindow, WebContentsView, session, type Event as ElectronEvent, t
 import { fileURLToPath } from 'url'
 import { isAbsolute, relative, resolve } from 'path'
 import { IPC } from '../shared/ipc-channels'
-import { normalizeHtmlPreviewZoomFactor, stepHtmlPreviewZoomFactor } from '../../src/utils/html-file'
+import {
+  isHtmlPreviewRefreshShortcut,
+  normalizeHtmlPreviewZoomFactor,
+  stepHtmlPreviewZoomFactor
+} from '../../src/utils/html-file'
 
 const BROWSER_PARTITION = 'persist:browser'
 
@@ -650,6 +654,25 @@ class BrowserViewManager {
           this.mainWindow.webContents.focus()
         }
         send(IPC.BROWSER_FIND_SHORTCUT_PRESSED)
+        return
+      }
+
+      if (
+        input.type === 'keyDown' &&
+        isHtmlPreviewRefreshShortcut({
+          key: input.key,
+          metaKey: input.meta,
+          ctrlKey: input.control,
+          altKey: input.alt,
+          shiftKey: input.shift
+        })
+      ) {
+        event.preventDefault()
+        if (this.mainWindow && !this.mainWindow.isDestroyed()) {
+          this.mainWindow.focus()
+          this.mainWindow.webContents.focus()
+        }
+        send(IPC.BROWSER_RELOAD_SHORTCUT_PRESSED)
       }
     })
   }

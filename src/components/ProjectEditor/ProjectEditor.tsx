@@ -63,6 +63,7 @@ import {
   HTML_PREVIEW_DEFAULT_ZOOM_FACTOR,
   HTML_PREVIEW_MAX_ZOOM_FACTOR,
   HTML_PREVIEW_MIN_ZOOM_FACTOR,
+  isHtmlPreviewRefreshShortcut,
   isHtmlPath,
   normalizeHtmlPreviewScrollState,
   normalizeHtmlPreviewZoomFactor,
@@ -2029,6 +2030,7 @@ export function ProjectEditor({
     return withHtmlPreviewReloadKey(htmlPreviewUrl, htmlPreviewReloadKey)
   }, [htmlPreviewReloadKey, htmlPreviewUrl, isHtmlPreviewVisible])
   const htmlPreviewZoomPercent = useMemo(() => formatHtmlPreviewZoomPercent(htmlPreviewZoomFactor), [htmlPreviewZoomFactor])
+  const htmlPreviewRefreshShortcutLabel = window.electronAPI.platform === 'darwin' ? '⌘R' : 'Ctrl+R'
   const isMarkdownRenderAllowed = isMarkdownPreviewVisible && isMarkdownRenderEnabled
   const isMarkdownWorkerActive = isOpen && isMarkdownRenderAllowed
   const isPreviewContentVisible =
@@ -3350,6 +3352,14 @@ export function ProjectEditor({
     })
     return unsubscribe
   }, [openHtmlPreviewSearch])
+
+  useEffect(() => {
+    const unsubscribe = window.electronAPI.browser.onReloadShortcutPressed((id) => {
+      if (id !== htmlReaderStateRef.current?.browserId) return
+      void requestHtmlPreviewReload('manual-refresh')
+    })
+    return unsubscribe
+  }, [requestHtmlPreviewReload])
 
   useEffect(() => {
     const unsubscribe = window.electronAPI.browser.onZoomFactorChanged((id, zoomFactor, source) => {
@@ -8247,6 +8257,13 @@ export function ProjectEditor({
         return
       }
 
+      if (isHtmlPreviewVisible && isHtmlPreviewRefreshShortcut(event)) {
+        event.preventDefault()
+        event.stopPropagation()
+        void requestHtmlPreviewReload('manual-refresh')
+        return
+      }
+
       const isHtmlZoomShortcut = (event.metaKey || event.ctrlKey) &&
         !event.altKey &&
         isHtmlPreviewVisible &&
@@ -8291,7 +8308,7 @@ export function ProjectEditor({
 
     document.addEventListener('keydown', handleKeyDown, true)
     return () => document.removeEventListener('keydown', handleKeyDown, true)
-  }, [dialog, handleOpenSearch, isHtmlPreviewVisible, isMarkdownPreviewVisible, isOpen, openHtmlPreviewSearch, openPreviewSearch, searchOpen, setFileBrowserCollapsedState, stepHtmlPreviewZoom])
+  }, [dialog, handleOpenSearch, isHtmlPreviewVisible, isMarkdownPreviewVisible, isOpen, openHtmlPreviewSearch, openPreviewSearch, requestHtmlPreviewReload, searchOpen, setFileBrowserCollapsedState, stepHtmlPreviewZoom])
 
   useSubpageEscape({ isOpen, onEscape: handleEscape })
 
@@ -9929,7 +9946,9 @@ export function ProjectEditor({
                             <button
                               type="button"
                               className="project-editor-preview-refresh-btn project-editor-html-force-refresh-btn"
-                              title={t('projectEditor.forceRefreshPreview')}
+                              title={t('projectEditor.forceRefreshPreviewShortcut', {
+                                key: htmlPreviewRefreshShortcutLabel
+                              })}
                               aria-label={t('projectEditor.forceRefreshPreview')}
                               onClick={() => void requestHtmlPreviewReload('manual-refresh')}
                             >

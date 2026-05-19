@@ -77,7 +77,7 @@ point at files under `test/unittest/`.
 | Trace events emit on click / snapshot / rename | `run-terminal-title-rename` (TTM-20) |
 | Outside-click / Escape closes the title menu | `run-terminal-title-rename` (TTM-18, TTM-19) |
 | Per-task ESC routes to terminal, not subpages | `run-subpage-navigation` (SN-*) |
-| Terminal startup creates a packaged PTY and accepts shell input | `run-terminal-autofollow` (TA-00a, TA-00b) |
+| Terminal startup creates a packaged PTY, accepts shell input, and zsh integration chains back to the user ZDOTDIR | `run-terminal-autofollow` (TA-00a, TA-00b, TA-00c) |
 | Terminal viewport keeps bottom-follow during refresh | `run-terminal-autofollow` (TA-02, TA-04, TA-06) |
 | Wheel / PageUp scroll detaches viewport from bottom | `run-terminal-autofollow` (TA-03, TA-05) |
 | Fit / remount preserves viewport position | `run-terminal-autofollow` (TA-07, TA-08, TA-09, TA-10, TA-11) |
@@ -159,7 +159,7 @@ point at files under `test/unittest/`.
 | Feature / Bug | Tests |
 |---|---|
 | Markdown preview renders highlight / image / outline | `run-project-editor-markdown-navigation` (PMN-01..09) |
-| HTML source editing plus WebContents preview with local file assets, HTTP script access, persistent force refresh, splitter drag, WebContents search, HTML Preview zoom, and scroll-preserving fresh reload | `run-project-editor-html-preview` (PHTML-00..15) |
+| HTML source editing plus WebContents preview with local file assets, HTTP script access, persistent force refresh, splitter drag, WebContents search, HTML Preview zoom, browser-aligned refresh shortcut, and scroll-preserving fresh reload | `run-project-editor-html-preview` (PHTML-00..16) |
 | Project Editor File Browser collapse / expand | `run-project-editor-markdown-navigation` (PMN-03b..03d) |
 | Outline scroll memory across switches and reopens | `run-project-editor-markdown-navigation` (PMN-13..17, PMN-40..44) |
 | Code-outline (TS / py) symbols + scroll memory | `run-project-editor-markdown-navigation` (PMN-18..23) |

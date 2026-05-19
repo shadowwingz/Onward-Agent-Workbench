@@ -9,6 +9,14 @@ export const HTML_PREVIEW_MIN_ZOOM_FACTOR = 0.5
 export const HTML_PREVIEW_MAX_ZOOM_FACTOR = 2
 export const HTML_PREVIEW_ZOOM_STEP = 0.1
 
+export interface HtmlPreviewShortcutEventLike {
+  key: string
+  metaKey?: boolean
+  ctrlKey?: boolean
+  altKey?: boolean
+  shiftKey?: boolean
+}
+
 export interface HtmlPreviewScrollState {
   x: number
   y: number
@@ -29,6 +37,13 @@ export function getHtmlFileExtension(path: string | null | undefined): string {
 
 export function isHtmlPath(path: string | null | undefined): boolean {
   return HTML_FILE_EXTENSIONS.has(getHtmlFileExtension(path))
+}
+
+export function isHtmlPreviewRefreshShortcut(event: HtmlPreviewShortcutEventLike): boolean {
+  return event.key.toLowerCase() === 'r' &&
+    Boolean(event.metaKey || event.ctrlKey) &&
+    !event.altKey &&
+    !event.shiftKey
 }
 
 export function withHtmlPreviewReloadKey(previewUrl: string | null | undefined, reloadKey: number): string | null {
