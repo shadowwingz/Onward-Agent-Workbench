@@ -38,6 +38,11 @@ export function createMirrorWorkerEntry(cwd: string): MirrorWorkerEntryCore {
   }
 }
 
+export function resolveMirrorWatcherRoot(state: MirrorState | null): string | null {
+  if (!state?.repoRoot) return null
+  return resolve(state.repoRoot)
+}
+
 /**
  * .git event filter used by the worker watcher.
  *

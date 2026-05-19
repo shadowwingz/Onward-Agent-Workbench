@@ -446,7 +446,12 @@ function createWindow(displayName: string): void {
             }
           }
           console.log('[SmokeLaunch] READY')
-          setTimeout(() => app.exit(0), 500)
+          setTimeout(() => {
+            void requestQuitForDebug().catch((error) => {
+              console.error('[SmokeLaunch] graceful quit failed', error)
+              app.exit(1)
+            })
+          }, 500)
         }, 1500)
       })
     }
@@ -506,6 +511,7 @@ function createWindow(displayName: string): void {
       Menu.setApplicationMenu(Menu.buildFromTemplate(buildMenuTemplate(displayName)))
     },
     onRestartToApplyUpdate: requestRestartToApplyUpdate,
+    onGracefulQuitForDebug: requestQuitForDebug,
     getApiPort
   })
 

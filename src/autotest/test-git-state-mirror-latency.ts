@@ -166,6 +166,11 @@ export async function testGitStateMirrorLatency(ctx: AutotestContext): Promise<T
   })
   if (!allResolved) return results
 
+  const watcherErrors: Array<{ cwd: string; message: string; at: number }> = []
+  const disposeWatcherError = window.electronAPI.git.onMirrorWatcherError?.((cwd, message) => {
+    watcherErrors.push({ cwd, message, at: performance.now() })
+  })
+
   await waitForHeaderState('GSM-01-repo-a-clean-header', repoA.abs, {
     branch: repoA.entry.branch,
     colour: 'clean',
@@ -201,6 +206,24 @@ export async function testGitStateMirrorLatency(ctx: AutotestContext): Promise<T
     colour: 'unknown',
     cwd: nonGitDir.abs
   }, 'Non-git cwd keeps the path visible and hides the Git chip')
+
+  if (!cancelled()) {
+    const beforeErrorCount = watcherErrors.length
+    for (let trial = 0; trial < 5; trial += 1) {
+      const filename = `gsm-06b-non-git-churn-${trial}.txt`
+      await mutate.createUntrackedFile(nonGitDir.abs, filename, `non-git churn ${trial}\n`)
+      await mutate.deleteFile(nonGitDir.abs, filename)
+    }
+    await sleep(250)
+    const nonGitErrors = watcherErrors
+      .slice(beforeErrorCount)
+      .filter((error) => normalizePathForAssert(error.cwd) === normalizePathForAssert(nonGitDir.abs))
+    record('GSM-06b-non-git-cwd-does-not-surface-watcher-error', nonGitErrors.length === 0, {
+      description: 'Non-git cwd must not arm a filesystem watcher or surface watcher-error noise',
+      cwd: nonGitDir.abs,
+      watcherErrors: nonGitErrors
+    })
+  }
 
   await waitForHeaderState('GSM-07-non-git-to-repo-restores-chip', repoA.abs, {
     branch: repoA.entry.branch,
@@ -344,6 +367,8 @@ export async function testGitStateMirrorLatency(ctx: AutotestContext): Promise<T
     failed: results.filter((r) => !r.ok).length,
     total: results.length
   })
+
+  disposeWatcherError?.()
 
   return results
 }

@@ -337,6 +337,7 @@ let promptBridgeCounter = 0
 interface RegisterIpcHandlersOptions {
   onSettingsChanged?: (settings: SettingsState) => void
   onRestartToApplyUpdate?: () => Promise<{ success: boolean; error?: string }>
+  onGracefulQuitForDebug?: () => Promise<{ success: boolean; error?: string }>
   getApiPort?: () => number
 }
 
@@ -709,9 +710,17 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
       return ''
     }
   })
-  ipcMain.handle(IPC.DEBUG_QUIT, () => {
+  ipcMain.handle(IPC.DEBUG_QUIT, async () => {
+    if (options.onGracefulQuitForDebug) {
+      const result = await options.onGracefulQuitForDebug()
+      if (!result.success) {
+        throw new Error(result.error ?? 'Debug quit failed.')
+      }
+      return
+    }
+
     // Flush telemetry and stop PTYs before debug/autotest exit.
-    const timeout = new Promise<void>((resolve) => setTimeout(resolve, 3000))
+    const timeout = new Promise<void>((resolve) => setTimeout(resolve, 8000))
     const shutdown = Promise.all([
       getTelemetryService().shutdown().catch(() => {}),
       ptyManager.shutdownAll().then((result) => {
@@ -721,7 +730,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
       }).catch((error) => {
         console.warn('[PTY] debug quit shutdown failed:', error)
       })
-    ]).then(() => {})
+    ]).then(() => cleanupIpcHandlers())
 
     Promise.race([shutdown, timeout]).finally(() => app.exit(0))
   })

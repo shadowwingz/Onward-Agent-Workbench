@@ -16,7 +16,8 @@ import {
   createMirrorWorkerEntry,
   finishMirrorRecomputeIfCurrent,
   requestMirrorAttach,
-  requestMirrorDetach
+  requestMirrorDetach,
+  resolveMirrorWatcherRoot
 } from '../../electron/main/git-state-mirror-worker-core.ts'
 
 import type { MirrorState } from '../../electron/main/git-state-mirror-types.ts'
@@ -81,6 +82,32 @@ test('git watcher allowlist still permits durable git state files', () => {
     drop: true,
     reason: 'gitObjects'
   })
+})
+
+test('watcher root is only armed for resolved git repositories', () => {
+  const nonRepo: MirrorState = {
+    cwd: '/Users/test/Projects',
+    repoRoot: null,
+    repoName: null,
+    branch: null,
+    status: null,
+    files: [],
+    capturedAt: 100,
+    generation: 1
+  }
+  const subdirRepo: MirrorState = {
+    cwd: '/Users/test/Projects/repo/packages/app',
+    repoRoot: '/Users/test/Projects/repo',
+    repoName: 'repo',
+    branch: 'main',
+    status: 'clean',
+    files: [],
+    capturedAt: 100,
+    generation: 1
+  }
+
+  assert.equal(resolveMirrorWatcherRoot(nonRepo), null)
+  assert.equal(resolveMirrorWatcherRoot(subdirRepo), '/Users/test/Projects/repo')
 })
 
 test('detach while attach is in flight disposes the late watcher handle', async () => {

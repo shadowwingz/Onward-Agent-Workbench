@@ -35,9 +35,12 @@ import {
   finishMirrorRecomputeIfCurrent,
   requestMirrorAttach,
   requestMirrorDetach,
+  resolveMirrorWatcherRoot,
   type MirrorWorkerEntryCore
 } from './git-state-mirror-worker-core'
 import { parseStatusPorcelainV2Z } from './git-porcelain-parse'
+import { performanceTrace } from './performance-trace'
+import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 
 import type {
   MainToMirrorMessage,
@@ -432,6 +435,21 @@ async function handleAttachWatch(cwd: string): Promise<void> {
       error: error instanceof Error ? error.message : String(error)
     })
   }
+
+  const watcherRoot = resolveMirrorWatcherRoot(entry.state)
+  if (!watcherRoot) {
+    log('info', 'skipping parcel-watcher for non-git cwd', { cwd })
+    performanceTrace.record(PERF_TRACE_EVENT.WORKER_GIT_STATE_MIRROR_WATCHER_SKIPPED, {
+      cwd,
+      reason: 'non-git-cwd'
+    })
+    entry.attachInFlight = false
+    if (entry.detachRequested) {
+      entries.delete(cwd)
+    }
+    return
+  }
+  entry.watchedRoot = watcherRoot
 
   let dispose: (() => Promise<void>) | null = null
   try {
