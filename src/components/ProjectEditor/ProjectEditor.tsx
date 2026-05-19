@@ -53,9 +53,23 @@ import type { PreviewSearchHandle } from './PreviewSearch/PreviewSearchBar'
 import { SqliteViewer } from './SqliteViewer'
 import { PdfReader, type PdfReaderHandle } from './PdfReader'
 import { EpubReader, type EpubReaderHandle } from './EpubReader'
+import { HtmlReader, type HtmlReaderState } from './HtmlReader'
+import { HtmlPreviewSearchBar, type HtmlPreviewSearchResult } from './HtmlPreviewSearchBar'
 import type { ProjectEditorOpenRequest, SubpageId, SubpageNavigateEventDetail } from '../../types/subpage'
 import { usePathCopy } from '../../hooks/usePathCopy'
 import { useCwdCopyHandler } from '../../hooks/useCwdCopyHandler'
+import {
+  formatHtmlPreviewZoomPercent,
+  HTML_PREVIEW_DEFAULT_ZOOM_FACTOR,
+  HTML_PREVIEW_MAX_ZOOM_FACTOR,
+  HTML_PREVIEW_MIN_ZOOM_FACTOR,
+  isHtmlPath,
+  normalizeHtmlPreviewScrollState,
+  normalizeHtmlPreviewZoomFactor,
+  stepHtmlPreviewZoomFactor,
+  withHtmlPreviewReloadKey,
+  type HtmlPreviewScrollState
+} from '../../utils/html-file'
 import '../../styles/path-copy-toast.css'
 import { renderMermaidDiagrams } from '../../utils/mermaidRenderer'
 import {
@@ -209,6 +223,8 @@ const FILE_BROWSER_USER_SCROLL_PAUSE_MS = 3000
 const FILE_BROWSER_PROGRAMMATIC_SCROLL_SETTLE_MS = 1000
 
 const STORAGE_KEY_FILE_TREE_WIDTH = 'project-editor-file-tree-width'
+const STORAGE_KEY_FILE_BROWSER_COLLAPSED = 'project-editor-file-browser-collapsed'
+const STORAGE_KEY_HTML_PREVIEW_ZOOM_FACTOR = 'project-editor-html-preview-zoom-factor'
 const STORAGE_KEY_MODAL_SIZE = 'project-editor-modal-size'
 const STORAGE_KEY_MARKDOWN_PREVIEW_RATIO = 'project-editor-markdown-preview-ratio'
 const STORAGE_KEY_MARKDOWN_PREVIEW_WIDTH = 'project-editor-markdown-preview-width'
@@ -346,6 +362,7 @@ type ProjectEditorSoftCloseSnapshot = {
   isSqlite: boolean
   isPdf: boolean
   isEpub: boolean
+  isHtml: boolean
   isMarkdownPreviewOpen: boolean
   isMarkdownEditorVisible: boolean
   outlineTarget: OutlineTarget
@@ -947,6 +964,7 @@ function resolveMonacoLanguage(filePath: string | null): string {
     less: 'less',
     html: 'html',
     htm: 'html',
+    xhtml: 'html',
     md: 'markdown',
     markdown: 'markdown',
     mdx: 'markdown',
@@ -1058,6 +1076,7 @@ export function ProjectEditor({
   const [isSqlite, setIsSqlite] = useState(false)
   const [isPdf, setIsPdf] = useState(false)
   const [isEpub, setIsEpub] = useState(false)
+  const [isHtml, setIsHtml] = useState(false)
   // PDF / EPUB outline state feeds directly into the shared OutlinePanel so
   // Markdown / code / PDF / EPUB all share the same surface (and the same
   // auto-center behavior from the 0418-wk3 merge).
@@ -1068,6 +1087,167 @@ export function ProjectEditor({
   const [imagePreviewUrl, setImagePreviewUrl] = useState<string | null>(null)
   const [pdfPreviewUrl, setPdfPreviewUrl] = useState<string | null>(null)
   const [epubPreviewUrl, setEpubPreviewUrl] = useState<string | null>(null)
+  const [htmlPreviewUrl, setHtmlPreviewUrl] = useState<string | null>(null)
+  const htmlPreviewUrlRef = useRef<string | null>(null)
+  const [htmlPreviewReloadKey, setHtmlPreviewReloadKey] = useState(0)
+  const htmlPreviewReloadKeyRef = useRef(0)
+  const [htmlReaderState, setHtmlReaderState] = useState<HtmlReaderState | null>(null)
+  const htmlReaderStateRef = useRef<HtmlReaderState | null>(null)
+  const [htmlPreviewScrollState, setHtmlPreviewScrollState] = useState<HtmlPreviewScrollState | null>(null)
+  const htmlPreviewScrollStateRef = useRef<HtmlPreviewScrollState | null>(null)
+  const [htmlPreviewSearchOpen, setHtmlPreviewSearchOpen] = useState(false)
+  const htmlPreviewSearchOpenRef = useRef(false)
+  const [htmlPreviewSearchFocusRequestId, setHtmlPreviewSearchFocusRequestId] = useState(0)
+  const htmlPreviewSearchFocusRequestIdRef = useRef(0)
+  const [htmlPreviewSearchQuery, setHtmlPreviewSearchQuery] = useState('')
+  const htmlPreviewSearchQueryRef = useRef('')
+  const [htmlPreviewSearchResult, setHtmlPreviewSearchResult] = useState<HtmlPreviewSearchResult>({
+    matches: 0,
+    activeMatchOrdinal: 0,
+    finalUpdate: false
+  })
+  const htmlPreviewSearchResultRef = useRef<HtmlPreviewSearchResult>({
+    matches: 0,
+    activeMatchOrdinal: 0,
+    finalUpdate: false
+  })
+  const [htmlPreviewZoomFactor, setHtmlPreviewZoomFactor] = useState(() => {
+    const prefs = getUIPreferences()
+    if (prefs.projectEditorHtmlPreviewZoomFactor !== undefined) {
+      return normalizeHtmlPreviewZoomFactor(prefs.projectEditorHtmlPreviewZoomFactor)
+    }
+    const saved = localStorage.getItem(STORAGE_KEY_HTML_PREVIEW_ZOOM_FACTOR)
+    return normalizeHtmlPreviewZoomFactor(saved ? Number(saved) : HTML_PREVIEW_DEFAULT_ZOOM_FACTOR)
+  })
+  const htmlPreviewZoomFactorRef = useRef(htmlPreviewZoomFactor)
+  const updateHtmlReaderState = useCallback((state: HtmlReaderState | null) => {
+    htmlReaderStateRef.current = state
+    setHtmlReaderState(state)
+  }, [])
+  const updateHtmlPreviewScrollState = useCallback((state: HtmlPreviewScrollState | null) => {
+    htmlPreviewScrollStateRef.current = state
+    setHtmlPreviewScrollState(state)
+  }, [])
+  const requestHtmlPreviewReload = useCallback(async (reason: 'save' | 'external-change' | 'manual-refresh' = 'manual-refresh') => {
+    const targetPath = activeFilePathRef.current
+    if (!targetPath || !isHtmlPath(targetPath) || !htmlPreviewUrlRef.current) return
+    const browserId = htmlReaderStateRef.current?.browserId
+    if (browserId) {
+      const scrollResult = await window.electronAPI.browser.getScrollState(browserId)
+      if (activeFilePathRef.current !== targetPath) return
+      updateHtmlPreviewScrollState(scrollResult.success
+        ? normalizeHtmlPreviewScrollState(scrollResult.state)
+        : null)
+    }
+    const nextKey = Date.now()
+    perfTrace(PERF_TRACE_EVENT.RENDERER_PROJECT_HTML_PREVIEW_RELOAD, {
+      reason,
+      pathLen: targetPath.length,
+      reloadKey: nextKey,
+      preservedScrollY: htmlPreviewScrollStateRef.current?.y ?? 0
+    })
+    htmlPreviewReloadKeyRef.current = nextKey
+    setHtmlPreviewReloadKey(nextKey)
+    updateHtmlReaderState(null)
+  }, [updateHtmlPreviewScrollState, updateHtmlReaderState])
+  const updateHtmlPreviewSearchResult = useCallback((result: HtmlPreviewSearchResult) => {
+    htmlPreviewSearchResultRef.current = result
+    setHtmlPreviewSearchResult(result)
+  }, [])
+  const updateHtmlPreviewSearchQuery = useCallback((query: string) => {
+    htmlPreviewSearchQueryRef.current = query
+    setHtmlPreviewSearchQuery(query)
+  }, [])
+  const requestHtmlPreviewSearchFocus = useCallback(() => {
+    htmlPreviewSearchFocusRequestIdRef.current += 1
+    setHtmlPreviewSearchFocusRequestId(htmlPreviewSearchFocusRequestIdRef.current)
+  }, [])
+  const resetHtmlPreviewSearchResult = useCallback(() => {
+    updateHtmlPreviewSearchResult({
+      matches: 0,
+      activeMatchOrdinal: 0,
+      finalUpdate: false
+    })
+  }, [updateHtmlPreviewSearchResult])
+  const stopHtmlPreviewSearch = useCallback(() => {
+    const browserId = htmlReaderStateRef.current?.browserId
+    if (browserId) {
+      void window.electronAPI.browser.stopFindInPage(browserId, 'clearSelection')
+    }
+    resetHtmlPreviewSearchResult()
+  }, [resetHtmlPreviewSearchResult])
+  const closeHtmlPreviewSearch = useCallback(() => {
+    htmlPreviewSearchOpenRef.current = false
+    setHtmlPreviewSearchOpen(false)
+    updateHtmlPreviewSearchQuery('')
+    stopHtmlPreviewSearch()
+  }, [stopHtmlPreviewSearch, updateHtmlPreviewSearchQuery])
+  const openHtmlPreviewSearch = useCallback(() => {
+    if (!htmlReaderStateRef.current?.browserId) return
+    htmlPreviewSearchOpenRef.current = true
+    setHtmlPreviewSearchOpen(true)
+    requestHtmlPreviewSearchFocus()
+  }, [requestHtmlPreviewSearchFocus])
+  const setHtmlPreviewZoomFactorState = useCallback((
+    zoomFactor: number,
+    source: 'toolbar' | 'shortcut' | 'restore' | 'debug' | 'webcontents-shortcut'
+  ) => {
+    const nextZoomFactor = normalizeHtmlPreviewZoomFactor(zoomFactor)
+    htmlPreviewZoomFactorRef.current = nextZoomFactor
+    setHtmlPreviewZoomFactor(nextZoomFactor)
+    localStorage.setItem(STORAGE_KEY_HTML_PREVIEW_ZOOM_FACTOR, String(nextZoomFactor))
+    updateUIPreferences({ projectEditorHtmlPreviewZoomFactor: nextZoomFactor })
+    perfTrace(PERF_TRACE_EVENT.RENDERER_PROJECT_HTML_PREVIEW_ZOOM, {
+      source,
+      zoomPercent: Math.round(nextZoomFactor * 100),
+      pathLen: activeFilePathRef.current?.length ?? 0
+    })
+    return nextZoomFactor
+  }, [updateUIPreferences])
+  const applyHtmlPreviewZoomFactor = useCallback(async (
+    zoomFactor: number,
+    source: 'toolbar' | 'shortcut' | 'restore' | 'debug'
+  ) => {
+    const nextZoomFactor = setHtmlPreviewZoomFactorState(zoomFactor, source)
+    const browserId = htmlReaderStateRef.current?.browserId
+    if (!browserId) return false
+    const result = await window.electronAPI.browser.setZoomFactor(browserId, nextZoomFactor)
+    return Boolean(result.success)
+  }, [setHtmlPreviewZoomFactorState])
+  const stepHtmlPreviewZoom = useCallback((
+    direction: 'in' | 'out' | 'reset',
+    source: 'toolbar' | 'shortcut' | 'debug' = 'toolbar'
+  ) => {
+    return applyHtmlPreviewZoomFactor(stepHtmlPreviewZoomFactor(htmlPreviewZoomFactorRef.current, direction), source)
+  }, [applyHtmlPreviewZoomFactor])
+  const runHtmlPreviewSearch = useCallback((
+    query: string,
+    options: { forward?: boolean; findNext?: boolean } = {}
+  ) => {
+    const browserId = htmlReaderStateRef.current?.browserId
+    if (!browserId) return
+    if (!query.trim()) {
+      void window.electronAPI.browser.stopFindInPage(browserId, 'clearSelection')
+      resetHtmlPreviewSearchResult()
+      return
+    }
+    perfTrace(PERF_TRACE_EVENT.RENDERER_PROJECT_HTML_PREVIEW_SEARCH, {
+      queryLength: query.length,
+      forward: options.forward ?? true,
+      findNext: Boolean(options.findNext)
+    })
+    void window.electronAPI.browser.findInPage(browserId, query, {
+      forward: options.forward ?? true,
+      findNext: options.findNext ?? false,
+      matchCase: false
+    })
+  }, [resetHtmlPreviewSearchResult])
+  const goToNextHtmlPreviewSearchMatch = useCallback(() => {
+    runHtmlPreviewSearch(htmlPreviewSearchQueryRef.current, { forward: true, findNext: true })
+  }, [runHtmlPreviewSearch])
+  const goToPreviousHtmlPreviewSearchMatch = useCallback(() => {
+    runHtmlPreviewSearch(htmlPreviewSearchQueryRef.current, { forward: false, findNext: true })
+  }, [runHtmlPreviewSearch])
   // EPUB bytes are fetched from `epubPreviewUrl` in a follow-on effect so that
   // EpubReader's mount stays purely synchronous — async work inside its own
   // useEffect was observed to widen the layout-race window around epub.js's
@@ -1109,7 +1289,19 @@ export function ProjectEditor({
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
   const [previewSearchOpen, setPreviewSearchOpen] = useState(false)
   const previewSearchOpenRef = useRef(false)
+  const [previewSearchFocusRequestId, setPreviewSearchFocusRequestId] = useState(0)
+  const previewSearchFocusRequestIdRef = useRef(0)
   const previewSearchRef = useRef<PreviewSearchHandle>(null)
+  const openPreviewSearch = useCallback(() => {
+    previewSearchOpenRef.current = true
+    setPreviewSearchOpen(true)
+    previewSearchFocusRequestIdRef.current += 1
+    setPreviewSearchFocusRequestId(previewSearchFocusRequestIdRef.current)
+  }, [])
+  const closePreviewSearch = useCallback(() => {
+    previewSearchOpenRef.current = false
+    setPreviewSearchOpen(false)
+  }, [])
   const [markdownImageMap, setMarkdownImageMap] = useState<Record<string, string>>({})
   const [markdownRenderSource, setMarkdownRenderSource] = useState('')
   const [markdownRenderPending, setMarkdownRenderPending] = useState(false)
@@ -1205,6 +1397,7 @@ export function ProjectEditor({
   const isSqliteRef = useRef(false)
   const isPdfRef = useRef(false)
   const isEpubRef = useRef(false)
+  const isHtmlRef = useRef(false)
   const editorSaveCommandIdRef = useRef<string | null>(null)
   const debugAutoOpenRef = useRef(false)
   const pendingViewStateRef = useRef<import('monaco-editor').editor.ICodeEditorViewState | null>(null)
@@ -1281,6 +1474,13 @@ export function ProjectEditor({
     return saved ? parseInt(saved, 10) : DEFAULT_FILE_TREE_WIDTH
   })
   const fileTreeWidthRef = useRef(fileTreeWidth)
+  const [isFileBrowserCollapsed, setIsFileBrowserCollapsed] = useState(() => {
+    const prefs = getUIPreferences()
+    if (prefs.projectEditorFileBrowserCollapsed !== undefined) return prefs.projectEditorFileBrowserCollapsed
+    const saved = localStorage.getItem(STORAGE_KEY_FILE_BROWSER_COLLAPSED)
+    return saved === 'true'
+  })
+  const isFileBrowserCollapsedRef = useRef(isFileBrowserCollapsed)
   const fileTreeContainerRef = useRef<HTMLDivElement | null>(null)
   // Auto-reveal coordination: pause for 3s after the user manually scrolls the
   // tree, and mask programmatic scrolls so they don't count as "user activity".
@@ -1639,6 +1839,22 @@ export function ProjectEditor({
   }, [previewSearchOpen])
 
   useEffect(() => {
+    htmlPreviewSearchOpenRef.current = htmlPreviewSearchOpen
+  }, [htmlPreviewSearchOpen])
+
+  useEffect(() => {
+    htmlPreviewSearchQueryRef.current = htmlPreviewSearchQuery
+  }, [htmlPreviewSearchQuery])
+
+  useEffect(() => {
+    htmlPreviewSearchResultRef.current = htmlPreviewSearchResult
+  }, [htmlPreviewSearchResult])
+
+  useEffect(() => {
+    htmlPreviewZoomFactorRef.current = htmlPreviewZoomFactor
+  }, [htmlPreviewZoomFactor])
+
+  useEffect(() => {
     sidebarModeRef.current = sidebarMode
   }, [sidebarMode])
 
@@ -1767,8 +1983,12 @@ export function ProjectEditor({
     if (!visible && !isMarkdownPreviewOpenRef.current) {
       setIsMarkdownPreviewOpen(true)
       isMarkdownPreviewOpenRef.current = true
-      beginPreviewRestore()
-      setIsMarkdownRenderEnabled(true)
+      if (activeFilePathRef.current && isMarkdownPath(activeFilePathRef.current)) {
+        beginPreviewRestore()
+        setIsMarkdownRenderEnabled(true)
+      } else {
+        setIsMarkdownRenderEnabled(false)
+      }
     }
   }, [beginPreviewRestore, scheduleEditorSyncFromPreview])
 
@@ -1776,14 +1996,39 @@ export function ProjectEditor({
     fileTreeWidthRef.current = fileTreeWidth
   }, [fileTreeWidth])
 
+  useEffect(() => {
+    isFileBrowserCollapsedRef.current = isFileBrowserCollapsed
+  }, [isFileBrowserCollapsed])
+
+  const setFileBrowserCollapsedState = useCallback((collapsed: boolean, source: 'user' | 'debug' | 'restore' = 'user') => {
+    isFileBrowserCollapsedRef.current = collapsed
+    setIsFileBrowserCollapsed(collapsed)
+    localStorage.setItem(STORAGE_KEY_FILE_BROWSER_COLLAPSED, String(collapsed))
+    updateUIPreferences({ projectEditorFileBrowserCollapsed: collapsed })
+    perfTrace(PERF_TRACE_EVENT.RENDERER_PROJECT_FILE_BROWSER_COLLAPSE, {
+      collapsed,
+      source,
+      sidebarMode: sidebarModeRef.current,
+      fileTreeWidth: fileTreeWidthRef.current
+    })
+  }, [updateUIPreferences])
+
   const editorFontSize = useMemo(() => {
     if (!_terminalId) return DEFAULT_GIT_DIFF_FONT_SIZE
     return getTerminalStyle(_terminalId)?.gitDiffFontSize ?? DEFAULT_GIT_DIFF_FONT_SIZE
   }, [getTerminalStyle, _terminalId])
 
   const isMarkdownFile = useMemo(() => isMarkdownPath(activeFilePath), [activeFilePath])
+  const isHtmlFile = useMemo(() => isHtml || isHtmlPath(activeFilePath), [activeFilePath, isHtml])
+  const isSourcePreviewFile = isMarkdownFile || isHtmlFile
   const editorLanguage = useMemo(() => resolveMonacoLanguage(activeFilePath), [activeFilePath])
   const isMarkdownPreviewVisible = isMarkdownFile && isMarkdownPreviewOpen && !isBinary && !isImage && !isSqlite
+  const isHtmlPreviewVisible = isHtmlFile && isMarkdownPreviewOpen && !isBinary && !isImage && !isSqlite
+  const htmlPreviewUrlWithReload = useMemo(() => {
+    if (!isHtmlPreviewVisible) return null
+    return withHtmlPreviewReloadKey(htmlPreviewUrl, htmlPreviewReloadKey)
+  }, [htmlPreviewReloadKey, htmlPreviewUrl, isHtmlPreviewVisible])
+  const htmlPreviewZoomPercent = useMemo(() => formatHtmlPreviewZoomPercent(htmlPreviewZoomFactor), [htmlPreviewZoomFactor])
   const isMarkdownRenderAllowed = isMarkdownPreviewVisible && isMarkdownRenderEnabled
   const isMarkdownWorkerActive = isOpen && isMarkdownRenderAllowed
   const isPreviewContentVisible =
@@ -2649,6 +2894,7 @@ export function ProjectEditor({
     isSqliteRef.current = false
     isPdfRef.current = false
     isEpubRef.current = false
+    isHtmlRef.current = false
     editorSaveCommandIdRef.current = null
     markdownWorkerInFlightRef.current = false
     markdownWorkerQueuedRef.current = false
@@ -2672,6 +2918,7 @@ export function ProjectEditor({
     setIsSqlite(false)
     setIsPdf(false)
     setIsEpub(false)
+    setIsHtml(false)
     setLargeFileState(null)
     largeFileStateRef.current = null
     setPdfOutlineSymbols([])
@@ -2681,6 +2928,13 @@ export function ProjectEditor({
     setImagePreviewUrl(null)
     setPdfPreviewUrl(null)
     setEpubPreviewUrl(null)
+    setHtmlPreviewUrl(null)
+    htmlPreviewUrlRef.current = null
+    setHtmlPreviewReloadKey(0)
+    htmlPreviewReloadKeyRef.current = 0
+    updateHtmlPreviewScrollState(null)
+    closeHtmlPreviewSearch()
+    updateHtmlReaderState(null)
     setIsDirty(false)
     setIsLoadingFile(false)
     setIsMarkdownRenderEnabled(false)
@@ -2707,7 +2961,16 @@ export function ProjectEditor({
     if (DEBUG_PROJECT_EDITOR) {
       debugLog('reset:done', { activeFilePath: null })
 	    }
-	  }, [cancelFileTreeRestoreFrame, cancelMarkdownIdle, resetPreviewRestoreState, setActiveFilePathValue, updatePreviewActiveSlug])
+  }, [
+    cancelFileTreeRestoreFrame,
+    cancelMarkdownIdle,
+    closeHtmlPreviewSearch,
+    resetPreviewRestoreState,
+    setActiveFilePathValue,
+    updateHtmlPreviewScrollState,
+    updateHtmlReaderState,
+    updatePreviewActiveSlug
+  ])
 
   const captureEditorSoftCloseSnapshot = useCallback((
     kind: ProjectEditorSoftCloseKind,
@@ -2727,6 +2990,7 @@ export function ProjectEditor({
       isSqlite: isSqliteRef.current,
       isPdf: isPdfRef.current,
       isEpub: isEpubRef.current,
+      isHtml: isHtmlRef.current,
       isMarkdownPreviewOpen: isMarkdownPreviewOpenRef.current,
       isMarkdownEditorVisible: isMarkdownEditorVisibleRef.current,
       outlineTarget: outlineTargetRef.current
@@ -2753,6 +3017,8 @@ export function ProjectEditor({
     setIsPdf(snapshot.isPdf)
     isEpubRef.current = snapshot.isEpub
     setIsEpub(snapshot.isEpub)
+    isHtmlRef.current = snapshot.isHtml
+    setIsHtml(snapshot.isHtml)
     if (isMarkdownPath(snapshot.path)) {
       setIsMarkdownPreviewOpen(snapshot.isMarkdownPreviewOpen)
       isMarkdownPreviewOpenRef.current = snapshot.isMarkdownPreviewOpen
@@ -2794,6 +3060,7 @@ export function ProjectEditor({
     isSqliteRef.current = false
     isPdfRef.current = false
     isEpubRef.current = false
+    isHtmlRef.current = false
     editorSaveCommandIdRef.current = null
     markdownWorkerInFlightRef.current = false
     markdownWorkerQueuedRef.current = false
@@ -2805,6 +3072,7 @@ export function ProjectEditor({
     setIsSqlite(false)
     setIsPdf(false)
     setIsEpub(false)
+    setIsHtml(false)
     setLargeFileState(null)
     largeFileStateRef.current = null
     setPdfOutlineSymbols([])
@@ -2814,6 +3082,13 @@ export function ProjectEditor({
     setImagePreviewUrl(null)
     setPdfPreviewUrl(null)
     setEpubPreviewUrl(null)
+    setHtmlPreviewUrl(null)
+    htmlPreviewUrlRef.current = null
+    setHtmlPreviewReloadKey(0)
+    htmlPreviewReloadKeyRef.current = 0
+    updateHtmlPreviewScrollState(null)
+    closeHtmlPreviewSearch()
+    updateHtmlReaderState(null)
     setIsDirty(false)
     setIsLoadingFile(false)
     setIsMarkdownRenderEnabled(false)
@@ -2828,7 +3103,7 @@ export function ProjectEditor({
     }
     void window.electronAPI.project.unwatchAllImageFiles()
     watchedImagePathsRef.current = new Set()
-  }, [cancelFileTreeRestoreFrame, cancelMarkdownIdle, resetPreviewRestoreState, updatePreviewActiveSlug])
+  }, [cancelFileTreeRestoreFrame, cancelMarkdownIdle, closeHtmlPreviewSearch, resetPreviewRestoreState, updateHtmlPreviewScrollState, updateHtmlReaderState, updatePreviewActiveSlug])
 
   const scheduleMarkdownApply = useCallback((payload: { html: string; imagePaths: string[] }) => {
     if (DEBUG_PROJECT_EDITOR) {
@@ -3044,10 +3319,62 @@ export function ProjectEditor({
 
   useEffect(() => {
     if (!isMarkdownPreviewVisible) {
-      setPreviewSearchOpen(false)
+      closePreviewSearch()
       updatePreviewActiveSlug(null)
     }
-  }, [isMarkdownPreviewVisible, updatePreviewActiveSlug])
+  }, [closePreviewSearch, isMarkdownPreviewVisible, updatePreviewActiveSlug])
+
+  useEffect(() => {
+    if (!isHtmlPreviewVisible) {
+      closeHtmlPreviewSearch()
+      updateHtmlPreviewScrollState(null)
+    }
+  }, [closeHtmlPreviewSearch, isHtmlPreviewVisible, updateHtmlPreviewScrollState])
+
+  useEffect(() => {
+    const unsubscribe = window.electronAPI.browser.onFoundInPage((id, result) => {
+      if (id !== htmlReaderStateRef.current?.browserId) return
+      updateHtmlPreviewSearchResult({
+        matches: Math.max(0, result.matches),
+        activeMatchOrdinal: Math.max(0, result.activeMatchOrdinal),
+        finalUpdate: Boolean(result.finalUpdate)
+      })
+    })
+    return unsubscribe
+  }, [updateHtmlPreviewSearchResult])
+
+  useEffect(() => {
+    const unsubscribe = window.electronAPI.browser.onFindShortcutPressed((id) => {
+      if (id !== htmlReaderStateRef.current?.browserId) return
+      openHtmlPreviewSearch()
+    })
+    return unsubscribe
+  }, [openHtmlPreviewSearch])
+
+  useEffect(() => {
+    const unsubscribe = window.electronAPI.browser.onZoomFactorChanged((id, zoomFactor, source) => {
+      if (id !== htmlReaderStateRef.current?.browserId) return
+      setHtmlPreviewZoomFactorState(
+        zoomFactor,
+        source === 'shortcut' ? 'webcontents-shortcut' : 'toolbar'
+      )
+    })
+    return unsubscribe
+  }, [setHtmlPreviewZoomFactorState])
+
+  useEffect(() => {
+    const browserId = htmlReaderState?.browserId
+    if (!browserId) return
+    void window.electronAPI.browser.setZoomFactor(browserId, htmlPreviewZoomFactorRef.current)
+  }, [htmlReaderState?.browserId])
+
+  useEffect(() => {
+    if (!htmlPreviewSearchOpen) return
+    const handle = window.setTimeout(() => {
+      runHtmlPreviewSearch(htmlPreviewSearchQueryRef.current, { forward: true, findNext: false })
+    }, 120)
+    return () => window.clearTimeout(handle)
+  }, [htmlPreviewSearchOpen, htmlPreviewSearchQuery, htmlReaderState?.browserId, runHtmlPreviewSearch])
 
   useEffect(() => {
     fileContentRef.current = fileContent
@@ -3092,6 +3419,18 @@ export function ProjectEditor({
   useEffect(() => {
     isEpubRef.current = isEpub
   }, [isEpub])
+
+  useEffect(() => {
+    isHtmlRef.current = isHtml
+  }, [isHtml])
+
+  useEffect(() => {
+    htmlPreviewUrlRef.current = htmlPreviewUrl
+  }, [htmlPreviewUrl])
+
+  useEffect(() => {
+    htmlPreviewReloadKeyRef.current = htmlPreviewReloadKey
+  }, [htmlPreviewReloadKey])
 
   const getImageFilePreviewState = useCallback(() => {
     if (!activeFilePathRef.current || !isImageRef.current) return null
@@ -4225,6 +4564,8 @@ export function ProjectEditor({
           isPdfRef.current = false
           setIsEpub(false)
           isEpubRef.current = false
+          setIsHtml(false)
+          isHtmlRef.current = false
           applyLargeFileState(null)
           setPdfOutlineSymbols([])
           setPdfActivePage(1)
@@ -4233,6 +4574,13 @@ export function ProjectEditor({
           setImagePreviewUrl(null)
           setPdfPreviewUrl(null)
           setEpubPreviewUrl(null)
+          setHtmlPreviewUrl(null)
+          htmlPreviewUrlRef.current = null
+          setHtmlPreviewReloadKey(0)
+          htmlPreviewReloadKeyRef.current = 0
+          updateHtmlPreviewScrollState(null)
+          closeHtmlPreviewSearch()
+          updateHtmlReaderState(null)
           setFileContent('')
           fileContentRef.current = ''
           setOutlineContentSnapshot({ filePath: null, content: '' })
@@ -4263,6 +4611,7 @@ export function ProjectEditor({
       isBinary: result.isBinary,
       isImage: result.isImage,
       isSqlite: result.isSqlite,
+      isHtml: result.isHtml,
       size: result.sizeBytes ?? result.content?.length ?? 0,
       openMode: result.openMode ?? 'text'
     })
@@ -4289,6 +4638,7 @@ export function ProjectEditor({
     const binaryFile = Boolean(result.isBinary) && !sqliteFile
     const pdfFile = Boolean(result.isPdf)
     const epubFile = Boolean(result.isEpub)
+    const htmlFile = Boolean(result.isHtml) || isHtmlPath(path)
     setIsBinary(binaryFile)
     isBinaryRef.current = binaryFile
     setIsImage(result.isImage)
@@ -4299,6 +4649,8 @@ export function ProjectEditor({
     isPdfRef.current = pdfFile
     setIsEpub(epubFile)
     isEpubRef.current = epubFile
+    setIsHtml(htmlFile)
+    isHtmlRef.current = htmlFile
     // Clear the last file's PDF/EPUB outline state. The new reader will push
     // its outline + location through the new callbacks once it mounts.
     setPdfOutlineSymbols([])
@@ -4308,6 +4660,14 @@ export function ProjectEditor({
     setImagePreviewUrl(result.isImage ? (result.previewUrl ?? null) : null)
     setPdfPreviewUrl(pdfFile ? (result.previewUrl ?? null) : null)
     setEpubPreviewUrl(epubFile ? (result.previewUrl ?? null) : null)
+    const nextHtmlPreviewUrl = htmlFile ? (result.previewUrl ?? null) : null
+    setHtmlPreviewUrl(nextHtmlPreviewUrl)
+    htmlPreviewUrlRef.current = nextHtmlPreviewUrl
+    setHtmlPreviewReloadKey(0)
+    htmlPreviewReloadKeyRef.current = 0
+    updateHtmlPreviewScrollState(null)
+    closeHtmlPreviewSearch()
+    updateHtmlReaderState(null)
     let markdownCacheEntry: MarkdownSessionCacheEntry | null = null
     if (!binaryFile && !result.isImage && !sqliteFile && isMarkdownPath(path)) {
       const cacheRead = readMarkdownSessionCache(root, path, result.content ?? '')
@@ -4493,9 +4853,12 @@ export function ProjectEditor({
     showStatus,
     syncOriginalVersion,
     applyMarkdownSessionCacheHit,
+    closeHtmlPreviewSearch,
     restoreFileMemory,
     saveCurrentFileMemory,
     touchRecentFile,
+    updateHtmlPreviewScrollState,
+    updateHtmlReaderState,
     waitForEditorModelReady,
     t
   ])
@@ -4641,8 +5004,7 @@ export function ProjectEditor({
       setSearchQuery('')
       setSearchResults([])
       setSearchActiveIndex(0)
-      setPreviewSearchOpen(false)
-      previewSearchOpenRef.current = false
+      closePreviewSearch()
       setDialog(null)
       setDialogInput('')
       if (retainClosedView) {
@@ -4664,9 +5026,24 @@ export function ProjectEditor({
       isBinaryRef.current = false
       setIsImage(false)
       isImageRef.current = false
-      setIsSqlite(false)
-      isSqliteRef.current = false
-      setImagePreviewUrl(null)
+	      setIsSqlite(false)
+	      isSqliteRef.current = false
+	      setIsPdf(false)
+	      isPdfRef.current = false
+	      setIsEpub(false)
+	      isEpubRef.current = false
+	      setIsHtml(false)
+	      isHtmlRef.current = false
+	      setImagePreviewUrl(null)
+	      setPdfPreviewUrl(null)
+	      setEpubPreviewUrl(null)
+	      setHtmlPreviewUrl(null)
+	      htmlPreviewUrlRef.current = null
+	      setHtmlPreviewReloadKey(0)
+	      htmlPreviewReloadKeyRef.current = 0
+	      updateHtmlPreviewScrollState(null)
+	      closeHtmlPreviewSearch()
+	      updateHtmlReaderState(null)
       setIsMarkdownPreviewOpen(true)
       setIsDirty(false)
       originalContentRef.current = ''
@@ -4728,7 +5105,7 @@ export function ProjectEditor({
     rootRef.current = effectiveCwd
     setSearchResults([])
     void loadRoot(effectiveCwd)
-  }, [cwd, isOpen, loadRoot, resetActiveFileState, setActiveFilePathValue, t])
+  }, [closeHtmlPreviewSearch, closePreviewSearch, cwd, isOpen, loadRoot, resetActiveFileState, setActiveFilePathValue, t, updateHtmlPreviewScrollState, updateHtmlReaderState])
 
   useEffect(() => {
     if (!isOpen || !rootPath) return
@@ -6476,6 +6853,9 @@ export function ProjectEditor({
           editor.setScrollLeft(scrollLeft)
         }
 
+        if (isHtmlPath(currentPath)) {
+          void requestHtmlPreviewReload('external-change')
+        }
         scheduleMarkdownRender()
         return
       }
@@ -6489,7 +6869,7 @@ export function ProjectEditor({
       unsubscribe()
       void window.electronAPI.project.unwatchFile(root, filePath)
     }
-  }, [activeFilePath, isBinary, isImage, isSqlite, largeFileState, scheduleMarkdownRender, showStatus, syncOriginalVersion, t])
+  }, [activeFilePath, isBinary, isImage, isSqlite, largeFileState, requestHtmlPreviewReload, scheduleMarkdownRender, showStatus, syncOriginalVersion, t])
 
   const handleSave = useCallback(async (source: SaveSource = 'toolbar') => {
     const targetPath = activeFilePathRef.current
@@ -6523,11 +6903,14 @@ export function ProjectEditor({
 	    if (isMarkdownPath(targetPath)) {
 	      captureMarkdownSessionCacheRef.current('save')
 	    }
+	    if (isHtmlPath(targetPath)) {
+	      await requestHtmlPreviewReload('save')
+	    }
 	    if (_terminalId) {
 	      void window.electronAPI.git.notifyTerminalGitUpdate(_terminalId)
 	    }
     return result
-  }, [_terminalId, showStatus, syncOriginalVersion, t])
+  }, [_terminalId, requestHtmlPreviewReload, showStatus, syncOriginalVersion, t])
 
   const handleSaveRef = useRef(handleSave)
   useEffect(() => {
@@ -6591,7 +6974,11 @@ export function ProjectEditor({
       return
     }
     if (previewSearchOpen) {
-      setPreviewSearchOpen(false)
+      closePreviewSearch()
+      return
+    }
+    if (htmlPreviewSearchOpen) {
+      closeHtmlPreviewSearch()
       return
     }
     if (sidebarMode === 'search') {
@@ -6599,7 +6986,7 @@ export function ProjectEditor({
       return
     }
     void handleRequestClose()
-  }, [dialog, handleDialogCancel, searchOpen, handleCloseSearch, previewSearchOpen, handleRequestClose, sidebarMode, pinOverflowOpen, recentOverflowOpen])
+  }, [closeHtmlPreviewSearch, closePreviewSearch, dialog, handleDialogCancel, htmlPreviewSearchOpen, searchOpen, handleCloseSearch, previewSearchOpen, handleRequestClose, sidebarMode, pinOverflowOpen, recentOverflowOpen])
 
   const handleOpenGitDiff = useCallback(async (
     source: 'user' | 'debug' = 'user',
@@ -6782,7 +7169,26 @@ export function ProjectEditor({
       triggerJumpToDiff: async () => handleJumpToDiff(),
       getSidebarMode: () => sidebarModeRef.current,
       setSidebarMode: (mode: 'files' | 'search') => {
+        if (isFileBrowserCollapsedRef.current) {
+          setFileBrowserCollapsedState(false, 'debug')
+        }
         setSidebarMode(mode)
+      },
+      isFileBrowserCollapsed: () => isFileBrowserCollapsedRef.current,
+      setFileBrowserCollapsed: (collapsed: boolean) => {
+        setFileBrowserCollapsedState(collapsed, 'debug')
+      },
+      getFileBrowserPanelState: () => {
+        const sidebar = modalRef.current?.querySelector<HTMLElement>('.project-editor-sidebar')
+        const editor = modalRef.current?.querySelector<HTMLElement>('.project-editor-editor')
+        return {
+          collapsed: isFileBrowserCollapsedRef.current,
+          sidebarWidth: sidebar?.getBoundingClientRect().width ?? 0,
+          editorWidth: editor?.getBoundingClientRect().width ?? 0,
+          hasRestoreButton: Boolean(sidebar?.querySelector('.project-editor-sidebar-restore-btn')),
+          hasTree: Boolean(sidebar?.querySelector('.project-editor-tree')),
+          hasResizer: Boolean(sidebar?.querySelector('.project-editor-file-tree-resizer'))
+        }
       },
       getEditorContent: () => fileContentRef.current,
       setEditorContent: (content: string) => {
@@ -6982,6 +7388,89 @@ export function ProjectEditor({
           currentLocationHref: progress?.lastLocationHref ?? null
         }
       },
+      isHtmlReaderVisible: () => {
+        return Boolean(activeFilePathRef.current && isHtmlRef.current && htmlReaderStateRef.current?.visible)
+      },
+      getHtmlReaderState: () => {
+        if (!activeFilePathRef.current || !isHtmlRef.current) return null
+        const state = htmlReaderStateRef.current
+        if (!state) return null
+        return {
+          browserId: state.browserId,
+          filePath: state.filePath,
+          url: state.url,
+          title: state.title,
+          ready: state.ready,
+          visible: state.visible,
+          isLoading: state.isLoading,
+          loadCount: state.loadCount,
+          reloadKey: state.reloadKey,
+          error: state.error,
+          preservedScrollState: htmlPreviewScrollStateRef.current
+        }
+      },
+      getHtmlPreviewDocumentState: async () => {
+        if (!activeFilePathRef.current || !isHtmlRef.current) return null
+        const state = htmlReaderStateRef.current
+        if (!state?.browserId) return null
+        const result = await window.electronAPI.browser.evaluateForTest(state.browserId, `(() => {
+          const images = Array.from(document.images || []);
+          return {
+            title: document.title,
+            readyState: document.readyState,
+            bodyText: (document.body && document.body.innerText ? document.body.innerText : '').slice(0, 20000),
+            bodyDatasetMarker: document.body ? document.body.dataset.onwardHtmlPreviewFixture || null : null,
+            externalReady: Boolean(window.__ONWARD_HTML_EXTERNAL_READY),
+            localReady: Boolean(window.__ONWARD_HTML_LOCAL_READY),
+            saveMarker: document.querySelector('[data-save-marker]') ? document.querySelector('[data-save-marker]').textContent : null,
+            imageCount: images.length,
+            loadedImageCount: images.filter((image) => image.complete && image.naturalWidth > 0).length,
+            brokenImageCount: images.filter((image) => image.complete && image.naturalWidth === 0).length,
+            scrollX: window.scrollX || document.documentElement.scrollLeft || 0,
+            scrollY: window.scrollY || document.documentElement.scrollTop || 0,
+            scrollHeight: Math.max(document.documentElement.scrollHeight || 0, document.body ? document.body.scrollHeight || 0 : 0),
+            scrollWidth: Math.max(document.documentElement.scrollWidth || 0, document.body ? document.body.scrollWidth || 0 : 0),
+            clientHeight: document.documentElement.clientHeight || window.innerHeight || 0,
+            clientWidth: document.documentElement.clientWidth || window.innerWidth || 0
+          };
+        })()`)
+        if (!result.success) {
+          return {
+            success: false,
+            error: result.error ?? 'Failed to inspect HTML Preview'
+          }
+        }
+        return {
+          success: true,
+          ...(result.value as Record<string, unknown>)
+        }
+      },
+      setHtmlPreviewScrollForTest: async (y: number) => {
+        const state = htmlReaderStateRef.current
+        if (!activeFilePathRef.current || !isHtmlRef.current || !state?.browserId) return false
+        const result = await window.electronAPI.browser.restoreScrollState(state.browserId, {
+          x: 0,
+          y,
+          scrollWidth: 0,
+          scrollHeight: 0,
+          clientWidth: 0,
+          clientHeight: 0
+        })
+        return result.success
+      },
+      getHtmlPreviewZoomFactor: () => htmlPreviewZoomFactorRef.current,
+      setHtmlPreviewZoomFactor: async (zoomFactor: number) => {
+        return applyHtmlPreviewZoomFactor(zoomFactor, 'debug')
+      },
+      stepHtmlPreviewZoom: async (direction: 'in' | 'out' | 'reset') => {
+        return stepHtmlPreviewZoom(direction, 'debug')
+      },
+      getHtmlPreviewBrowserZoomFactor: async () => {
+        const browserId = htmlReaderStateRef.current?.browserId
+        if (!browserId) return null
+        const result = await window.electronAPI.browser.getZoomFactor(browserId)
+        return result.success ? result.zoomFactor ?? null : null
+      },
       getImageFilePreviewState,
       getFileBrowserScrollTop: () => fileTreeContainerRef.current?.scrollTop ?? 0,
       getFileBrowserScrollHeight: () => fileTreeContainerRef.current?.scrollHeight ?? 0,
@@ -7056,8 +7545,11 @@ export function ProjectEditor({
       },
       getMarkdownCodeWrapState: () => getMarkdownCodeWrapDebugState(),
       setPreviewSearchOpen: (open: boolean) => {
-        setPreviewSearchOpen(open)
-        previewSearchOpenRef.current = open
+        if (open) {
+          openPreviewSearch()
+        } else {
+          closePreviewSearch()
+        }
       },
       isPreviewSearchOpen: () => previewSearchOpenRef.current,
       previewSearchSetQuery: (query: string) => {
@@ -7110,6 +7602,30 @@ export function ProjectEditor({
         const offset = markCenter - containerCenter
         return { markCenter, containerCenter, containerHeight, offset }
       },
+      setHtmlPreviewSearchOpen: (open: boolean) => {
+        if (open) {
+          openHtmlPreviewSearch()
+        } else {
+          closeHtmlPreviewSearch()
+        }
+      },
+      isHtmlPreviewSearchOpen: () => htmlPreviewSearchOpenRef.current,
+      htmlPreviewSearchSetQuery: (query: string) => {
+        updateHtmlPreviewSearchQuery(query)
+      },
+      htmlPreviewSearchGoToNext: () => {
+        goToNextHtmlPreviewSearchMatch()
+      },
+      htmlPreviewSearchGoToPrevious: () => {
+        goToPreviousHtmlPreviewSearchMatch()
+      },
+      getHtmlPreviewSearchState: () => ({
+        open: htmlPreviewSearchOpenRef.current,
+        query: htmlPreviewSearchQueryRef.current,
+        matches: htmlPreviewSearchResultRef.current.matches,
+        activeMatchOrdinal: htmlPreviewSearchResultRef.current.activeMatchOrdinal,
+        finalUpdate: htmlPreviewSearchResultRef.current.finalUpdate
+      }),
       isMarkdownRenderPending: () => markdownRenderPendingRef.current,
       getMarkdownRenderedHtml: () => markdownRenderedHtmlRef.current,
       getMarkdownPreviewImageState: () => {
@@ -7304,12 +7820,15 @@ export function ProjectEditor({
     beginPreviewRestore,
     binaryRadix,
     capturePreviewScrollMemory,
+    closeHtmlPreviewSearch,
     dialog,
     fileOpenChoiceDialog,
     getOutlineScrollContainer,
     getImageFilePreviewState,
     getMermaidPreviewState,
     getMarkdownCodeWrapDebugState,
+    goToNextHtmlPreviewSearchMatch,
+    goToPreviousHtmlPreviewSearchMatch,
     handleBackToDiff,
     handleDialogCancel,
     handleDialogConfirm,
@@ -7319,6 +7838,7 @@ export function ProjectEditor({
     isPreviewContentVisibleNow,
     diffJumpChecking,
     loadLargeFileChunk,
+    openHtmlPreviewSearch,
     resolveFileOpenChoice,
     scanPreviewNearestSlug,
     scheduleProjectStateSave,
@@ -7329,6 +7849,7 @@ export function ProjectEditor({
     setMarkdownPreviewOpenState,
     setOutlineTargetPreference,
     setOutlineVisibleState,
+    updateHtmlPreviewSearchQuery,
     updatePreviewActiveSlug
   ])
 
@@ -7346,11 +7867,14 @@ export function ProjectEditor({
     beginPreviewRestore,
     binaryRadix,
     capturePreviewScrollMemory,
+    closeHtmlPreviewSearch,
     dialog,
     fileOpenChoiceDialog,
     getOutlineScrollContainer,
     getImageFilePreviewState,
     getMarkdownCodeWrapDebugState,
+    goToNextHtmlPreviewSearchMatch,
+    goToPreviousHtmlPreviewSearchMatch,
     handleBackToDiff,
     handleDialogCancel,
     handleDialogConfirm,
@@ -7360,6 +7884,7 @@ export function ProjectEditor({
     isPreviewContentVisibleNow,
     diffJumpChecking,
     loadLargeFileChunk,
+    openHtmlPreviewSearch,
     resolveFileOpenChoice,
     scanPreviewNearestSlug,
     scheduleProjectStateSave,
@@ -7370,6 +7895,7 @@ export function ProjectEditor({
     setMarkdownPreviewOpenState,
     setOutlineTargetPreference,
     setOutlineVisibleState,
+    updateHtmlPreviewSearchQuery,
     updatePreviewActiveSlug
   ])
 
@@ -7706,6 +8232,9 @@ export function ProjectEditor({
         event.stopPropagation()
         setContextMenu(null)
         setInitialSearchType('content')
+        if (isFileBrowserCollapsedRef.current) {
+          setFileBrowserCollapsedState(false)
+        }
         setSidebarMode('search')
         setTimeout(() => globalSearchInputRef.current?.focus(), 0)
         return
@@ -7718,20 +8247,39 @@ export function ProjectEditor({
         return
       }
 
+      const isHtmlZoomShortcut = (event.metaKey || event.ctrlKey) &&
+        !event.altKey &&
+        isHtmlPreviewVisible &&
+        ['+', '=', '-', '_', '0'].includes(event.key)
+      if (isHtmlZoomShortcut) {
+        const target = event.target instanceof Element ? event.target : null
+        const inEditor = Boolean(target?.closest('.monaco-editor'))
+        if (!inEditor) {
+          event.preventDefault()
+          event.stopPropagation()
+          const direction = event.key === '0' ? 'reset' : (event.key === '-' || event.key === '_' ? 'out' : 'in')
+          void stepHtmlPreviewZoom(direction, 'shortcut')
+          return
+        }
+      }
+
       const isPreviewSearch = (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'f'
       if (isPreviewSearch) {
-        const target = event.target as HTMLElement | null
+        const target = event.target instanceof Element ? event.target : null
         const inEditor = Boolean(target?.closest('.monaco-editor'))
         if (!inEditor && isMarkdownPreviewVisible) {
           event.preventDefault()
-          setPreviewSearchOpen(true)
+          openPreviewSearch()
+        } else if (!inEditor && isHtmlPreviewVisible) {
+          event.preventDefault()
+          openHtmlPreviewSearch()
         }
         return
       }
 
       const isSave = (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's'
       if (isSave) {
-        const target = event.target as HTMLElement | null
+        const target = event.target instanceof Element ? event.target : null
         const inEditor = !!target?.closest('.monaco-editor')
         if (inEditor) return
         event.preventDefault()
@@ -7743,7 +8291,7 @@ export function ProjectEditor({
 
     document.addEventListener('keydown', handleKeyDown, true)
     return () => document.removeEventListener('keydown', handleKeyDown, true)
-  }, [dialog, handleOpenSearch, isMarkdownPreviewVisible, isOpen, searchOpen])
+  }, [dialog, handleOpenSearch, isHtmlPreviewVisible, isMarkdownPreviewVisible, isOpen, openHtmlPreviewSearch, openPreviewSearch, searchOpen, setFileBrowserCollapsedState, stepHtmlPreviewZoom])
 
   useSubpageEscape({ isOpen, onEscape: handleEscape })
 
@@ -7907,9 +8455,24 @@ export function ProjectEditor({
         isBinaryRef.current = false
         setIsImage(false)
         isImageRef.current = false
-        setIsSqlite(false)
-        isSqliteRef.current = false
-        setImagePreviewUrl(null)
+	        setIsSqlite(false)
+	        isSqliteRef.current = false
+	        setIsPdf(false)
+	        isPdfRef.current = false
+	        setIsEpub(false)
+	        isEpubRef.current = false
+	        setIsHtml(false)
+	        isHtmlRef.current = false
+	        setImagePreviewUrl(null)
+	        setPdfPreviewUrl(null)
+	        setEpubPreviewUrl(null)
+	        setHtmlPreviewUrl(null)
+	        htmlPreviewUrlRef.current = null
+	        setHtmlPreviewReloadKey(0)
+	        htmlPreviewReloadKeyRef.current = 0
+	        updateHtmlPreviewScrollState(null)
+	        closeHtmlPreviewSearch()
+	        updateHtmlReaderState(null)
         setIsDirty(false)
         originalContentRef.current = ''
         originalModelVersionRef.current = null
@@ -7923,9 +8486,10 @@ export function ProjectEditor({
     fileIndexRemoveFile(root, targetPath)
     void window.electronAPI.project.invalidateFileIndex(root)
     showStatus('success', t('projectEditor.deleteSuccess'))
-  }, [activeFilePath, refreshDirectory, removeQuickFileEntries, requestConfirm, selectedPath, setActiveFilePathValue, showStatus, t, tree])
+  }, [activeFilePath, closeHtmlPreviewSearch, refreshDirectory, removeQuickFileEntries, requestConfirm, selectedPath, setActiveFilePathValue, showStatus, t, tree, updateHtmlPreviewScrollState, updateHtmlReaderState])
 
   const handleResizeMouseDown = useCallback((event: React.MouseEvent) => {
+    if (isFileBrowserCollapsedRef.current) return
     event.preventDefault()
     isDraggingRef.current = true
     const startX = event.clientX
@@ -7955,7 +8519,7 @@ export function ProjectEditor({
   }, [fileTreeWidth])
 
   const handlePreviewResizeMouseDown = useCallback((event: React.MouseEvent) => {
-    if (!isMarkdownPreviewVisible) return
+    if (!isMarkdownPreviewVisible && !isHtmlPreviewVisible) return
     event.preventDefault()
     isPreviewDraggingRef.current = true
 
@@ -7991,7 +8555,7 @@ export function ProjectEditor({
     document.body.classList.add('project-editor-preview-resizing')
     document.addEventListener('mousemove', handleMouseMove)
     document.addEventListener('mouseup', handleMouseUp)
-  }, [isMarkdownPreviewVisible])
+  }, [isHtmlPreviewVisible, isMarkdownPreviewVisible, outlineShowInSplit])
 
   const handleOutlineResizeMouseDown = useCallback((event: React.MouseEvent) => {
     if (!outlineShowInSplit) return
@@ -8455,7 +9019,25 @@ export function ProjectEditor({
         )}
 
         <div className="project-editor-body">
-          <div className="project-editor-sidebar" style={{ width: fileTreeWidth }}>
+          <div
+            className={`project-editor-sidebar${isFileBrowserCollapsed ? ' collapsed' : ''}`}
+            style={isFileBrowserCollapsed ? undefined : { width: fileTreeWidth }}
+          >
+            {isFileBrowserCollapsed ? (
+              <button
+                type="button"
+                className="project-editor-sidebar-restore-btn"
+                title={t('projectEditor.expandFileBrowser')}
+                aria-label={t('projectEditor.expandFileBrowser')}
+                onClick={() => setFileBrowserCollapsedState(false)}
+              >
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+                  <path d="M1.5 2A1.5 1.5 0 0 0 0 3.5v9A1.5 1.5 0 0 0 1.5 14h13a1.5 1.5 0 0 0 1.5-1.5V5.5A1.5 1.5 0 0 0 14.5 4H7.71L6.85 2.57A1.5 1.5 0 0 0 5.57 2H1.5zM1 3.5a.5.5 0 0 1 .5-.5h4.07a.5.5 0 0 1 .43.24l.86 1.43a.5.5 0 0 0 .43.24H14.5a.5.5 0 0 1 .5.5v7a.5.5 0 0 1-.5.5h-13a.5.5 0 0 1-.5-.5v-9z" />
+                  <path d="M6.65 5.15 9.5 8l-2.85 2.85.7.7L10.91 8 7.35 4.45l-.7.7Z" />
+                </svg>
+              </button>
+            ) : (
+              <>
             <div className="project-editor-sidebar-mode-bar">
               <button
                 className={`pe-mode-btn ${sidebarMode === 'files' ? 'active' : ''}`}
@@ -8482,6 +9064,17 @@ export function ProjectEditor({
                   <path d="M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398h-.001l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85zm-5.44 1.16a5.5 5.5 0 1 1 0-11 5.5 5.5 0 0 1 0 11z" />
                 </svg>
                 <span>{t('projectEditor.sidebarSearch')}</span>
+              </button>
+              <button
+                type="button"
+                className="project-editor-sidebar-collapse-btn"
+                title={t('projectEditor.collapseFileBrowser')}
+                aria-label={t('projectEditor.collapseFileBrowser')}
+                onClick={() => setFileBrowserCollapsedState(true)}
+              >
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+                  <path d="M9.35 4.45 5.79 8l3.56 3.55.7-.7L7.2 8l2.85-2.85-.7-.7Z" />
+                </svg>
               </button>
             </div>
             {sidebarMode === 'files' ? (
@@ -8548,6 +9141,8 @@ export function ProjectEditor({
               />
             )}
             <div className="project-editor-file-tree-resizer" onMouseDown={handleResizeMouseDown} />
+              </>
+            )}
           </div>
 
           <div className="project-editor-editor">
@@ -8816,9 +9411,10 @@ export function ProjectEditor({
                   )}
                   {isImage && <span className="project-editor-editor-binary">{t('projectEditor.imagePreview')}</span>}
                   {isSqlite && <span className="project-editor-editor-binary">{t('projectEditor.sqliteView')}</span>}
+                  {isHtmlFile && !isImage && !isSqlite && !isBinary && <span className="project-editor-editor-binary">{t('projectEditor.htmlPreview')}</span>}
                   {!largeFileState && !isImage && !isSqlite && isBinary && <span className="project-editor-editor-binary">{t('projectEditor.binaryReadonly')}</span>}
                 </div>
-                {activeFilePath && isMarkdownFile && !isBinary && !isImage && !isSqlite && (
+                {activeFilePath && isSourcePreviewFile && !isBinary && !isImage && !isSqlite && (
                   <button
                     className="project-editor-action-btn project-editor-preview-toggle"
                     onClick={() => {
@@ -8828,7 +9424,7 @@ export function ProjectEditor({
                     {isMarkdownPreviewOpen ? t('projectEditor.closePreview') : t('projectEditor.openPreview')}
                   </button>
                 )}
-                {activeFilePath && isMarkdownFile && !isBinary && !isImage && !isSqlite && (
+                {activeFilePath && isSourcePreviewFile && !isBinary && !isImage && !isSqlite && (
                   <button
                     className="project-editor-action-btn project-editor-preview-toggle"
                     onClick={() => {
@@ -9110,7 +9706,7 @@ export function ProjectEditor({
                     className="project-editor-editor-pane"
                     style={{
                       ...editorPaneStyle,
-                      ...(isMarkdownFile && !isMarkdownEditorVisible ? { display: 'none' } : {})
+                      ...(isSourcePreviewFile && !isMarkdownEditorVisible ? { display: 'none' } : {})
                     }}
                   >
                     <Editor
@@ -9228,7 +9824,8 @@ export function ProjectEditor({
                           ref={previewSearchRef}
                           previewRef={previewRef}
                           isOpen={previewSearchOpen}
-                          onClose={() => setPreviewSearchOpen(false)}
+                          focusRequestId={previewSearchFocusRequestId}
+                          onClose={closePreviewSearch}
                           renderedHtml={markdownRenderedHtml}
                         />
                         <div
@@ -9249,6 +9846,126 @@ export function ProjectEditor({
                               {t('projectEditor.previewHint')}
                             </div>
                           )}
+                        </div>
+                      </div>
+                    </>
+                  )}
+
+                  {isHtmlPreviewVisible && htmlPreviewUrlWithReload && (
+                    <>
+                      {isMarkdownEditorVisible && (
+                        <div className="project-editor-preview-resizer" onMouseDown={handlePreviewResizeMouseDown} />
+                      )}
+                      <div className="project-editor-preview-pane" style={previewPaneStyle}>
+                        <div className="project-editor-preview-header">
+                          <div className="project-editor-preview-header-main">
+                            <span>{t('projectEditor.htmlPreview')}</span>
+                            {htmlReaderState?.isLoading && (
+                              <span className="project-editor-preview-pending">{t('projectEditor.loading')}</span>
+                            )}
+                          </div>
+                          <div className="project-editor-html-preview-actions">
+                            <div
+                              className="project-editor-html-zoom-controls"
+                              aria-label={t('projectEditor.htmlPreviewZoomControls')}
+                            >
+                              <button
+                                type="button"
+                                className="project-editor-preview-refresh-btn project-editor-html-zoom-btn project-editor-html-zoom-out-btn"
+                                title={t('projectEditor.htmlPreviewZoomOut', {
+                                  key: `${window.electronAPI.platform === 'darwin' ? '⌘' : 'Ctrl'}+-`
+                                })}
+                                aria-label={t('projectEditor.htmlPreviewZoomOut', {
+                                  key: `${window.electronAPI.platform === 'darwin' ? '⌘' : 'Ctrl'}+-`
+                                })}
+                                disabled={htmlPreviewZoomFactor <= HTML_PREVIEW_MIN_ZOOM_FACTOR}
+                                onClick={() => void stepHtmlPreviewZoom('out', 'toolbar')}
+                              >
+                                <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+                                  <path d="M3 7.25h10v1.5H3v-1.5Z" />
+                                </svg>
+                              </button>
+                              <button
+                                type="button"
+                                className="project-editor-html-zoom-level-btn"
+                                title={t('projectEditor.htmlPreviewZoomReset', {
+                                  key: `${window.electronAPI.platform === 'darwin' ? '⌘' : 'Ctrl'}+0`
+                                })}
+                                aria-label={t('projectEditor.htmlPreviewZoomLevel', {
+                                  percent: htmlPreviewZoomPercent
+                                })}
+                                onClick={() => void stepHtmlPreviewZoom('reset', 'toolbar')}
+                              >
+                                {htmlPreviewZoomPercent}
+                              </button>
+                              <button
+                                type="button"
+                                className="project-editor-preview-refresh-btn project-editor-html-zoom-btn project-editor-html-zoom-in-btn"
+                                title={t('projectEditor.htmlPreviewZoomIn', {
+                                  key: `${window.electronAPI.platform === 'darwin' ? '⌘' : 'Ctrl'}++`
+                                })}
+                                aria-label={t('projectEditor.htmlPreviewZoomIn', {
+                                  key: `${window.electronAPI.platform === 'darwin' ? '⌘' : 'Ctrl'}++`
+                                })}
+                                disabled={htmlPreviewZoomFactor >= HTML_PREVIEW_MAX_ZOOM_FACTOR}
+                                onClick={() => void stepHtmlPreviewZoom('in', 'toolbar')}
+                              >
+                                <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+                                  <path d="M7.25 3h1.5v4.25H13v1.5H8.75V13h-1.5V8.75H3v-1.5h4.25V3Z" />
+                                </svg>
+                              </button>
+                            </div>
+                            <button
+                              type="button"
+                              className="project-editor-preview-refresh-btn"
+                              title={t('projectEditor.previewSearch.open')}
+                              aria-label={t('projectEditor.previewSearch.open')}
+                              onClick={openHtmlPreviewSearch}
+                            >
+                              <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+                                <path d="M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398l2.956 2.956a1 1 0 0 0 1.415-1.414l-2.974-2.94ZM12 6.5a5.5 5.5 0 1 1-11 0 5.5 5.5 0 0 1 11 0Z" />
+                              </svg>
+                            </button>
+                            <button
+                              type="button"
+                              className="project-editor-preview-refresh-btn project-editor-html-force-refresh-btn"
+                              title={t('projectEditor.forceRefreshPreview')}
+                              aria-label={t('projectEditor.forceRefreshPreview')}
+                              onClick={() => void requestHtmlPreviewReload('manual-refresh')}
+                            >
+                              <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+                                <path d="M13.65 2.35a8 8 0 1 0 1.77 5.15.75.75 0 0 0-1.5-.1 6.5 6.5 0 1 1-1.45-4.15H10.5a.75.75 0 0 0 0 1.5h4a.75.75 0 0 0 .75-.75v-4a.75.75 0 0 0-1.5 0v2.15l-.1.1Z" />
+                              </svg>
+                            </button>
+                          </div>
+                        </div>
+                        <HtmlPreviewSearchBar
+                          isOpen={htmlPreviewSearchOpen}
+                          focusRequestId={htmlPreviewSearchFocusRequestId}
+                          query={htmlPreviewSearchQuery}
+                          result={htmlPreviewSearchResult}
+                          onQueryChange={updateHtmlPreviewSearchQuery}
+                          onNext={goToNextHtmlPreviewSearchMatch}
+                          onPrevious={goToPreviousHtmlPreviewSearchMatch}
+                          onClose={closeHtmlPreviewSearch}
+                        />
+                        <div className="project-editor-html-preview-body">
+                          <HtmlReader
+                            url={htmlPreviewUrlWithReload}
+                            rootPath={(rootRef.current ?? rootPath ?? '') as string}
+                            filePath={activeFilePath}
+                            reloadKey={htmlPreviewReloadKey}
+                            isActive={isOpen && isHtmlPreviewVisible}
+                            restoreScrollState={htmlPreviewScrollState}
+                            onEscape={() => {
+                              if (htmlPreviewSearchOpenRef.current) {
+                                closeHtmlPreviewSearch()
+                                return
+                              }
+                              void handleRequestClose()
+                            }}
+                            onStateChange={updateHtmlReaderState}
+                          />
                         </div>
                       </div>
                     </>

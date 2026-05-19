@@ -1,0 +1,12 @@
+/*
+ * SPDX-FileCopyrightText: 2026 OPPO
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+html {
+  --html-preview-accent: #0f766e;
+}
+
+.panel {
+  box-shadow: 0 8px 24px rgba(15, 118, 110, 0.12);
+}

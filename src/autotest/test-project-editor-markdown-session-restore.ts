@@ -326,17 +326,34 @@ export async function testProjectEditorMarkdownSessionRestore(ctx: AutotestConte
     })
     if (!outlineReady || cancelled()) return results
 
-    const clickedHeading = Boolean(getApi()?.clickOutlineItemByName?.(TARGET_HEADING))
-    await sleep(500)
+    const previewHeadingReady = await waitFor(
+      'pmsr-preview-heading-dom-ready',
+      () => Boolean(document.querySelector(`.project-editor-preview-content #${CSS.escape(TARGET_HEADING_SLUG)}`)),
+      8000,
+      100
+    )
+    const clickedHeading = previewHeadingReady && Boolean(getApi()?.clickOutlineItemByName?.(TARGET_HEADING))
+    const previewSectionOpened = clickedHeading && await waitFor(
+      'pmsr-preview-section-after-outline-click',
+      () => {
+        const apiNow = getApi()
+        const currentSlug = apiNow?.debugScanPreviewHeadings?.().nearest ?? apiNow?.getPreviewActiveSlug?.() ?? null
+        const currentScrollTop = apiNow?.getPreviewScrollTop?.() ?? 0
+        return currentSlug === TARGET_HEADING_SLUG && currentScrollTop > 100
+      },
+      6000,
+      100
+    )
     const previewSlug = getApi()?.debugScanPreviewHeadings?.().nearest ?? getApi()?.getPreviewActiveSlug?.() ?? null
     const previewScrollTop = getApi()?.getPreviewScrollTop?.() ?? 0
-    record('PMSR-05-preview-section-opened', clickedHeading && previewSlug === TARGET_HEADING_SLUG && previewScrollTop > 100, {
+    record('PMSR-05-preview-section-opened', previewSectionOpened, {
+      previewHeadingReady,
       clickedHeading,
       previewSlug,
       expectedSlug: TARGET_HEADING_SLUG,
       previewScrollTop: Math.round(previewScrollTop)
     })
-    if (!clickedHeading || cancelled()) return results
+    if (!previewSectionOpened || cancelled()) return results
 
     getApi()?.setMarkdownEditorVisible?.(true)
     const editorAligned = await waitFor(

@@ -147,8 +147,10 @@ interface TabState {
 interface UIPreferences {
   promptInputMode?: 'canvas' | 'line'
   projectEditorFileTreeWidth?: number
+  projectEditorFileBrowserCollapsed?: boolean
   projectEditorModalSize?: { width: number; height: number }
   projectEditorMarkdownPreviewWidth?: number
+  projectEditorHtmlPreviewZoomFactor?: number
   projectEditorMarkdownEditorVisible?: boolean
   projectEditorOutlineVisible?: boolean
   projectEditorOutlineWidth?: number

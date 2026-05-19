@@ -1367,8 +1367,8 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
 
   browserViewManager.init(mainWindow)
 
-  ipcMain.handle(IPC.BROWSER_CREATE, (_, id: string, url?: string) => {
-    return browserViewManager.create(id, url)
+  ipcMain.handle(IPC.BROWSER_CREATE, (_, id: string, url?: string, options?: Parameters<typeof browserViewManager.create>[2]) => {
+    return browserViewManager.create(id, url, options)
   })
 
   ipcMain.handle(IPC.BROWSER_DESTROY, (_, id: string) => {
@@ -1393,6 +1393,34 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
 
   ipcMain.handle(IPC.BROWSER_STOP, (_, id: string) => {
     return browserViewManager.stop(id)
+  })
+
+  ipcMain.handle(IPC.BROWSER_EVALUATE_FOR_TEST, (_, id: string, script: string) => {
+    return browserViewManager.evaluateForTest(id, script)
+  })
+
+  ipcMain.handle(IPC.BROWSER_GET_ZOOM_FACTOR, (_, id: string) => {
+    return browserViewManager.getZoomFactor(id)
+  })
+
+  ipcMain.handle(IPC.BROWSER_SET_ZOOM_FACTOR, (_, id: string, zoomFactor: number) => {
+    return browserViewManager.setZoomFactor(id, zoomFactor)
+  })
+
+  ipcMain.handle(IPC.BROWSER_GET_SCROLL_STATE, (_, id: string) => {
+    return browserViewManager.getScrollState(id)
+  })
+
+  ipcMain.handle(IPC.BROWSER_RESTORE_SCROLL_STATE, (_, id: string, state: Parameters<typeof browserViewManager.restoreScrollState>[1]) => {
+    return browserViewManager.restoreScrollState(id, state)
+  })
+
+  ipcMain.handle(IPC.BROWSER_FIND_IN_PAGE, (_, id: string, text: string, options?: Parameters<typeof browserViewManager.findInPage>[2]) => {
+    return browserViewManager.findInPage(id, text, options)
+  })
+
+  ipcMain.handle(IPC.BROWSER_STOP_FIND_IN_PAGE, (_, id: string, action?: Parameters<typeof browserViewManager.stopFindInPage>[1]) => {
+    return browserViewManager.stopFindInPage(id, action)
   })
 
   ipcMain.handle(IPC.BROWSER_SET_BOUNDS, (_, id: string, rect: { x: number; y: number; width: number; height: number }) => {
@@ -2227,6 +2255,11 @@ export async function cleanupIpcHandlers(): Promise<void> {
   browserViewManager.destroyAll()
   ipcMain.removeHandler(IPC.BROWSER_CREATE)
   ipcMain.removeHandler(IPC.BROWSER_DESTROY)
+  ipcMain.removeHandler(IPC.BROWSER_EVALUATE_FOR_TEST)
+  ipcMain.removeHandler(IPC.BROWSER_GET_SCROLL_STATE)
+  ipcMain.removeHandler(IPC.BROWSER_RESTORE_SCROLL_STATE)
+  ipcMain.removeHandler(IPC.BROWSER_FIND_IN_PAGE)
+  ipcMain.removeHandler(IPC.BROWSER_STOP_FIND_IN_PAGE)
   ipcMain.removeHandler(IPC.BROWSER_NAVIGATE)
   ipcMain.removeHandler(IPC.BROWSER_GO_BACK)
   ipcMain.removeHandler(IPC.BROWSER_GO_FORWARD)

@@ -585,6 +585,7 @@ export interface ProjectReadResult {
   isSqlite: boolean
   isPdf?: boolean
   isEpub?: boolean
+  isHtml?: boolean
   previewUrl?: string
   previewPath?: string
   sizeBytes?: number
@@ -1167,6 +1168,10 @@ export interface DebugAPI {
   // submodule c/m/u filter suite needs both a "clean" and a "pointer-changed"
   // parent+submodule pair). Empty/null in normal runs.
   autotestFixtureExtra: string | null
+  autotestHtmlFixturePath: string | null
+  autotestHtmlExpectedTitle: string | null
+  autotestHtmlExpectedText: string | null
+  autotestHtmlSkipSaveFlow: boolean
   perfTraceCaptureContent: boolean
   // ONWARD_DISABLE_VIRTUAL_CURSOR=1 disables the Prompt textarea's
   // click-anywhere virtual-cursor feature and falls back to plain
@@ -1203,6 +1208,31 @@ export interface BrowserNavState {
   url: string
   title: string
   isLoading: boolean
+}
+
+export interface BrowserScrollState {
+  x: number
+  y: number
+  scrollWidth: number
+  scrollHeight: number
+  clientWidth: number
+  clientHeight: number
+}
+
+export interface BrowserFindInPageOptions {
+  forward?: boolean
+  findNext?: boolean
+  matchCase?: boolean
+}
+
+export type BrowserStopFindInPageAction = 'clearSelection' | 'keepSelection' | 'activateSelection'
+
+export interface BrowserFoundInPageResult {
+  requestId: number
+  activeMatchOrdinal: number
+  matches: number
+  selectionArea?: { x: number; y: number; width: number; height: number }
+  finalUpdate: boolean
 }
 
 // Coding Agent integration types
@@ -1267,7 +1297,7 @@ export interface CodingAgentAPI {
 }
 
 export interface BrowserAPI {
-  create: (id: string, url?: string) => Promise<{ success: boolean; id: string; error?: string }>
+  create: (id: string, url?: string, options?: { allowFile?: boolean; fileRoot?: string }) => Promise<{ success: boolean; id: string; error?: string }>
   destroy: (id: string) => Promise<boolean>
   navigate: (id: string, url: string) => Promise<boolean>
   goBack: (id: string) => Promise<boolean>
@@ -1281,12 +1311,22 @@ export interface BrowserAPI {
   clearCookies: (maxAge?: number) => Promise<{ removed: number }>
   setRememberCookies: (rememberCookies: boolean) => Promise<{ rememberCookies: boolean }>
   showCookieMenu: (options: { rememberCookies: boolean; labels: { remember: string; clearDay: string; clearWeek: string; clearAll: string } }) => Promise<{ action: string; rememberCookies?: boolean } | null>
+  evaluateForTest: (id: string, script: string) => Promise<{ success: boolean; value?: unknown; error?: string }>
+  getZoomFactor: (id: string) => Promise<{ success: boolean; zoomFactor?: number; error?: string }>
+  setZoomFactor: (id: string, zoomFactor: number) => Promise<{ success: boolean; zoomFactor?: number; error?: string }>
+  getScrollState: (id: string) => Promise<{ success: boolean; state?: BrowserScrollState; error?: string }>
+  restoreScrollState: (id: string, state: BrowserScrollState) => Promise<{ success: boolean; state?: BrowserScrollState; error?: string }>
+  findInPage: (id: string, text: string, options?: BrowserFindInPageOptions) => Promise<{ success: boolean; requestId?: number; error?: string }>
+  stopFindInPage: (id: string, action?: BrowserStopFindInPageAction) => Promise<boolean>
   onUrlChanged: (callback: (id: string, url: string) => void) => () => void
   onTitleChanged: (callback: (id: string, title: string) => void) => () => void
   onLoadingChanged: (callback: (id: string, isLoading: boolean) => void) => () => void
   onNavStateChanged: (callback: (id: string, state: { canGoBack: boolean; canGoForward: boolean }) => void) => () => void
   onFullscreenChanged: (callback: (id: string, isFullscreen: boolean) => void) => () => void
   onEscapePressed: (callback: (id: string) => void) => () => void
+  onFoundInPage: (callback: (id: string, result: BrowserFoundInPageResult) => void) => () => void
+  onFindShortcutPressed: (callback: (id: string) => void) => () => void
+  onZoomFactorChanged: (callback: (id: string, zoomFactor: number, source: 'renderer' | 'shortcut') => void) => () => void
 }
 
 export interface FeedbackDiagnosticBundleVerificationCheck {
@@ -2011,6 +2051,10 @@ const debugAutotestCwd = process.env.ONWARD_AUTOTEST_CWD || null
 const debugAutotestSuite = process.env.ONWARD_AUTOTEST_SUITE || null
 const debugAutotestExit = process.env.ONWARD_AUTOTEST_EXIT === '1'
 const debugAutotestFixtureExtra = process.env.ONWARD_AUTOTEST_FIXTURE_EXTRA || null
+const debugAutotestHtmlFixturePath = process.env.ONWARD_AUTOTEST_HTML_FIXTURE_PATH || null
+const debugAutotestHtmlExpectedTitle = process.env.ONWARD_AUTOTEST_HTML_EXPECTED_TITLE || null
+const debugAutotestHtmlExpectedText = process.env.ONWARD_AUTOTEST_HTML_EXPECTED_TEXT || null
+const debugAutotestHtmlSkipSaveFlow = process.env.ONWARD_AUTOTEST_HTML_SKIP_SAVE_FLOW === '1'
 const perfTraceCaptureContent = process.env.ONWARD_PERF_TRACE_CAPTURE_CONTENT === '1'
 const virtualCursorDisabled = process.env.ONWARD_DISABLE_VIRTUAL_CURSOR === '1'
 const gitDiffPerformanceDiagnosticsEnabled =
@@ -2033,6 +2077,10 @@ const debugAPI: DebugAPI = {
   autotestSuite: debugAutotestSuite,
   autotestExit: debugAutotestExit,
   autotestFixtureExtra: debugAutotestFixtureExtra,
+  autotestHtmlFixturePath: debugAutotestHtmlFixturePath,
+  autotestHtmlExpectedTitle: debugAutotestHtmlExpectedTitle,
+  autotestHtmlExpectedText: debugAutotestHtmlExpectedText,
+  autotestHtmlSkipSaveFlow: debugAutotestHtmlSkipSaveFlow,
   perfTraceCaptureContent,
   virtualCursorDisabled,
   log: (message: string, data?: unknown) => {
@@ -2105,8 +2153,8 @@ const debugAPI: DebugAPI = {
 }
 
 const browserAPI: BrowserAPI = {
-  create: (id: string, url?: string) => {
-    return ipcRenderer.invoke(IPC.BROWSER_CREATE, id, url)
+  create: (id: string, url?: string, options?: { allowFile?: boolean; fileRoot?: string }) => {
+    return ipcRenderer.invoke(IPC.BROWSER_CREATE, id, url, options)
   },
   destroy: (id: string) => {
     return ipcRenderer.invoke(IPC.BROWSER_DESTROY, id)
@@ -2146,6 +2194,27 @@ const browserAPI: BrowserAPI = {
   },
   showCookieMenu: (options: { rememberCookies: boolean; labels: { remember: string; clearDay: string; clearWeek: string; clearAll: string } }) => {
     return ipcRenderer.invoke(IPC.BROWSER_SHOW_COOKIE_MENU, options) as Promise<{ action: string; rememberCookies?: boolean } | null>
+  },
+  evaluateForTest: (id: string, script: string) => {
+    return ipcRenderer.invoke(IPC.BROWSER_EVALUATE_FOR_TEST, id, script) as Promise<{ success: boolean; value?: unknown; error?: string }>
+  },
+  getZoomFactor: (id: string) => {
+    return ipcRenderer.invoke(IPC.BROWSER_GET_ZOOM_FACTOR, id) as Promise<{ success: boolean; zoomFactor?: number; error?: string }>
+  },
+  setZoomFactor: (id: string, zoomFactor: number) => {
+    return ipcRenderer.invoke(IPC.BROWSER_SET_ZOOM_FACTOR, id, zoomFactor) as Promise<{ success: boolean; zoomFactor?: number; error?: string }>
+  },
+  getScrollState: (id: string) => {
+    return ipcRenderer.invoke(IPC.BROWSER_GET_SCROLL_STATE, id) as Promise<{ success: boolean; state?: BrowserScrollState; error?: string }>
+  },
+  restoreScrollState: (id: string, state: BrowserScrollState) => {
+    return ipcRenderer.invoke(IPC.BROWSER_RESTORE_SCROLL_STATE, id, state) as Promise<{ success: boolean; state?: BrowserScrollState; error?: string }>
+  },
+  findInPage: (id: string, text: string, options?: BrowserFindInPageOptions) => {
+    return ipcRenderer.invoke(IPC.BROWSER_FIND_IN_PAGE, id, text, options) as Promise<{ success: boolean; requestId?: number; error?: string }>
+  },
+  stopFindInPage: (id: string, action?: BrowserStopFindInPageAction) => {
+    return ipcRenderer.invoke(IPC.BROWSER_STOP_FIND_IN_PAGE, id, action) as Promise<boolean>
   },
   onUrlChanged: (callback: (id: string, url: string) => void) => {
     const listener = (_: Electron.IpcRendererEvent, id: string, url: string) => {
@@ -2199,6 +2268,33 @@ const browserAPI: BrowserAPI = {
     ipcRenderer.on(IPC.BROWSER_ESCAPE_PRESSED, listener)
     return () => {
       ipcRenderer.removeListener(IPC.BROWSER_ESCAPE_PRESSED, listener)
+    }
+  },
+  onFoundInPage: (callback: (id: string, result: BrowserFoundInPageResult) => void) => {
+    const listener = (_: Electron.IpcRendererEvent, id: string, result: BrowserFoundInPageResult) => {
+      callback(id, result)
+    }
+    ipcRenderer.on(IPC.BROWSER_FOUND_IN_PAGE, listener)
+    return () => {
+      ipcRenderer.removeListener(IPC.BROWSER_FOUND_IN_PAGE, listener)
+    }
+  },
+  onFindShortcutPressed: (callback: (id: string) => void) => {
+    const listener = (_: Electron.IpcRendererEvent, id: string) => {
+      callback(id)
+    }
+    ipcRenderer.on(IPC.BROWSER_FIND_SHORTCUT_PRESSED, listener)
+    return () => {
+      ipcRenderer.removeListener(IPC.BROWSER_FIND_SHORTCUT_PRESSED, listener)
+    }
+  },
+  onZoomFactorChanged: (callback: (id: string, zoomFactor: number, source: 'renderer' | 'shortcut') => void) => {
+    const listener = (_: Electron.IpcRendererEvent, id: string, zoomFactor: number, source: 'renderer' | 'shortcut') => {
+      callback(id, zoomFactor, source)
+    }
+    ipcRenderer.on(IPC.BROWSER_ZOOM_FACTOR_CHANGED, listener)
+    return () => {
+      ipcRenderer.removeListener(IPC.BROWSER_ZOOM_FACTOR_CHANGED, listener)
     }
   }
 }

@@ -6,6 +6,7 @@
 import BetterSqlite3 from 'better-sqlite3'
 import { readdir, stat, readFile, writeFile, mkdir, rename, rm, unlink, access, open as openFileHandle } from 'fs/promises'
 import { resolve, relative, dirname, sep, normalize, extname, join } from 'path'
+import { isHtmlPath } from '../../src/utils/html-file'
 import { isSupportedImageFile } from './image-utils'
 
 export const PROJECT_TEXT_WARNING_SIZE = 3 * 1024 * 1024
@@ -508,6 +509,7 @@ export async function readProjectFile(root: string, path: string, options: Proje
     const isImageByExt = isSupportedImageFile(fullPath)
     const isPdfByExt = isPdfExtension(fullPath)
     const isEpubByExt = isEpubExtension(fullPath)
+    const isHtmlByExt = isHtmlPath(fullPath)
 
     if (isSqliteByExt) {
       return {
@@ -573,6 +575,24 @@ export async function readProjectFile(root: string, path: string, options: Proje
         previewUrl: `${toFileUrl(fullPath)}?mtime=${Math.trunc(fileStat.mtimeMs)}`,
         previewPath: fullPath,
         sizeBytes: fileStat.size
+      }
+    }
+
+    if (isHtmlByExt && fileStat.size <= PROJECT_TEXT_EAGER_LIMIT) {
+      const content = await readFile(fullPath, 'utf-8')
+      return {
+        success: true,
+        root: rootPath,
+        path,
+        content,
+        isBinary: false,
+        isImage: false,
+        isSqlite: false,
+        isHtml: true,
+        previewUrl: `${toFileUrl(fullPath)}?mtime=${Math.trunc(fileStat.mtimeMs)}`,
+        previewPath: fullPath,
+        sizeBytes: fileStat.size,
+        openMode: 'text'
       }
     }
 

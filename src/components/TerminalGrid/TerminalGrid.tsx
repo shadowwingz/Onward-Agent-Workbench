@@ -345,6 +345,11 @@ export const TerminalGrid = memo(function TerminalGrid({
     && Boolean(projectEditorTerminalId && terminals.some(term => term.id === projectEditorTerminalId))
   const globalOverlayActive = gitDiffOpen || gitHistoryOpen || projectEditorOpenInGrid
   const anySubpageOpen = globalOverlayActive
+  const subpageOpenStateRef = useRef<Record<SubpageId, boolean>>({
+    diff: false,
+    editor: false,
+    history: false
+  })
   const [browserOpenTerminals, setBrowserOpenTerminals] = useState<Set<string>>(new Set())
   const [lastBrowserUrls, setLastBrowserUrls] = useState<Record<string, string>>({})
   const [isSubpageSwitching, setIsSubpageSwitching] = useState(false)
@@ -394,6 +399,14 @@ export const TerminalGrid = memo(function TerminalGrid({
   const handleHistoryPanelShellStateChange = useCallback((state: SubpagePanelShellState | null) => {
     updatePanelShellState('history', state)
   }, [updatePanelShellState])
+
+  useLayoutEffect(() => {
+    subpageOpenStateRef.current = {
+      diff: gitDiffOpen,
+      editor: projectEditorOpenInGrid,
+      history: gitHistoryOpen
+    }
+  }, [gitDiffOpen, gitHistoryOpen, projectEditorOpenInGrid])
 
   // Sync activeSubpage to the open-panel set, but never override a still-valid
   // explicit user choice. The previous "transition-edge detector" had a race:
@@ -2148,6 +2161,33 @@ export const TerminalGrid = memo(function TerminalGrid({
     }
   }, [closeGitDiffPanel, closeGitHistoryPanel, onCloseProjectEditor])
 
+  const waitForSubpageRouteTargetOpen = useCallback((
+    target: SubpageId | null,
+    navigateToken: number
+  ): Promise<void> => {
+    if (!target) return Promise.resolve()
+    return new Promise((resolve) => {
+      let remainingFrames = 120
+      const tick = () => {
+        if (subpageNavigateTokenRef.current !== navigateToken) {
+          resolve()
+          return
+        }
+        if (subpageOpenStateRef.current[target]) {
+          resolve()
+          return
+        }
+        if (remainingFrames <= 0) {
+          resolve()
+          return
+        }
+        remainingFrames -= 1
+        requestAnimationFrame(tick)
+      }
+      requestAnimationFrame(tick)
+    })
+  }, [])
+
   const executeSubpageRoute = useCallback(async (command: SubpageRouteCommand) => {
     const navigateToken = ++subpageNavigateTokenRef.current
     if (command.intent !== 'open' || command.from) {
@@ -2195,14 +2235,13 @@ export const TerminalGrid = memo(function TerminalGrid({
       })
     }
 
+    await waitForSubpageRouteTargetOpen(target, navigateToken)
+    if (subpageNavigateTokenRef.current !== navigateToken) return
+    closeNonTargetSubpagesForRoute(target)
     requestAnimationFrame(() => {
       if (subpageNavigateTokenRef.current !== navigateToken) return
-      closeNonTargetSubpagesForRoute(target)
-      requestAnimationFrame(() => {
-        if (subpageNavigateTokenRef.current !== navigateToken) return
-        pendingSubpageRouteTargetRef.current = null
-        void notifySubpageAfterEnter(command)
-      })
+      pendingSubpageRouteTargetRef.current = null
+      void notifySubpageAfterEnter(command)
     })
   }, [
     captureSubpageBeforeLeave,
@@ -2212,7 +2251,8 @@ export const TerminalGrid = memo(function TerminalGrid({
     handleViewGitDiff,
     handleViewGitHistory,
     notifySubpageAfterEnter,
-    onOpenProjectEditor
+    onOpenProjectEditor,
+    waitForSubpageRouteTargetOpen
   ])
 
   useEffect(() => {

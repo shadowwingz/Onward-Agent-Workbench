@@ -503,9 +503,10 @@ export interface ProjectReadResult {
   isSqlite: boolean
   isPdf?: boolean
   isEpub?: boolean
-  /** file:// URL with mtime cache buster. PDF: pdf.js viewer URL. Image / EPUB: direct file URL. */
+  isHtml?: boolean
+  /** file:// URL with mtime cache buster. PDF: pdf.js viewer URL. Image / EPUB / HTML: direct file URL. */
   previewUrl?: string
-  /** Absolute filesystem path of the previewed file (PDF/EPUB). */
+  /** Absolute filesystem path of the previewed file (PDF/EPUB/HTML). */
   previewPath?: string
   sizeBytes?: number
   openMode?: ProjectFileResolvedOpenMode
@@ -996,6 +997,10 @@ export interface DebugAPI {
   autotestSuite: string | null
   autotestExit: boolean
   autotestFixtureExtra: string | null
+  autotestHtmlFixturePath: string | null
+  autotestHtmlExpectedTitle: string | null
+  autotestHtmlExpectedText: string | null
+  autotestHtmlSkipSaveFlow: boolean
   perfTraceCaptureContent: boolean
   virtualCursorDisabled: boolean
   log: (message: string, data?: unknown) => void
@@ -1039,8 +1044,33 @@ export interface BrowserNavState {
   isLoading: boolean
 }
 
+export interface BrowserScrollState {
+  x: number
+  y: number
+  scrollWidth: number
+  scrollHeight: number
+  clientWidth: number
+  clientHeight: number
+}
+
+export interface BrowserFindInPageOptions {
+  forward?: boolean
+  findNext?: boolean
+  matchCase?: boolean
+}
+
+export type BrowserStopFindInPageAction = 'clearSelection' | 'keepSelection' | 'activateSelection'
+
+export interface BrowserFoundInPageResult {
+  requestId: number
+  activeMatchOrdinal: number
+  matches: number
+  selectionArea?: { x: number; y: number; width: number; height: number }
+  finalUpdate: boolean
+}
+
 export interface BrowserAPI {
-  create: (id: string, url?: string) => Promise<{ success: boolean; id: string; error?: string }>
+  create: (id: string, url?: string, options?: { allowFile?: boolean; fileRoot?: string }) => Promise<{ success: boolean; id: string; error?: string }>
   destroy: (id: string) => Promise<boolean>
   navigate: (id: string, url: string) => Promise<boolean>
   goBack: (id: string) => Promise<boolean>
@@ -1054,12 +1084,22 @@ export interface BrowserAPI {
   clearCookies: (maxAge?: number) => Promise<{ removed: number }>
   setRememberCookies: (rememberCookies: boolean) => Promise<{ rememberCookies: boolean }>
   showCookieMenu: (options: { rememberCookies: boolean; labels: { remember: string; clearDay: string; clearWeek: string; clearAll: string } }) => Promise<{ action: string; rememberCookies?: boolean } | null>
+  evaluateForTest: (id: string, script: string) => Promise<{ success: boolean; value?: unknown; error?: string }>
+  getZoomFactor: (id: string) => Promise<{ success: boolean; zoomFactor?: number; error?: string }>
+  setZoomFactor: (id: string, zoomFactor: number) => Promise<{ success: boolean; zoomFactor?: number; error?: string }>
+  getScrollState: (id: string) => Promise<{ success: boolean; state?: BrowserScrollState; error?: string }>
+  restoreScrollState: (id: string, state: BrowserScrollState) => Promise<{ success: boolean; state?: BrowserScrollState; error?: string }>
+  findInPage: (id: string, text: string, options?: BrowserFindInPageOptions) => Promise<{ success: boolean; requestId?: number; error?: string }>
+  stopFindInPage: (id: string, action?: BrowserStopFindInPageAction) => Promise<boolean>
   onUrlChanged: (callback: (id: string, url: string) => void) => () => void
   onTitleChanged: (callback: (id: string, title: string) => void) => () => void
   onLoadingChanged: (callback: (id: string, isLoading: boolean) => void) => () => void
   onNavStateChanged: (callback: (id: string, state: { canGoBack: boolean; canGoForward: boolean }) => void) => () => void
   onFullscreenChanged: (callback: (id: string, isFullscreen: boolean) => void) => () => void
   onEscapePressed: (callback: (id: string) => void) => () => void
+  onFoundInPage: (callback: (id: string, result: BrowserFoundInPageResult) => void) => () => void
+  onFindShortcutPressed: (callback: (id: string) => void) => () => void
+  onZoomFactorChanged: (callback: (id: string, zoomFactor: number, source: 'renderer' | 'shortcut') => void) => () => void
 }
 
 export interface FeedbackDiagnosticBundleVerificationCheck {
