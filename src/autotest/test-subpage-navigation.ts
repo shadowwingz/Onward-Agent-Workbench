@@ -4,6 +4,7 @@
  */
 
 import type { AutotestContext, TestResult } from './types'
+import { buildChangeDirectoryCommand } from '../utils/terminal-command'
 
 function normalizePath(value: string): string {
   return value.replace(/\\/g, '/').replace(/\/+$/, '')
@@ -14,10 +15,16 @@ function joinPath(base: string, child: string): string {
   return `${trimmed}/${child}`
 }
 
-function dirname(value: string): string {
+function lastSegment(value: string): string {
   const normalized = value.replace(/[\\/]+$/, '')
   const slashIndex = Math.max(normalized.lastIndexOf('/'), normalized.lastIndexOf('\\'))
-  return slashIndex > 0 ? normalized.slice(0, slashIndex) : normalized
+  return slashIndex >= 0 ? normalized.slice(slashIndex + 1) : normalized
+}
+
+function getFixtureBase(rootPath: string): string {
+  const configured = window.electronAPI.debug.autotestFixtureExtra?.trim()
+  if (configured) return configured
+  return joinPath(rootPath, 'test/autotest/results/subpage-navigation')
 }
 
 function dispatchEscape(): void {
@@ -144,7 +151,8 @@ export async function testSubpageNavigation(ctx: AutotestContext): Promise<TestR
   }
 
   const platform = window.electronAPI.platform
-  const fixtureRoot = joinPath(dirname(ctx.rootPath), `onward-autotest-subpage-navigation-${Date.now()}`)
+  const fixtureBase = getFixtureBase(ctx.rootPath)
+  const fixtureRoot = joinPath(fixtureBase, `onward-autotest-subpage-navigation-${Date.now()}`)
   const fixtureShellPath = platform === 'win32' ? fixtureRoot.replace(/\//g, '\\') : fixtureRoot
   const repoSetupCommand = platform === 'win32'
     ? [
@@ -185,329 +193,350 @@ export async function testSubpageNavigation(ctx: AutotestContext): Promise<TestR
 
   log('phase0.58:start', {
     suite: 'SubpageNavigation',
+    fixtureBase,
     fixtureRoot
   })
 
-  await writeAndSyncTerminal(terminalId, repoSetupCommand, sleep)
-  const fixtureCwd = await waitForTerminalCwd(terminalId, fixtureRoot, sleep)
-  _assert('SN-00-fixture-root-ready', Boolean(fixtureCwd), {
-    expected: normalizePath(fixtureRoot),
-    actual: fixtureCwd ? normalizePath(fixtureCwd) : null
-  })
-  if (!fixtureCwd || cancelled()) return results
+  try {
+    await writeAndSyncTerminal(terminalId, repoSetupCommand, sleep)
+    const fixtureCwd = await waitForTerminalCwd(terminalId, fixtureRoot, sleep)
+    _assert('SN-00-fixture-root-ready', Boolean(fixtureCwd), {
+      expected: normalizePath(fixtureRoot),
+      actual: fixtureCwd ? normalizePath(fixtureCwd) : null
+    })
+    if (!fixtureCwd || cancelled()) return results
 
-  const updatedWorkingTree = await window.electronAPI.project.saveFile(
-    fixtureRoot,
-    'existing.md',
-    '# existing\nline1\nline2\ncommitted\nworking tree\n'
-  )
-  const deletedWorkingTree = await window.electronAPI.project.deletePath(fixtureRoot, 'diff-deleted.md')
-  await window.electronAPI.git.notifyTerminalGitUpdate(terminalId)
-  await sleep(600)
-  _assert('SN-00-working-tree-prepared', updatedWorkingTree.success && deletedWorkingTree.success, {
-    updatedWorkingTree,
-    deletedWorkingTree
-  })
-  if ((!updatedWorkingTree.success || !deletedWorkingTree.success) && cancelled()) return results
+    const updatedWorkingTree = await window.electronAPI.project.saveFile(
+      fixtureRoot,
+      'existing.md',
+      '# existing\nline1\nline2\ncommitted\nworking tree\n'
+    )
+    const deletedWorkingTree = await window.electronAPI.project.deletePath(fixtureRoot, 'diff-deleted.md')
+    await window.electronAPI.git.notifyTerminalGitUpdate(terminalId)
+    await sleep(600)
+    _assert('SN-00-working-tree-prepared', updatedWorkingTree.success && deletedWorkingTree.success, {
+      updatedWorkingTree,
+      deletedWorkingTree
+    })
+    if ((!updatedWorkingTree.success || !deletedWorkingTree.success) && cancelled()) return results
 
-  const openProjectEditor = async (label: string) => {
-    window.dispatchEvent(new CustomEvent('project-editor:open', { detail: { terminalId } }))
-    return await waitFor(`subpage-navigation-project-editor-open:${label}`, () => {
-      const api = getProjectEditorApi()
-      return Boolean(api?.isOpen() && normalizePath(api.getRootPath?.() ?? '') === normalizePath(fixtureRoot))
+    const openProjectEditor = async (label: string) => {
+      window.dispatchEvent(new CustomEvent('project-editor:open', { detail: { terminalId } }))
+      return await waitFor(`subpage-navigation-project-editor-open:${label}`, () => {
+        const api = getProjectEditorApi()
+        return Boolean(api?.isOpen() && normalizePath(api.getRootPath?.() ?? '') === normalizePath(fixtureRoot))
+      }, 8000)
+    }
+
+    const waitForProjectEditorFile = async (label: string, expectedPath: string | null) => {
+      return await waitFor(`subpage-navigation-editor-file:${label}`, () => {
+        const api = getProjectEditorApi()
+        if (!api?.isOpen()) return false
+        return (api.getActiveFilePath?.() ?? null) === expectedPath
+      }, 8000)
+    }
+
+    const waitForActiveSubpage = async (label: string, target: 'diff' | 'editor' | 'history') => {
+      return await waitFor(`subpage-navigation-active-subpage:${label}`, () => {
+        return document.querySelector(`.terminal-grid-subpage-host[data-active-subpage="${target}"]`) !== null
+      }, 8000)
+    }
+
+    const waitForGitDiffOpen = async (label: string) => {
+      return await waitFor(`subpage-navigation-diff-open:${label}`, () => Boolean(getGitDiffApi()?.isOpen()), 8000)
+    }
+
+    const waitForDiffFile = async (label: string, filePath: string) => {
+      return await waitFor(`subpage-navigation-diff-file:${label}`, () => {
+        const files = getGitDiffApi()?.getFileList?.() ?? []
+        return files.some((file) => file.filename === filePath || file.originalFilename === filePath)
+      }, 8000)
+    }
+
+    const waitForGitHistoryOpen = async (label: string) => {
+      return await waitFor(`subpage-navigation-history-open:${label}`, () => Boolean(getGitHistoryApi()?.isOpen()), 8000)
+    }
+
+    const waitForHistoryFiles = async (label: string) => {
+      return await waitFor(`subpage-navigation-history-files:${label}`, () => {
+        const api = getGitHistoryApi()
+        return Boolean(api && !api.isLoading() && api.getFiles().length > 0)
+      }, 8000)
+    }
+
+    const selectHistoryCommitByIndex = async (label: string, index: number) => {
+      return await waitFor(`subpage-navigation-history-commit:${label}`, () => {
+        const api = getGitHistoryApi()
+        if (!api || api.isLoading()) return false
+        return api.selectCommitByIndex(index) === true
+      }, 8000)
+    }
+
+    const selectHistoryFileByPath = async (label: string, filePath: string) => {
+      return await waitFor(`subpage-navigation-history-select:${label}`, () => {
+        const api = getGitHistoryApi()
+        if (!api || api.isLoading()) return false
+        const files = api.getFiles()
+        const targetIndex = files.findIndex((file) => file.filename === filePath)
+        if (targetIndex < 0) return false
+        if (api.getSelectedFile?.()?.filename === filePath) return true
+        const selected = api.selectFileByIndex(targetIndex) === true
+        return selected && api.getSelectedFile?.()?.filename === filePath
+      }, 8000)
+    }
+
+    const editorOpened = await openProjectEditor('setup')
+    _assert('SN-01-open-project-editor', editorOpened, {
+      rootPath: getProjectEditorApi()?.getRootPath?.() ?? null
+    })
+    if (!editorOpened || cancelled()) return results
+
+    let initialShellNode: HTMLElement | null = null
+    const initialShell = await waitFor('subpage-navigation-shell-editor-visible', () => {
+      const shells = getVisibleSubpageShells()
+      initialShellNode = shells.length === 1 ? shells[0] : null
+      return Boolean(initialShellNode)
     }, 8000)
-  }
+    _assert('SN-01A-shared-shell-visible-on-editor', Boolean(initialShell), {
+      visibleShells: getVisibleSubpageShells().length
+    })
+    if (!initialShell || cancelled()) return results
 
-  const waitForProjectEditorFile = async (label: string, expectedPath: string | null) => {
-    return await waitFor(`subpage-navigation-editor-file:${label}`, () => {
-      const api = getProjectEditorApi()
-      if (!api?.isOpen()) return false
-      return (api.getActiveFilePath?.() ?? null) === expectedPath
+    const editorButton = getSubpageButton('editor')
+    _assert('SN-02-editor-switcher-current', Boolean(editorButton && editorButton.disabled), {
+      disabled: editorButton?.disabled ?? null
+    })
+    const editorButtonsUniform = areVisibleShellButtonsUniform()
+    _assert('SN-02A-editor-header-buttons-uniform', editorButtonsUniform.ok, {
+      metrics: editorButtonsUniform.metrics
+    })
+
+    await getProjectEditorApi()?.openFileByPathAsUser?.('editor-only.md', { trackRecent: true })
+    const editorOnlyOpened = await waitForProjectEditorFile('editor-only', 'editor-only.md')
+    _assert('SN-03-editor-open-editor-only', editorOnlyOpened, {
+      activeFilePath: getProjectEditorApi()?.getActiveFilePath?.() ?? null
+    })
+    if (cancelled()) return results
+
+    const clickedDiffFromEditor = clickSubpageButton('diff')
+    const diffOpened = clickedDiffFromEditor && await waitForGitDiffOpen('from-editor')
+    let diffShellNode: HTMLElement | null = null
+    const diffShell = await waitFor('subpage-navigation-shell-diff-visible', () => {
+      const shells = getVisibleSubpageShells()
+      diffShellNode = shells.length === 1 ? shells[0] : null
+      return Boolean(diffShellNode)
     }, 8000)
-  }
+    _assert('SN-04-editor-switch-to-diff', diffOpened, {
+      clickedDiffFromEditor,
+      diffOpen: getGitDiffApi()?.isOpen?.() ?? false
+    })
+    _assert('SN-04A-shared-shell-reused-on-diff', Boolean(diffShell && diffShellNode === initialShellNode), {
+      visibleShells: getVisibleSubpageShells().length,
+      reusedShellNode: Boolean(diffShell && diffShellNode === initialShellNode)
+    })
+    if (!diffOpened || cancelled()) return results
 
-  const waitForActiveSubpage = async (label: string, target: 'diff' | 'editor' | 'history') => {
-    return await waitFor(`subpage-navigation-active-subpage:${label}`, () => {
-      return document.querySelector(`.terminal-grid-subpage-host[data-active-subpage="${target}"]`) !== null
+    const diffButton = getSubpageButton('diff')
+    _assert('SN-05-diff-switcher-current', Boolean(diffButton && diffButton.disabled), {
+      disabled: diffButton?.disabled ?? null
+    })
+    const diffButtonsUniform = areVisibleShellButtonsUniform()
+    _assert('SN-05A-diff-header-buttons-uniform', diffButtonsUniform.ok, {
+      metrics: diffButtonsUniform.metrics
+    })
+
+    const diffApi = getGitDiffApi()
+    const diffExistingReady = await waitForDiffFile('existing', 'existing.md')
+    const selectedExistingInDiff = diffExistingReady && diffApi?.selectFileByPath('existing.md') === true
+    await waitFor('subpage-navigation-diff-existing-selected', () => {
+      const selected = getGitDiffApi()?.getSelectedFile?.()
+      return Boolean(selected?.filename === 'existing.md')
     }, 8000)
-  }
+    // Switching back to Editor via SubpageSwitcher should restore the
+    // Editor's own previous state (editor-only.md), NOT open the Diff's
+    // selected file.
+    const clickedEditorFromDiff = clickSubpageButton('editor')
+    const diffToEditorOpened = clickedEditorFromDiff && await waitForProjectEditorFile('diff-restores-editor-state', 'editor-only.md')
+    _assert('SN-06-diff-to-editor-restores-editor-state', selectedExistingInDiff && diffToEditorOpened, {
+      selectedExistingInDiff,
+      clickedEditorFromDiff,
+      expected: 'editor-only.md',
+      activeFilePath: getProjectEditorApi()?.getActiveFilePath?.() ?? null
+    })
+    if (cancelled()) return results
 
-  const waitForGitDiffOpen = async (label: string) => {
-    return await waitFor(`subpage-navigation-diff-open:${label}`, () => Boolean(getGitDiffApi()?.isOpen()), 8000)
-  }
+    await getProjectEditorApi()?.openFileByPathAsUser?.('editor-only.md', { trackRecent: true })
+    const editorOnlyRestored = await waitForProjectEditorFile('editor-only-restored', 'editor-only.md')
+    const clickedDiffAgain = clickSubpageButton('diff')
+    const diffRestored = clickedDiffAgain && await waitForGitDiffOpen('restore-from-editor')
+    // waitForGitDiffOpen only confirms the panel is mounted (api.isOpen()).
+    // GitDiffViewer's own [isOpen=true] restore effect re-applies the
+    // previously selected file via memory-store lookup on a follow-up render
+    // tick, so reading `getSelectedFile()` synchronously here would race the
+    // restore. Give it up to 3 s to settle before recording the value.
+    if (diffRestored) {
+      await waitFor('subpage-navigation-diff-selection-restored',
+        () => Boolean(getGitDiffApi()?.getSelectedFile?.()?.filename),
+        3000)
+    }
+    const restoredDiffSelection = getGitDiffApi()?.getSelectedFile?.()?.filename ?? null
+    _assert('SN-07-editor-to-diff-restores-diff-selection', editorOnlyRestored && diffRestored && restoredDiffSelection === 'existing.md', {
+      editorOnlyRestored,
+      clickedDiffAgain,
+      restoredDiffSelection
+    })
+    if (!diffRestored || cancelled()) return results
 
-  const waitForDiffFile = async (label: string, filePath: string) => {
-    return await waitFor(`subpage-navigation-diff-file:${label}`, () => {
-      const files = getGitDiffApi()?.getFileList?.() ?? []
-      return files.some((file) => file.filename === filePath || file.originalFilename === filePath)
+    const clickedHistoryFromDiff = clickSubpageButton('history')
+    const historyOpened = clickedHistoryFromDiff && await waitForGitHistoryOpen('from-diff')
+    let historyShellNode: HTMLElement | null = null
+    const historyShell = await waitFor('subpage-navigation-shell-history-visible', () => {
+      const shells = getVisibleSubpageShells()
+      historyShellNode = shells.length === 1 ? shells[0] : null
+      return Boolean(historyShellNode)
     }, 8000)
-  }
+    _assert('SN-08-diff-switch-to-history', historyOpened, {
+      clickedHistoryFromDiff,
+      historyOpen: getGitHistoryApi()?.isOpen?.() ?? false
+    })
+    _assert('SN-08A-shared-shell-reused-on-history', Boolean(historyShell && historyShellNode === initialShellNode), {
+      visibleShells: getVisibleSubpageShells().length,
+      reusedShellNode: Boolean(historyShell && historyShellNode === initialShellNode)
+    })
+    if (!historyOpened || cancelled()) return results
 
-  const waitForGitHistoryOpen = async (label: string) => {
-    return await waitFor(`subpage-navigation-history-open:${label}`, () => Boolean(getGitHistoryApi()?.isOpen()), 8000)
-  }
+    const historyButton = getSubpageButton('history')
+    _assert('SN-09-history-switcher-current', Boolean(historyButton && historyButton.disabled), {
+      disabled: historyButton?.disabled ?? null
+    })
+    const historyButtonsUniform = areVisibleShellButtonsUniform()
+    _assert('SN-09A-history-header-buttons-uniform', historyButtonsUniform.ok, {
+      metrics: historyButtonsUniform.metrics
+    })
 
-  const waitForHistoryFiles = async (label: string) => {
-    return await waitFor(`subpage-navigation-history-files:${label}`, () => {
+    const selectedUpdateCommit = await selectHistoryCommitByIndex('update-existing', 1)
+    const historyFilesLoaded = await waitFor('subpage-navigation-history-existing-file', () => {
       const api = getGitHistoryApi()
-      return Boolean(api && !api.isLoading() && api.getFiles().length > 0)
+      return Boolean(api && !api.isLoading() && api.getFiles().some((file) => file.filename === 'existing.md'))
     }, 8000)
-  }
+    const selectedExistingHistoryFile = await selectHistoryFileByPath('existing', 'existing.md')
+    await sleep(500)
+    const clickedDiffFromHistory = clickSubpageButton('diff')
+    const diffOpenedFromHistory = clickedDiffFromHistory && await waitForGitDiffOpen('from-history')
+    const clickedHistoryAgain = diffOpenedFromHistory && clickSubpageButton('history')
+    const historyRestored = Boolean(clickedHistoryAgain) && await waitForGitHistoryOpen('restore-from-diff')
+    const restoredHistoryFile = getGitHistoryApi()?.getSelectedFile?.()?.filename ?? null
+    _assert('SN-10-diff-to-history-restores-history-selection', Boolean(selectedUpdateCommit && historyFilesLoaded && selectedExistingHistoryFile && historyRestored && restoredHistoryFile === 'existing.md'), {
+      selectedUpdateCommit,
+      historyFilesLoaded,
+      selectedExistingHistoryFile,
+      restoredHistoryFile
+    })
+    if (cancelled()) return results
 
-  const selectHistoryCommitByIndex = async (label: string, index: number) => {
-    return await waitFor(`subpage-navigation-history-commit:${label}`, () => {
+    // Switching back to Editor via SubpageSwitcher should restore the
+    // Editor's own previous state, NOT open History's selected file.
+    const clickedEditorFromHistory = clickSubpageButton('editor')
+    const historyToEditorOpened = clickedEditorFromHistory && await waitForProjectEditorFile('history-restores-editor-state', 'editor-only.md')
+    _assert('SN-11-history-to-editor-restores-editor-state', historyToEditorOpened, {
+      clickedEditorFromHistory,
+      expected: 'editor-only.md',
+      activeFilePath: getProjectEditorApi()?.getActiveFilePath?.() ?? null
+    })
+    if (cancelled()) return results
+
+    await getProjectEditorApi()?.openFileByPathAsUser?.('editor-only.md', { trackRecent: true })
+    const editorOnlyBeforeHistory = await waitForProjectEditorFile('editor-only-before-history', 'editor-only.md')
+    const clickedHistoryFromEditor = clickSubpageButton('history')
+    const historyOpenedFromEditor = clickedHistoryFromEditor && await waitForGitHistoryOpen('from-editor-restore')
+    const restoredHistoryAfterEditor = getGitHistoryApi()?.getSelectedFile?.()?.filename ?? null
+    _assert('SN-12-editor-to-history-restores-history-selection', Boolean(editorOnlyBeforeHistory && historyOpenedFromEditor && restoredHistoryAfterEditor === 'existing.md'), {
+      editorOnlyBeforeHistory,
+      clickedHistoryFromEditor,
+      restoredHistoryAfterEditor
+    })
+    if (!historyOpenedFromEditor || cancelled()) return results
+
+    // SN-13 / SN-14: SubpageSwitcher no longer passes the Diff/History
+    // selected file to Editor.  Switching back should restore Editor's own
+    // state regardless of what is selected in Diff/History.
+    const selectedDeleteCommit = getGitHistoryApi()?.selectCommitByIndex(0) === true
+    const deleteFilesLoaded = await waitFor('subpage-navigation-history-deleted-file', () => {
       const api = getGitHistoryApi()
-      if (!api || api.isLoading()) return false
-      return api.selectCommitByIndex(index) === true
+      return Boolean(api && !api.isLoading() && api.getFiles().some((file) => file.filename === 'history-deleted.md'))
     }, 8000)
+    const selectedDeletedHistoryFile = await selectHistoryFileByPath('deleted', 'history-deleted.md')
+    await sleep(500)
+    const clickedEditorMissingFromHistory = clickSubpageButton('editor')
+    const historyDeletedRestored = clickedEditorMissingFromHistory && await waitForProjectEditorFile('history-deleted-restore', 'editor-only.md')
+    _assert('SN-13-history-deleted-file-does-not-override-editor', Boolean(
+      selectedDeleteCommit &&
+      deleteFilesLoaded &&
+      selectedDeletedHistoryFile &&
+      historyDeletedRestored
+    ), {
+      selectedDeleteCommit,
+      deleteFilesLoaded,
+      selectedDeletedHistoryFile,
+      expected: 'editor-only.md',
+      activeFilePath: getProjectEditorApi()?.getActiveFilePath?.() ?? null
+    })
+    if (cancelled()) return results
+
+    const clickedDiffForMissing = clickSubpageButton('diff')
+    const diffOpenedForMissing = clickedDiffForMissing && await waitForGitDiffOpen('missing')
+    const diffActiveForMissing = diffOpenedForMissing && await waitForActiveSubpage('missing-diff-active', 'diff')
+    const diffDeletedReady = await waitForDiffFile('deleted', 'diff-deleted.md')
+    const selectedDeletedDiffFile = diffDeletedReady && getGitDiffApi()?.selectFileByPath('diff-deleted.md') === true
+    await sleep(500)
+    const clickedEditorMissingFromDiff = Boolean(diffActiveForMissing) && clickSubpageButton('editor')
+    const editorActiveFromDiff = clickedEditorMissingFromDiff && await waitForActiveSubpage('diff-deleted-editor-active', 'editor')
+    const diffDeletedRestored = editorActiveFromDiff && await waitForProjectEditorFile('diff-deleted-restore', 'editor-only.md')
+    _assert('SN-14-diff-deleted-file-does-not-override-editor', Boolean(
+      diffOpenedForMissing &&
+      diffActiveForMissing &&
+      selectedDeletedDiffFile &&
+      clickedEditorMissingFromDiff &&
+      editorActiveFromDiff &&
+      diffDeletedRestored
+    ), {
+      diffOpenedForMissing,
+      diffActiveForMissing,
+      selectedDeletedDiffFile,
+      clickedEditorMissingFromDiff,
+      editorActiveFromDiff,
+      diffDeletedRestored,
+      expected: 'editor-only.md',
+      activeFilePath: getProjectEditorApi()?.getActiveFilePath?.() ?? null
+    })
+
+    if (getGitHistoryApi()?.isOpen()) {
+      dispatchEscape()
+      await sleep(400)
+    }
+    if (getGitDiffApi()?.isOpen()) {
+      dispatchEscape()
+      await sleep(400)
+    }
+
+    return results
+  } finally {
+    try {
+      const rootShellPath = platform === 'win32' ? ctx.rootPath.replace(/\//g, '\\') : ctx.rootPath
+      await writeAndSyncTerminal(
+        terminalId,
+        buildChangeDirectoryCommand(platform, rootShellPath),
+        sleep
+      )
+    } catch (error) {
+      log('subpage-navigation:cleanup-cwd-error', { error: String(error) })
+    }
+
+    try {
+      const cleanup = await window.electronAPI.project.deletePath(fixtureBase, lastSegment(fixtureRoot))
+      log('subpage-navigation:cleanup', { fixtureBase, fixtureRoot, cleanup })
+    } catch (error) {
+      log('subpage-navigation:cleanup-error', { fixtureBase, fixtureRoot, error: String(error) })
+    }
   }
-
-  const selectHistoryFileByPath = async (label: string, filePath: string) => {
-    return await waitFor(`subpage-navigation-history-select:${label}`, () => {
-      const api = getGitHistoryApi()
-      if (!api || api.isLoading()) return false
-      const files = api.getFiles()
-      const targetIndex = files.findIndex((file) => file.filename === filePath)
-      if (targetIndex < 0) return false
-      if (api.getSelectedFile?.()?.filename === filePath) return true
-      const selected = api.selectFileByIndex(targetIndex) === true
-      return selected && api.getSelectedFile?.()?.filename === filePath
-    }, 8000)
-  }
-
-  const editorOpened = await openProjectEditor('setup')
-  _assert('SN-01-open-project-editor', editorOpened, {
-    rootPath: getProjectEditorApi()?.getRootPath?.() ?? null
-  })
-  if (!editorOpened || cancelled()) return results
-
-  let initialShellNode: HTMLElement | null = null
-  const initialShell = await waitFor('subpage-navigation-shell-editor-visible', () => {
-    const shells = getVisibleSubpageShells()
-    initialShellNode = shells.length === 1 ? shells[0] : null
-    return Boolean(initialShellNode)
-  }, 8000)
-  _assert('SN-01A-shared-shell-visible-on-editor', Boolean(initialShell), {
-    visibleShells: getVisibleSubpageShells().length
-  })
-  if (!initialShell || cancelled()) return results
-
-  const editorButton = getSubpageButton('editor')
-  _assert('SN-02-editor-switcher-current', Boolean(editorButton && editorButton.disabled), {
-    disabled: editorButton?.disabled ?? null
-  })
-  const editorButtonsUniform = areVisibleShellButtonsUniform()
-  _assert('SN-02A-editor-header-buttons-uniform', editorButtonsUniform.ok, {
-    metrics: editorButtonsUniform.metrics
-  })
-
-  await getProjectEditorApi()?.openFileByPathAsUser?.('editor-only.md', { trackRecent: true })
-  const editorOnlyOpened = await waitForProjectEditorFile('editor-only', 'editor-only.md')
-  _assert('SN-03-editor-open-editor-only', editorOnlyOpened, {
-    activeFilePath: getProjectEditorApi()?.getActiveFilePath?.() ?? null
-  })
-  if (cancelled()) return results
-
-  const clickedDiffFromEditor = clickSubpageButton('diff')
-  const diffOpened = clickedDiffFromEditor && await waitForGitDiffOpen('from-editor')
-  let diffShellNode: HTMLElement | null = null
-  const diffShell = await waitFor('subpage-navigation-shell-diff-visible', () => {
-    const shells = getVisibleSubpageShells()
-    diffShellNode = shells.length === 1 ? shells[0] : null
-    return Boolean(diffShellNode)
-  }, 8000)
-  _assert('SN-04-editor-switch-to-diff', diffOpened, {
-    clickedDiffFromEditor,
-    diffOpen: getGitDiffApi()?.isOpen?.() ?? false
-  })
-  _assert('SN-04A-shared-shell-reused-on-diff', Boolean(diffShell && diffShellNode === initialShellNode), {
-    visibleShells: getVisibleSubpageShells().length,
-    reusedShellNode: Boolean(diffShell && diffShellNode === initialShellNode)
-  })
-  if (!diffOpened || cancelled()) return results
-
-  const diffButton = getSubpageButton('diff')
-  _assert('SN-05-diff-switcher-current', Boolean(diffButton && diffButton.disabled), {
-    disabled: diffButton?.disabled ?? null
-  })
-  const diffButtonsUniform = areVisibleShellButtonsUniform()
-  _assert('SN-05A-diff-header-buttons-uniform', diffButtonsUniform.ok, {
-    metrics: diffButtonsUniform.metrics
-  })
-
-  const diffApi = getGitDiffApi()
-  const diffExistingReady = await waitForDiffFile('existing', 'existing.md')
-  const selectedExistingInDiff = diffExistingReady && diffApi?.selectFileByPath('existing.md') === true
-  await waitFor('subpage-navigation-diff-existing-selected', () => {
-    const selected = getGitDiffApi()?.getSelectedFile?.()
-    return Boolean(selected?.filename === 'existing.md')
-  }, 8000)
-  // Switching back to Editor via SubpageSwitcher should restore the
-  // Editor's own previous state (editor-only.md), NOT open the Diff's
-  // selected file.
-  const clickedEditorFromDiff = clickSubpageButton('editor')
-  const diffToEditorOpened = clickedEditorFromDiff && await waitForProjectEditorFile('diff-restores-editor-state', 'editor-only.md')
-  _assert('SN-06-diff-to-editor-restores-editor-state', selectedExistingInDiff && diffToEditorOpened, {
-    selectedExistingInDiff,
-    clickedEditorFromDiff,
-    expected: 'editor-only.md',
-    activeFilePath: getProjectEditorApi()?.getActiveFilePath?.() ?? null
-  })
-  if (cancelled()) return results
-
-  await getProjectEditorApi()?.openFileByPathAsUser?.('editor-only.md', { trackRecent: true })
-  const editorOnlyRestored = await waitForProjectEditorFile('editor-only-restored', 'editor-only.md')
-  const clickedDiffAgain = clickSubpageButton('diff')
-  const diffRestored = clickedDiffAgain && await waitForGitDiffOpen('restore-from-editor')
-  // waitForGitDiffOpen only confirms the panel is mounted (api.isOpen()).
-  // GitDiffViewer's own [isOpen=true] restore effect re-applies the
-  // previously selected file via memory-store lookup on a follow-up render
-  // tick, so reading `getSelectedFile()` synchronously here would race the
-  // restore. Give it up to 3 s to settle before recording the value.
-  if (diffRestored) {
-    await waitFor('subpage-navigation-diff-selection-restored',
-      () => Boolean(getGitDiffApi()?.getSelectedFile?.()?.filename),
-      3000)
-  }
-  const restoredDiffSelection = getGitDiffApi()?.getSelectedFile?.()?.filename ?? null
-  _assert('SN-07-editor-to-diff-restores-diff-selection', editorOnlyRestored && diffRestored && restoredDiffSelection === 'existing.md', {
-    editorOnlyRestored,
-    clickedDiffAgain,
-    restoredDiffSelection
-  })
-  if (!diffRestored || cancelled()) return results
-
-  const clickedHistoryFromDiff = clickSubpageButton('history')
-  const historyOpened = clickedHistoryFromDiff && await waitForGitHistoryOpen('from-diff')
-  let historyShellNode: HTMLElement | null = null
-  const historyShell = await waitFor('subpage-navigation-shell-history-visible', () => {
-    const shells = getVisibleSubpageShells()
-    historyShellNode = shells.length === 1 ? shells[0] : null
-    return Boolean(historyShellNode)
-  }, 8000)
-  _assert('SN-08-diff-switch-to-history', historyOpened, {
-    clickedHistoryFromDiff,
-    historyOpen: getGitHistoryApi()?.isOpen?.() ?? false
-  })
-  _assert('SN-08A-shared-shell-reused-on-history', Boolean(historyShell && historyShellNode === initialShellNode), {
-    visibleShells: getVisibleSubpageShells().length,
-    reusedShellNode: Boolean(historyShell && historyShellNode === initialShellNode)
-  })
-  if (!historyOpened || cancelled()) return results
-
-  const historyButton = getSubpageButton('history')
-  _assert('SN-09-history-switcher-current', Boolean(historyButton && historyButton.disabled), {
-    disabled: historyButton?.disabled ?? null
-  })
-  const historyButtonsUniform = areVisibleShellButtonsUniform()
-  _assert('SN-09A-history-header-buttons-uniform', historyButtonsUniform.ok, {
-    metrics: historyButtonsUniform.metrics
-  })
-
-  const selectedUpdateCommit = await selectHistoryCommitByIndex('update-existing', 1)
-  const historyFilesLoaded = await waitFor('subpage-navigation-history-existing-file', () => {
-    const api = getGitHistoryApi()
-    return Boolean(api && !api.isLoading() && api.getFiles().some((file) => file.filename === 'existing.md'))
-  }, 8000)
-  const selectedExistingHistoryFile = await selectHistoryFileByPath('existing', 'existing.md')
-  await sleep(500)
-  const clickedDiffFromHistory = clickSubpageButton('diff')
-  const diffOpenedFromHistory = clickedDiffFromHistory && await waitForGitDiffOpen('from-history')
-  const clickedHistoryAgain = diffOpenedFromHistory && clickSubpageButton('history')
-  const historyRestored = Boolean(clickedHistoryAgain) && await waitForGitHistoryOpen('restore-from-diff')
-  const restoredHistoryFile = getGitHistoryApi()?.getSelectedFile?.()?.filename ?? null
-  _assert('SN-10-diff-to-history-restores-history-selection', Boolean(selectedUpdateCommit && historyFilesLoaded && selectedExistingHistoryFile && historyRestored && restoredHistoryFile === 'existing.md'), {
-    selectedUpdateCommit,
-    historyFilesLoaded,
-    selectedExistingHistoryFile,
-    restoredHistoryFile
-  })
-  if (cancelled()) return results
-
-  // Switching back to Editor via SubpageSwitcher should restore the
-  // Editor's own previous state, NOT open History's selected file.
-  const clickedEditorFromHistory = clickSubpageButton('editor')
-  const historyToEditorOpened = clickedEditorFromHistory && await waitForProjectEditorFile('history-restores-editor-state', 'editor-only.md')
-  _assert('SN-11-history-to-editor-restores-editor-state', historyToEditorOpened, {
-    clickedEditorFromHistory,
-    expected: 'editor-only.md',
-    activeFilePath: getProjectEditorApi()?.getActiveFilePath?.() ?? null
-  })
-  if (cancelled()) return results
-
-  await getProjectEditorApi()?.openFileByPathAsUser?.('editor-only.md', { trackRecent: true })
-  const editorOnlyBeforeHistory = await waitForProjectEditorFile('editor-only-before-history', 'editor-only.md')
-  const clickedHistoryFromEditor = clickSubpageButton('history')
-  const historyOpenedFromEditor = clickedHistoryFromEditor && await waitForGitHistoryOpen('from-editor-restore')
-  const restoredHistoryAfterEditor = getGitHistoryApi()?.getSelectedFile?.()?.filename ?? null
-  _assert('SN-12-editor-to-history-restores-history-selection', Boolean(editorOnlyBeforeHistory && historyOpenedFromEditor && restoredHistoryAfterEditor === 'existing.md'), {
-    editorOnlyBeforeHistory,
-    clickedHistoryFromEditor,
-    restoredHistoryAfterEditor
-  })
-  if (!historyOpenedFromEditor || cancelled()) return results
-
-  // SN-13 / SN-14: SubpageSwitcher no longer passes the Diff/History
-  // selected file to Editor.  Switching back should restore Editor's own
-  // state regardless of what is selected in Diff/History.
-  const selectedDeleteCommit = getGitHistoryApi()?.selectCommitByIndex(0) === true
-  const deleteFilesLoaded = await waitFor('subpage-navigation-history-deleted-file', () => {
-    const api = getGitHistoryApi()
-    return Boolean(api && !api.isLoading() && api.getFiles().some((file) => file.filename === 'history-deleted.md'))
-  }, 8000)
-  const selectedDeletedHistoryFile = await selectHistoryFileByPath('deleted', 'history-deleted.md')
-  await sleep(500)
-  const clickedEditorMissingFromHistory = clickSubpageButton('editor')
-  const historyDeletedRestored = clickedEditorMissingFromHistory && await waitForProjectEditorFile('history-deleted-restore', 'editor-only.md')
-  _assert('SN-13-history-deleted-file-does-not-override-editor', Boolean(
-    selectedDeleteCommit &&
-    deleteFilesLoaded &&
-    selectedDeletedHistoryFile &&
-    historyDeletedRestored
-  ), {
-    selectedDeleteCommit,
-    deleteFilesLoaded,
-    selectedDeletedHistoryFile,
-    expected: 'editor-only.md',
-    activeFilePath: getProjectEditorApi()?.getActiveFilePath?.() ?? null
-  })
-  if (cancelled()) return results
-
-  const clickedDiffForMissing = clickSubpageButton('diff')
-  const diffOpenedForMissing = clickedDiffForMissing && await waitForGitDiffOpen('missing')
-  const diffActiveForMissing = diffOpenedForMissing && await waitForActiveSubpage('missing-diff-active', 'diff')
-  const diffDeletedReady = await waitForDiffFile('deleted', 'diff-deleted.md')
-  const selectedDeletedDiffFile = diffDeletedReady && getGitDiffApi()?.selectFileByPath('diff-deleted.md') === true
-  await sleep(500)
-  const clickedEditorMissingFromDiff = Boolean(diffActiveForMissing) && clickSubpageButton('editor')
-  const editorActiveFromDiff = clickedEditorMissingFromDiff && await waitForActiveSubpage('diff-deleted-editor-active', 'editor')
-  const diffDeletedRestored = editorActiveFromDiff && await waitForProjectEditorFile('diff-deleted-restore', 'editor-only.md')
-  _assert('SN-14-diff-deleted-file-does-not-override-editor', Boolean(
-    diffOpenedForMissing &&
-    diffActiveForMissing &&
-    selectedDeletedDiffFile &&
-    clickedEditorMissingFromDiff &&
-    editorActiveFromDiff &&
-    diffDeletedRestored
-  ), {
-    diffOpenedForMissing,
-    diffActiveForMissing,
-    selectedDeletedDiffFile,
-    clickedEditorMissingFromDiff,
-    editorActiveFromDiff,
-    diffDeletedRestored,
-    expected: 'editor-only.md',
-    activeFilePath: getProjectEditorApi()?.getActiveFilePath?.() ?? null
-  })
-
-  if (getGitHistoryApi()?.isOpen()) {
-    dispatchEscape()
-    await sleep(400)
-  }
-  if (getGitDiffApi()?.isOpen()) {
-    dispatchEscape()
-    await sleep(400)
-  }
-
-  return results
 }

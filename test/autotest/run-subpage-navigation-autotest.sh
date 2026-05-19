@@ -26,8 +26,12 @@ rm -f "$LOG_FILE"
 # while the autotest auto-open of the Editor races against it — surfacing
 # false negatives that aren't actually app regressions.
 USER_DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/onward-subpage-nav.XXXXXX")"
+RESULTS_DIR="$REPO_ROOT/test/autotest/results"
+mkdir -p "$RESULTS_DIR"
+FIXTURE_BASE="$(mktemp -d "$RESULTS_DIR/subpage-navigation-fixtures.XXXXXX")"
 cleanup() {
   rm -rf "$USER_DATA_DIR" 2>/dev/null || true
+  rm -rf "$FIXTURE_BASE" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
@@ -35,6 +39,7 @@ echo "Starting subpage navigation autotest..."
 echo "  Binary:        $APP_BIN"
 echo "  CWD:           $ROOT_DIR"
 echo "  User data dir: $USER_DATA_DIR"
+echo "  Fixture base:  $FIXTURE_BASE"
 echo "  Log:           $LOG_FILE"
 echo ""
 
@@ -42,6 +47,7 @@ ONWARD_DEBUG=1 \
 ONWARD_AUTOTEST=1 \
 ONWARD_AUTOTEST_SUITE=subpage-navigation \
 ONWARD_AUTOTEST_CWD="$ROOT_DIR" \
+ONWARD_AUTOTEST_FIXTURE_EXTRA="$FIXTURE_BASE" \
 ONWARD_AUTOTEST_EXIT=1 \
 ONWARD_USER_DATA_DIR="$USER_DATA_DIR" \
 "$APP_BIN" > "$LOG_FILE" 2>&1 || true
