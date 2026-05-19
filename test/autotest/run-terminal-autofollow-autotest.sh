@@ -25,6 +25,10 @@ ONWARD_AUTOTEST=1 \
 ONWARD_AUTOTEST_SUITE=terminal-autofollow \
 ONWARD_AUTOTEST_CWD="$ROOT_DIR" \
 ONWARD_AUTOTEST_EXIT=1 \
+NO_COLOR=1 \
+FORCE_COLOR=0 \
+CLICOLOR=0 \
+COLORTERM= \
 "$APP_BIN" > "$LOG_FILE" 2>&1 || true
 
 if grep -q "\[AutoTest\] FAIL" "$LOG_FILE"; then
@@ -33,7 +37,7 @@ if grep -q "\[AutoTest\] FAIL" "$LOG_FILE"; then
   exit 1
 fi
 
-if ! grep -q "TA-13-fixture-completed" "$LOG_FILE"; then
+if ! grep -q "TA-15-ansi-color-output-preserved" "$LOG_FILE"; then
   echo "Terminal autofollow autotest did not complete. Log: $LOG_FILE" >&2
   tail -n 120 "$LOG_FILE" >&2
   exit 1

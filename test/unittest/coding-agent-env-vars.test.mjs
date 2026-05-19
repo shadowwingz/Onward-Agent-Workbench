@@ -8,7 +8,7 @@
  *
  * Usage:  node test/unittest/coding-agent-env-vars.test.mjs
  *
- * This test replicates the env-building logic from
+ * This test calls the same env-building helper used by
  * electron/main/ipc-handlers.ts (coding-agent:launch handler)
  * and spawns a lightweight probe script to verify the vars arrive.
  */
@@ -16,25 +16,16 @@
 import { spawn } from 'child_process'
 import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
+import {
+  applyTerminalUserEnvVars,
+  buildColorCapableTerminalEnv
+} from '../../electron/main/terminal-env.ts'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
-// ── Replicate the env-building logic from ipc-handlers.ts ──
+// ── Use the same env-building logic as ipc-handlers.ts ──
 function buildEnv(envVars) {
-  const env = { ...process.env }
-  for (const entry of envVars) {
-    let key = (entry.key || '').trim()
-    let value = entry.value ?? ''
-    // Strip surrounding quotes
-    if ((key.startsWith('"') && key.endsWith('"')) || (key.startsWith("'") && key.endsWith("'"))) {
-      key = key.slice(1, -1)
-    }
-    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-      value = value.slice(1, -1)
-    }
-    if (key) env[key] = value
-  }
-  return env
+  return applyTerminalUserEnvVars(buildColorCapableTerminalEnv(process.env), envVars)
 }
 
 // ── Spawn a node process that dumps specific env vars as JSON ──
@@ -184,6 +175,35 @@ test('duplicate keys — last value wins', async () => {
   const env = buildEnv(envVars)
   const result = await spawnProbe(env, ['TEST_DUP'])
   assertEqual(result.TEST_DUP, 'second', 'last value wins')
+})
+
+// ── Test 9: Inherited no-color flags are removed for coding agents ──
+test('inherited no-color flags are removed before spawning coding agent', async () => {
+  process.env.NO_COLOR = '1'
+  process.env.FORCE_COLOR = '0'
+  process.env.CLICOLOR = '0'
+  process.env.COLORTERM = ''
+  const env = buildEnv([])
+  delete process.env.NO_COLOR
+  delete process.env.FORCE_COLOR
+  delete process.env.CLICOLOR
+  delete process.env.COLORTERM
+
+  const result = await spawnProbe(env, ['NO_COLOR', 'FORCE_COLOR', 'CLICOLOR', 'COLORTERM'])
+  assertEqual(result.NO_COLOR, null, 'inherited NO_COLOR removed')
+  assertEqual(result.FORCE_COLOR, null, 'inherited FORCE_COLOR=0 removed')
+  assertEqual(result.CLICOLOR, '1', 'CLICOLOR advertises color support')
+  assertEqual(result.COLORTERM, 'truecolor', 'COLORTERM advertises truecolor support')
+})
+
+// ── Test 10: Explicit user no-color overrides are preserved ──
+test('explicit user no-color override wins after sanitizing', async () => {
+  process.env.NO_COLOR = '1'
+  const env = buildEnv([{ key: 'NO_COLOR', value: '1' }])
+  delete process.env.NO_COLOR
+
+  const result = await spawnProbe(env, ['NO_COLOR'])
+  assertEqual(result.NO_COLOR, '1', 'explicit user override is preserved')
 })
 
 // ── Run all tests ──

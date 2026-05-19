@@ -82,6 +82,7 @@ point at files under `test/unittest/`.
 | Wheel / PageUp scroll detaches viewport from bottom | `run-terminal-autofollow` (TA-03, TA-05) |
 | Fit / remount preserves viewport position | `run-terminal-autofollow` (TA-07, TA-08, TA-09, TA-10, TA-11) |
 | Bug fix: focus does not jump viewport (preventScroll) | `run-terminal-autofollow` (TA-12) |
+| Bug fix: inherited no-color environment does not make Task / Coding Agent output monochrome | `run-terminal-autofollow` (TA-14, TA-15) + `test/unittest/terminal-color-env.test.mts` (TCE-U-*) |
 | Terminal focus / activation across shortcuts and restore | `run-terminal-focus-activation` (TFA-01..TFA-08) |
 | Renderer surface restored after a `simulateRendererSurfaceLoss` deactivate (legacy code path) | `run-terminal-focus-activation` (TFA-09) |
 | Bug fix: blank Task + broken-image after macOS Spaces / Win virtual desktop swipe — phantom-blank canvas re-rendered after a host surface event (path B `clearTextureAtlas` + `terminal.refresh`) and real WebGL context loss follows VS Code-aligned DOM fallback semantics | `run-terminal-focus-activation` (TFA-10..TFA-18) |

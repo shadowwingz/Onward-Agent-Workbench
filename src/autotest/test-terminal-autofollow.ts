@@ -22,6 +22,7 @@ export async function testTerminalAutofollow(ctx: AutotestContext): Promise<Test
   // route the fixture lookup to ~/test/autotest/fixtures/... and fail immediately.
   const fixtureRootPath = window.electronAPI.debug.autotestCwd || rootPath
   const fixturePath = `${fixtureRootPath}${separator}test${separator}autotest${separator}fixtures${separator}terminal-autofollow-repro.mjs`
+  const colorFixturePath = `${fixtureRootPath}${separator}test${separator}autotest${separator}fixtures${separator}terminal-color-env-probe.mjs`
 
   const execCommand = async (command: string, label: string, waitMs = 300) => {
     await window.electronAPI.terminal.write(terminalId, `${command}\r`)
@@ -39,6 +40,9 @@ export async function testTerminalAutofollow(ctx: AutotestContext): Promise<Test
     }
     return samples
   }
+  const stripAnsi = (text: string) => text
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
+    .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, '')
 
   const apiReady = await waitFor('terminal-debug-api', () => Boolean(debugApi()), 8000)
   record('TA-00-terminal-debug-api', apiReady, { available: apiReady })
@@ -265,6 +269,42 @@ export async function testTerminalAutofollow(ctx: AutotestContext): Promise<Test
     viewport: readViewport(api),
     sessionState: api.getSessionState(terminalId)
   })
+  if (!fixtureCompleted || cancelled()) return results
+
+  let colorOutput = ''
+  const unsubscribeColorCapture = window.electronAPI.terminal.onData((termId, data) => {
+    if (termId === terminalId) colorOutput += data
+  })
+  try {
+    await execCommand(`node "${colorFixturePath}"`, 'color-env-probe', 200)
+    const colorProbeCompleted = await waitFor('terminal-color-env-probe-finished', () => {
+      return colorOutput.includes('__AUTOTEST_COLOR_ENV_END__')
+    }, 8000, 120)
+    const normalizedColorOutput = stripAnsi(colorOutput)
+    record(
+      'TA-14-color-env-sanitized',
+      colorProbeCompleted &&
+        !/^NO_COLOR=/m.test(normalizedColorOutput) &&
+        !/^FORCE_COLOR=0$/m.test(normalizedColorOutput) &&
+        !/^CLICOLOR=0$/m.test(normalizedColorOutput) &&
+        /^COLORTERM=truecolor$/m.test(normalizedColorOutput) &&
+        /^CLICOLOR=1$/m.test(normalizedColorOutput),
+      {
+        colorFixturePath,
+        output: normalizedColorOutput
+      }
+    )
+    record(
+      'TA-15-ansi-color-output-preserved',
+      colorProbeCompleted && colorOutput.includes('\x1b[31m__AUTOTEST_COLOR_RED__\x1b[0m'),
+      {
+        colorFixturePath,
+        output: normalizedColorOutput
+      }
+    )
+  } finally {
+    unsubscribeColorCapture()
+  }
 
   log('terminal-autofollow:done', {
     total: results.length,

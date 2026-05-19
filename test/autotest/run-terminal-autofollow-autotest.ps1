@@ -40,6 +40,10 @@ $env:ONWARD_AUTOTEST = "1"
 $env:ONWARD_AUTOTEST_SUITE = "terminal-autofollow"
 $env:ONWARD_AUTOTEST_CWD = $RootDir
 $env:ONWARD_AUTOTEST_EXIT = "1"
+$env:NO_COLOR = "1"
+$env:FORCE_COLOR = "0"
+$env:CLICOLOR = "0"
+$env:COLORTERM = ""
 
 try {
   & $AppBin *> $LogFile
@@ -54,7 +58,7 @@ if ($logContent -match "\[AutoTest\] FAIL") {
   exit 1
 }
 
-if ($logContent -notmatch "TA-13-fixture-completed") {
+if ($logContent -notmatch "TA-15-ansi-color-output-preserved") {
   Write-Error "Terminal autofollow autotest did not complete. Log: $LogFile"
   Get-Content $LogFile -Tail 120
   exit 1

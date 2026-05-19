@@ -12,6 +12,7 @@ import { app } from 'electron'
 import { getApiPort } from './api-server'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 import { performanceTrace } from './performance-trace'
+import { buildColorCapableTerminalEnv } from './terminal-env'
 
 export interface PtyOptions {
   cols?: number
@@ -148,6 +149,7 @@ export class PtyManager {
     }
 
     const initialCwd = cwd || process.env.HOME || process.env.USERPROFILE || process.cwd()
+    const inheritedEnv = env ? { ...env } : buildColorCapableTerminalEnv(process.env)
 
     const spawnStartMs = Date.now()
     const spawnStartUs = performanceTrace.nowUs()
@@ -159,7 +161,7 @@ export class PtyManager {
         rows,
         cwd: initialCwd,
         env: {
-          ...this.getAugmentedEnv(env || process.env),
+          ...this.getAugmentedEnv(inheritedEnv),
           // Ensure correct UTF-8 locale (if not set on the system)
           LANG: process.env.LANG || 'en_US.UTF-8',
           LC_ALL: process.env.LC_ALL || '',

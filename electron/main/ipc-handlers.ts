@@ -17,6 +17,7 @@ import { getAppStateStorage, AppState } from './app-state-storage'
 import { readCurrentChangelog } from './changelog'
 import { getTelemetryService } from './telemetry/telemetry-service'
 import { getTelemetryConsent, setTelemetryConsent } from './telemetry/telemetry-consent'
+import { applyTerminalUserEnvVars, buildColorCapableTerminalEnv } from './terminal-env'
 import { getTerminalCwd, getTerminalGitInfo } from './git-utils'
 import type {
   GitFileContentRequestOptions,
@@ -1577,21 +1578,10 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
     const rows = payload.rows || 24
     const restartCwd = cwd || process.env.HOME || process.cwd()
 
-    // Build environment: merge user-specified environment variables
-    const env: NodeJS.ProcessEnv = { ...process.env }
+    // Build environment: isolate inherited terminal color-disabling flags, then
+    // merge user-specified environment variables so explicit overrides still win.
     const userEnvVars = Array.isArray(config.envVars) ? config.envVars : []
-    for (const entry of userEnvVars) {
-      let key = (entry.key || '').trim()
-      let value = entry.value ?? ''
-      // Strip surrounding quotes — users may copy KEY="value" from docs
-      if ((key.startsWith('"') && key.endsWith('"')) || (key.startsWith("'") && key.endsWith("'"))) {
-        key = key.slice(1, -1)
-      }
-      if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-        value = value.slice(1, -1)
-      }
-      if (key) env[key] = value
-    }
+    const env = applyTerminalUserEnvVars(buildColorCapableTerminalEnv(process.env), userEnvVars)
 
     // Parse user-provided extra arguments with shell-aware quoting
     const extraArgs: string[] = []
