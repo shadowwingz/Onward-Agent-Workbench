@@ -15,6 +15,8 @@ const CODE_WRAP_FIXTURE_PATH = 'test/autotest/fixtures/markdown-code-wrap.md'
 const CODE_OUTLINE_FIXTURE_PATH = 'test/autotest/fixtures/outline-fixture.py'
 const SVG_DATA_URL_PREFIX = 'data:image/svg+xml;base64,'
 const PNG_DATA_URL_PREFIX = 'data:image/png;base64,'
+const SVG_IMAGE_MARKER = 'markdown-preview-dot.svg'
+const PNG_IMAGE_MARKER = 'test-preview.png'
 
 export async function testProjectEditorMarkdownNavigation(ctx: AutotestContext): Promise<TestResult[]> {
   const { assert, cancelled, openFileInEditor, reopenProjectEditor, sleep, waitFor } = ctx
@@ -25,6 +27,13 @@ export async function testProjectEditorMarkdownNavigation(ctx: AutotestContext):
   }
 
   const getApi = () => window.__onwardProjectEditorDebug
+  const hasExpectedImageSource = (html: string, sources: string[], dataPrefix: string, fileMarker: string) => {
+    return (
+      html.includes(`src="${dataPrefix}`) ||
+      html.includes(fileMarker) ||
+      sources.some((source) => source.startsWith(dataPrefix) || source.includes(fileMarker))
+    )
+  }
   const waitForMarkdownFile = async (label: string, filePath: string, text: string) => {
     return waitFor(
       label,
@@ -79,6 +88,10 @@ export async function testProjectEditorMarkdownNavigation(ctx: AutotestContext):
   })
   if (!rendered || cancelled()) return results
 
+  getApi()?.setSidebarMode?.('files')
+  getApi()?.setFileBrowserCollapsed?.(false)
+  getApi()?.setOutlineVisible?.(true)
+
   const outlineReady = await waitFor(
     'pmn-outline-ready',
     () => {
@@ -93,6 +106,63 @@ export async function testProjectEditorMarkdownNavigation(ctx: AutotestContext):
     symbolCount: getApi()?.getOutlineSymbolCount?.() ?? 0
   })
   if (!outlineReady || cancelled()) return results
+
+  const canCollapseFileBrowser = Boolean(
+    getApi()?.setFileBrowserCollapsed &&
+    getApi()?.isFileBrowserCollapsed &&
+    getApi()?.getFileBrowserPanelState
+  )
+  record('PMN-03b-file-browser-collapse-api-available', canCollapseFileBrowser)
+  if (canCollapseFileBrowser) {
+    getApi()?.setFileBrowserCollapsed?.(false)
+    const expandedBeforeCollapse = await waitFor(
+      'pmn-file-browser-expanded-before-collapse',
+      () => getApi()?.isFileBrowserCollapsed?.() === false && getApi()?.getFileBrowserPanelState?.().hasTree === true,
+      3000,
+      80
+    )
+    getApi()?.setFileBrowserCollapsed?.(true)
+    const collapsed = await waitFor(
+      'pmn-file-browser-collapsed',
+      () => {
+        const state = getApi()?.getFileBrowserPanelState?.()
+        return Boolean(
+          getApi()?.isFileBrowserCollapsed?.() === true &&
+          state?.collapsed &&
+          state.hasRestoreButton &&
+          !state.hasTree &&
+          !state.hasResizer &&
+          state.sidebarWidth <= 42
+        )
+      },
+      3000,
+      80
+    )
+    const collapsedState = getApi()?.getFileBrowserPanelState?.() ?? null
+    record('PMN-03c-file-browser-collapses', Boolean(expandedBeforeCollapse && collapsed), {
+      expandedBeforeCollapse,
+      collapsedState
+    })
+    getApi()?.setFileBrowserCollapsed?.(false)
+    const expanded = await waitFor(
+      'pmn-file-browser-expanded-after-collapse',
+      () => {
+        const state = getApi()?.getFileBrowserPanelState?.()
+        return Boolean(
+          getApi()?.isFileBrowserCollapsed?.() === false &&
+          state?.hasTree &&
+          state.hasResizer &&
+          state.sidebarWidth >= 180
+        )
+      },
+      3000,
+      80
+    )
+    record('PMN-03d-file-browser-expands', expanded, {
+      expandedState: getApi()?.getFileBrowserPanelState?.() ?? null
+    })
+    if (!expanded || cancelled()) return results
+  }
 
   const highlightFixture = await window.electronAPI.project.readFile(ctx.rootPath, HIGHLIGHT_FIXTURE_PATH)
   record('PMN-04-highlight-fixture-exists', highlightFixture.success, {
@@ -142,28 +212,30 @@ export async function testProjectEditorMarkdownNavigation(ctx: AutotestContext):
       if (current?.isMarkdownRenderPending?.()) return false
       const html = current?.getMarkdownRenderedHtml?.() ?? ''
       const imageState = current?.getMarkdownPreviewImageState?.()
+      const sources = imageState?.sources ?? []
       return (
         html.includes('AUTOTEST_IMAGE_ORIGINAL') &&
         html.includes('<img') &&
-        html.includes(`src="${SVG_DATA_URL_PREFIX}`) &&
-        html.includes(`src="${PNG_DATA_URL_PREFIX}`) &&
+        hasExpectedImageSource(html, sources, SVG_DATA_URL_PREFIX, SVG_IMAGE_MARKER) &&
+        hasExpectedImageSource(html, sources, PNG_DATA_URL_PREFIX, PNG_IMAGE_MARKER) &&
         (imageState?.count ?? 0) >= 2 &&
-        (imageState?.loadedCount ?? 0) > 0 &&
-        (imageState?.brokenCount ?? 0) === 0 &&
-        (imageState?.sources ?? []).some((source) => source.startsWith(SVG_DATA_URL_PREFIX)) &&
-        (imageState?.sources ?? []).some((source) => source.startsWith(PNG_DATA_URL_PREFIX))
+        (imageState?.loadedCount ?? 0) >= 2 &&
+        (imageState?.brokenCount ?? 0) === 0
       )
     },
     15000,
     120
   )
-  record('PMN-07-markdown-image-rendered-as-data-url', imageRendered, {
+  const imageRenderedHtml = getApi()?.getMarkdownRenderedHtml?.() ?? ''
+  const imageRenderedState = getApi()?.getMarkdownPreviewImageState?.()
+  const imageRenderedSources = imageRenderedState?.sources ?? []
+  record('PMN-07-markdown-image-rendered', imageRendered, {
     activeFilePath: getApi()?.getActiveFilePath?.() ?? null,
-    htmlLength: getApi()?.getMarkdownRenderedHtml?.().length ?? 0,
-    hasImageTag: (getApi()?.getMarkdownRenderedHtml?.() ?? '').includes('<img'),
-    hasSvgDataImage: (getApi()?.getMarkdownRenderedHtml?.() ?? '').includes(`src="${SVG_DATA_URL_PREFIX}`),
-    hasPngDataImage: (getApi()?.getMarkdownRenderedHtml?.() ?? '').includes(`src="${PNG_DATA_URL_PREFIX}`),
-    imageState: getApi()?.getMarkdownPreviewImageState?.() ?? null
+    htmlLength: imageRenderedHtml.length,
+    hasImageTag: imageRenderedHtml.includes('<img'),
+    hasSvgPreviewImage: hasExpectedImageSource(imageRenderedHtml, imageRenderedSources, SVG_DATA_URL_PREFIX, SVG_IMAGE_MARKER),
+    hasPngPreviewImage: hasExpectedImageSource(imageRenderedHtml, imageRenderedSources, PNG_DATA_URL_PREFIX, PNG_IMAGE_MARKER),
+    imageState: imageRenderedState ?? null
   })
   if (!imageRendered || cancelled()) return results
 
@@ -182,29 +254,31 @@ export async function testProjectEditorMarkdownNavigation(ctx: AutotestContext):
       if (current?.isMarkdownRenderPending?.()) return false
       const html = current?.getMarkdownRenderedHtml?.() ?? ''
       const imageState = current?.getMarkdownPreviewImageState?.()
+      const sources = imageState?.sources ?? []
       return (
         html.includes('AUTOTEST_IMAGE_EDITED') &&
         html.includes('<img') &&
-        html.includes(`src="${SVG_DATA_URL_PREFIX}`) &&
-        html.includes(`src="${PNG_DATA_URL_PREFIX}`) &&
+        hasExpectedImageSource(html, sources, SVG_DATA_URL_PREFIX, SVG_IMAGE_MARKER) &&
+        hasExpectedImageSource(html, sources, PNG_DATA_URL_PREFIX, PNG_IMAGE_MARKER) &&
         (imageState?.count ?? 0) >= 2 &&
-        (imageState?.loadedCount ?? 0) > 0 &&
-        (imageState?.brokenCount ?? 0) === 0 &&
-        (imageState?.sources ?? []).some((source) => source.startsWith(SVG_DATA_URL_PREFIX)) &&
-        (imageState?.sources ?? []).some((source) => source.startsWith(PNG_DATA_URL_PREFIX))
+        (imageState?.loadedCount ?? 0) >= 2 &&
+        (imageState?.brokenCount ?? 0) === 0
       )
     },
     15000,
     120
   )
+  const editedImageHtml = getApi()?.getMarkdownRenderedHtml?.() ?? ''
+  const editedImageState = getApi()?.getMarkdownPreviewImageState?.()
+  const editedImageSources = editedImageState?.sources ?? []
   record('PMN-09-markdown-image-persists-after-edit', imageStillRenderedAfterEdit, {
     activeFilePath: getApi()?.getActiveFilePath?.() ?? null,
-    htmlLength: getApi()?.getMarkdownRenderedHtml?.().length ?? 0,
-    hasEditedMarker: (getApi()?.getMarkdownRenderedHtml?.() ?? '').includes('AUTOTEST_IMAGE_EDITED'),
-    hasImageTag: (getApi()?.getMarkdownRenderedHtml?.() ?? '').includes('<img'),
-    hasSvgDataImage: (getApi()?.getMarkdownRenderedHtml?.() ?? '').includes(`src="${SVG_DATA_URL_PREFIX}`),
-    hasPngDataImage: (getApi()?.getMarkdownRenderedHtml?.() ?? '').includes(`src="${PNG_DATA_URL_PREFIX}`),
-    imageState: getApi()?.getMarkdownPreviewImageState?.() ?? null
+    htmlLength: editedImageHtml.length,
+    hasEditedMarker: editedImageHtml.includes('AUTOTEST_IMAGE_EDITED'),
+    hasImageTag: editedImageHtml.includes('<img'),
+    hasSvgPreviewImage: hasExpectedImageSource(editedImageHtml, editedImageSources, SVG_DATA_URL_PREFIX, SVG_IMAGE_MARKER),
+    hasPngPreviewImage: hasExpectedImageSource(editedImageHtml, editedImageSources, PNG_DATA_URL_PREFIX, PNG_IMAGE_MARKER),
+    imageState: editedImageState ?? null
   })
   if (!imageStillRenderedAfterEdit || cancelled()) return results
 

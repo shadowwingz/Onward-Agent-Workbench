@@ -1,0 +1,63 @@
+<!--
+SPDX-FileCopyrightText: 2026 OPPO
+SPDX-License-Identifier: Apache-2.0
+-->
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>HTML Preview Autotest</title>
+    <link rel="stylesheet" href="__HTML_PREVIEW_SERVER_URL__/external.css">
+    <style>
+      body {
+        margin: 0;
+        font-family: system-ui, sans-serif;
+        color: #1f2937;
+        background: #f8fafc;
+      }
+
+      main {
+        max-width: 760px;
+        margin: 0 auto;
+        padding: 32px;
+      }
+
+      .panel {
+        border: 1px solid #cbd5e1;
+        border-radius: 8px;
+        background: #ffffff;
+        padding: 20px;
+      }
+
+      .spacer {
+        min-height: 900px;
+      }
+    </style>
+    <script src="__HTML_PREVIEW_SERVER_URL__/external.js"></script>
+  </head>
+  <body data-onward-html-preview-fixture="initial">
+    <main>
+      <section class="panel">
+        <h1>HTML Preview Autotest</h1>
+        <p data-save-marker>INITIAL_HTML_MARKER</p>
+        <p id="external-status">external pending</p>
+        <p id="local-status">local pending</p>
+        <img id="local-image" src="./local-dot.svg" alt="local fixture image" width="24" height="24">
+      </section>
+      <section class="spacer" aria-label="scroll spacer">
+        <p>HTML_SEARCH_TARGET alpha</p>
+        <p>HTML_SEARCH_TARGET beta</p>
+      </section>
+      <section class="panel">
+        <h2>Scroll target</h2>
+        <p>HTML_SCROLL_TARGET should stay near the same viewport after a forced refresh.</p>
+        <p>HTML_SEARCH_TARGET gamma</p>
+      </section>
+    </main>
+    <script>
+      window.__ONWARD_HTML_LOCAL_READY = true;
+      document.getElementById('local-status').textContent = 'local script ready';
+    </script>
+  </body>
+</html>

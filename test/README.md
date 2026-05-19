@@ -156,6 +156,8 @@ point at files under `test/unittest/`.
 | Feature / Bug | Tests |
 |---|---|
 | Markdown preview renders highlight / image / outline | `run-project-editor-markdown-navigation` (PMN-01..09) |
+| HTML source editing plus WebContents preview with local file assets, HTTP script access, persistent force refresh, splitter drag, WebContents search, HTML Preview zoom, and scroll-preserving fresh reload | `run-project-editor-html-preview` (PHTML-00..15) |
+| Project Editor File Browser collapse / expand | `run-project-editor-markdown-navigation` (PMN-03b..03d) |
 | Outline scroll memory across switches and reopens | `run-project-editor-markdown-navigation` (PMN-13..17, PMN-40..44) |
 | Code-outline (TS / py) symbols + scroll memory | `run-project-editor-markdown-navigation` (PMN-18..23) |
 | Read mode keeps preview open on edit toggle | `run-project-editor-markdown-navigation` (PMN-24) |

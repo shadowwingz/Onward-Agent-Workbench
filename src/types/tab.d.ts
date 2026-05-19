@@ -230,8 +230,10 @@ export interface UIPreferences {
   promptInputMode?: 'canvas' | 'line'
   // Project Editor
   projectEditorFileTreeWidth?: number
+  projectEditorFileBrowserCollapsed?: boolean
   projectEditorModalSize?: { width: number; height: number }
   projectEditorMarkdownPreviewWidth?: number
+  projectEditorHtmlPreviewZoomFactor?: number
   projectEditorMarkdownEditorVisible?: boolean
   projectEditorOutlineVisible?: boolean
   projectEditorOutlineWidth?: number

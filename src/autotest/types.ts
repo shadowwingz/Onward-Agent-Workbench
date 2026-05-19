@@ -459,6 +459,52 @@ export interface ProjectEditorDebugApi {
     contentHtmlLen: number
     currentLocationHref: string | null
   } | null
+  isHtmlReaderVisible?: () => boolean
+  getHtmlReaderState?: () => {
+    browserId: string
+    filePath: string
+    url: string
+    title: string
+    ready: boolean
+    visible: boolean
+    isLoading: boolean
+    loadCount: number
+    reloadKey: number
+    error: string | null
+    preservedScrollState?: {
+      x: number
+      y: number
+      scrollWidth: number
+      scrollHeight: number
+      clientWidth: number
+      clientHeight: number
+    } | null
+  } | null
+  getHtmlPreviewDocumentState?: () => Promise<{
+    success: boolean
+    error?: string
+    title?: string
+    readyState?: string
+    bodyText?: string
+    bodyDatasetMarker?: string | null
+    externalReady?: boolean
+    localReady?: boolean
+    saveMarker?: string | null
+    imageCount?: number
+    loadedImageCount?: number
+    brokenImageCount?: number
+    scrollX?: number
+    scrollY?: number
+    scrollHeight?: number
+    scrollWidth?: number
+    clientHeight?: number
+    clientWidth?: number
+  } | null>
+  setHtmlPreviewScrollForTest?: (y: number) => Promise<boolean>
+  getHtmlPreviewZoomFactor?: () => number
+  setHtmlPreviewZoomFactor?: (zoomFactor: number) => Promise<boolean>
+  stepHtmlPreviewZoom?: (direction: 'in' | 'out' | 'reset') => Promise<boolean>
+  getHtmlPreviewBrowserZoomFactor?: () => Promise<number | null>
   getImageFilePreviewState?: () => {
     visible: boolean
     loaded: boolean
@@ -478,6 +524,16 @@ export interface ProjectEditorDebugApi {
   } | null
   getFileBrowserExpandedDirs?: () => string[]
   clickLocateFileButton?: () => boolean
+  isFileBrowserCollapsed?: () => boolean
+  setFileBrowserCollapsed?: (collapsed: boolean) => void
+  getFileBrowserPanelState?: () => {
+    collapsed: boolean
+    sidebarWidth: number
+    editorWidth: number
+    hasRestoreButton: boolean
+    hasTree: boolean
+    hasResizer: boolean
+  }
   getOutlineActiveItemBounds?: () => {
     found: boolean
     containerTop: number
@@ -515,6 +571,18 @@ export interface ProjectEditorDebugApi {
     containerHeight: number
     offset: number
   } | null
+  setHtmlPreviewSearchOpen?: (open: boolean) => void
+  isHtmlPreviewSearchOpen?: () => boolean
+  htmlPreviewSearchSetQuery?: (query: string) => void
+  htmlPreviewSearchGoToNext?: () => void
+  htmlPreviewSearchGoToPrevious?: () => void
+  getHtmlPreviewSearchState?: () => {
+    open: boolean
+    query: string
+    matches: number
+    activeMatchOrdinal: number
+    finalUpdate: boolean
+  }
   isMarkdownRenderPending: () => boolean
   getMarkdownRenderedHtml: () => string
   getMarkdownPreviewImageState?: () => {

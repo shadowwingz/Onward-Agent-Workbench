@@ -224,6 +224,10 @@ export const PERF_TRACE_EVENT = {
 
   // ───────── Renderer — user input: project editor ─────────
   RENDERER_PROJECT_FILE_OPEN: 'renderer:project.file-open',
+  RENDERER_PROJECT_HTML_PREVIEW_RELOAD: 'renderer:project.html-preview-reload',
+  RENDERER_PROJECT_HTML_PREVIEW_SEARCH: 'renderer:project.html-preview-search',
+  RENDERER_PROJECT_HTML_PREVIEW_ZOOM: 'renderer:project.html-preview-zoom',
+  RENDERER_PROJECT_FILE_BROWSER_COLLAPSE: 'renderer:project.file-browser-collapse',
   RENDERER_PROJECT_EDITOR_REOPEN_RESTORE: 'renderer:project.editor-reopen-restore',
   RENDERER_PROJECT_SUBPAGE_NAVIGATE: 'renderer:project.subpage-navigate',
   RENDERER_PROJECT_SEARCH_GLOBAL: 'renderer:project.search.global',

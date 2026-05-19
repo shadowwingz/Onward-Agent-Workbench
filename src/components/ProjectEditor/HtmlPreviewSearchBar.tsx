@@ -3,61 +3,39 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef } from 'react'
-import { useI18n } from '../../../i18n/useI18n'
-import { usePreviewSearch, type PreviewSearchMatchPosition } from './usePreviewSearch'
-import './PreviewSearchBar.css'
+import { useCallback, useEffect, useMemo, useRef } from 'react'
+import { useI18n } from '../../i18n/useI18n'
+import './PreviewSearch/PreviewSearchBar.css'
 
-export interface PreviewSearchHandle {
-  setQuery: (query: string) => void
-  goToNext: () => void
-  goToPrevious: () => void
-  getMatchCount: () => number
-  getCurrentIndex: () => number
-  /**
-   * Returns the cached mark positions for the current query. Read-only and
-   * does not force layout — intended for the autotest debug hook so that
-   * repeated calls during navigation stress tests stay O(1) instead of
-   * O(match count) per call.
-   */
-  getCachedMatchPositions: () => PreviewSearchMatchPosition[]
+export interface HtmlPreviewSearchResult {
+  matches: number
+  activeMatchOrdinal: number
+  finalUpdate: boolean
 }
 
-interface PreviewSearchBarProps {
-  previewRef: React.RefObject<HTMLDivElement | null>
+interface HtmlPreviewSearchBarProps {
   isOpen: boolean
-  focusRequestId?: number
+  focusRequestId: number
+  query: string
+  result: HtmlPreviewSearchResult
+  onQueryChange: (query: string) => void
+  onNext: () => void
+  onPrevious: () => void
   onClose: () => void
-  renderedHtml: string
 }
 
-export const PreviewSearchBar = forwardRef<PreviewSearchHandle, PreviewSearchBarProps>(function PreviewSearchBar({ previewRef, isOpen, focusRequestId = 0, onClose, renderedHtml }, ref) {
+export function HtmlPreviewSearchBar({
+  isOpen,
+  focusRequestId,
+  query,
+  result,
+  onQueryChange,
+  onNext,
+  onPrevious,
+  onClose
+}: HtmlPreviewSearchBarProps) {
   const { t } = useI18n()
   const inputRef = useRef<HTMLInputElement>(null)
-  const {
-    query,
-    setQuery,
-    matchCount,
-    currentIndex,
-    goToNext,
-    goToPrevious,
-    getCachedMatchPositions,
-    getMatchCount,
-    getCurrentIndex,
-  } = usePreviewSearch({
-    previewRef,
-    isOpen,
-    renderedHtml,
-  })
-
-  useImperativeHandle(ref, () => ({
-    setQuery,
-    goToNext,
-    goToPrevious,
-    getMatchCount,
-    getCurrentIndex,
-    getCachedMatchPositions,
-  }), [setQuery, goToNext, goToPrevious, getMatchCount, getCurrentIndex, getCachedMatchPositions])
 
   const focusInput = useCallback(() => {
     window.focus()
@@ -87,12 +65,12 @@ export const PreviewSearchBar = forwardRef<PreviewSearchHandle, PreviewSearchBar
     if (event.key === 'Enter') {
       event.preventDefault()
       if (event.shiftKey) {
-        goToPrevious()
+        onPrevious()
       } else {
-        goToNext()
+        onNext()
       }
     }
-  }, [goToNext, goToPrevious, onClose])
+  }, [onClose, onNext, onPrevious])
 
   const preventButtonFocusSteal = useCallback((event: React.MouseEvent<HTMLButtonElement>) => {
     event.preventDefault()
@@ -118,12 +96,13 @@ export const PreviewSearchBar = forwardRef<PreviewSearchHandle, PreviewSearchBar
 
   const countText = useMemo(() => {
     if (!query) return ''
-    if (matchCount === 0) return t('projectEditor.previewSearch.noMatches')
+    if (result.finalUpdate && result.matches === 0) return t('projectEditor.previewSearch.noMatches')
+    if (result.matches <= 0) return ''
     return t('projectEditor.previewSearch.count', {
-      current: String(currentIndex + 1),
-      total: `${matchCount}${matchCount >= 1000 ? '+' : ''}`,
+      current: String(Math.max(1, result.activeMatchOrdinal)),
+      total: String(result.matches)
     })
-  }, [currentIndex, matchCount, query, t])
+  }, [query, result.activeMatchOrdinal, result.finalUpdate, result.matches, t])
 
   if (!isOpen) return null
 
@@ -135,17 +114,17 @@ export const PreviewSearchBar = forwardRef<PreviewSearchHandle, PreviewSearchBar
         type="text"
         placeholder={t('projectEditor.previewSearch.placeholder')}
         value={query}
-        onChange={(event) => setQuery(event.target.value)}
+        onChange={(event) => onQueryChange(event.target.value)}
         onKeyDown={handleKeyDown}
       />
       <span className="preview-search-count">{countText}</span>
       <button
         type="button"
         className="preview-search-nav-btn"
-        title={t('projectEditor.previewSearch.previous')}
+        aria-label={t('projectEditor.previewSearch.previous')}
         onMouseDown={preventButtonFocusSteal}
-        onClick={goToPrevious}
-        disabled={matchCount === 0}
+        onClick={onPrevious}
+        disabled={result.matches === 0}
       >
         <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
           <path d="M7.646 4.646a.5.5 0 0 1 .708 0l4 4a.5.5 0 0 1-.708.708L8 5.707 4.354 9.354a.5.5 0 1 1-.708-.708l4-4z" />
@@ -154,10 +133,10 @@ export const PreviewSearchBar = forwardRef<PreviewSearchHandle, PreviewSearchBar
       <button
         type="button"
         className="preview-search-nav-btn"
-        title={t('projectEditor.previewSearch.next')}
+        aria-label={t('projectEditor.previewSearch.next')}
         onMouseDown={preventButtonFocusSteal}
-        onClick={goToNext}
-        disabled={matchCount === 0}
+        onClick={onNext}
+        disabled={result.matches === 0}
       >
         <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
           <path d="M8.354 11.354a.5.5 0 0 1-.708 0l-4-4a.5.5 0 0 1 .708-.708L8 10.293l3.646-3.647a.5.5 0 0 1 .708.708l-4 4z" />
@@ -177,4 +156,4 @@ export const PreviewSearchBar = forwardRef<PreviewSearchHandle, PreviewSearchBar
       </button>
     </div>
   )
-})
+}

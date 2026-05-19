@@ -122,6 +122,37 @@ export async function testPreviewSearch(ctx: AutotestContext): Promise<TestResul
   // Ensure preview is visible and search is open
   api.setMarkdownPreviewVisible?.(true)
   await sleep(300)
+  const markdownPreviewHeaderTexts = Array.from(document.querySelectorAll<HTMLElement>('.project-editor-preview-header-main span'))
+    .map((node) => node.textContent?.trim() ?? '')
+  record('PS-02a-markdown-preview-title-case', markdownPreviewHeaderTexts.includes('Markdown Preview'), {
+    headerTexts: markdownPreviewHeaderTexts,
+  })
+  if (cancelled()) return results
+
+  const markdownPaneBeforeResize = document.querySelector<HTMLElement>('.project-editor-preview-pane')
+  const markdownResizer = document.querySelector<HTMLElement>('.project-editor-preview-resizer')
+  const markdownBeforeResizeWidth = markdownPaneBeforeResize?.getBoundingClientRect().width ?? 0
+  if (markdownResizer) {
+    const rect = markdownResizer.getBoundingClientRect()
+    const startX = rect.left + rect.width / 2
+    markdownResizer.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, clientX: startX }))
+    document.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, cancelable: true, clientX: startX + 90 }))
+    document.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, clientX: startX + 90 }))
+  }
+  await sleep(250)
+  const markdownPaneAfterResize = document.querySelector<HTMLElement>('.project-editor-preview-pane')
+  const markdownAfterResizeWidth = markdownPaneAfterResize?.getBoundingClientRect().width ?? 0
+  record('PS-02b-markdown-preview-resizer-drags', Boolean(
+    markdownResizer &&
+    markdownBeforeResizeWidth > 0 &&
+    Math.abs(markdownAfterResizeWidth - markdownBeforeResizeWidth) >= 20
+  ), {
+    hasResizer: Boolean(markdownResizer),
+    beforeResizeWidth: markdownBeforeResizeWidth,
+    afterResizeWidth: markdownAfterResizeWidth,
+  })
+  if (cancelled()) return results
+
   api.setPreviewSearchOpen!(true)
 
   const searchOpen = await waitFor('PS-02-search-open', () => {
@@ -370,8 +401,38 @@ export async function testPreviewSearch(ctx: AutotestContext): Promise<TestResul
   if (cancelled()) return results
 
   // ----------------------------------------------------------------
-  // PS-11: Close search, verify cleanup
+  // PS-11: Close via the visible X button, verify cleanup and no native title tooltip
   // ----------------------------------------------------------------
+  api.setPreviewSearchOpen!(true)
+  await sleep(200)
+  api.previewSearchSetQuery!(SEARCH_KEYWORD)
+  await sleep(300)
+  const closeButton = document.querySelector<HTMLButtonElement>('.preview-search-close-btn')
+  const closeButtonTitle = closeButton?.getAttribute('title') ?? null
+  const closeButtonAria = closeButton?.getAttribute('aria-label') ?? null
+  closeButton?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))
+  await sleep(350)
+  const closeButtonClosed = !api.isPreviewSearchOpen!()
+  record('PS-11-close-button-closes-cleanly', Boolean(
+    closeButton &&
+    closeButtonClosed &&
+    closeButtonTitle === null &&
+    !/esc|escape/i.test(closeButtonAria ?? '')
+  ), {
+    hadCloseButton: Boolean(closeButton),
+    closeButtonClosed,
+    closeButtonTitle,
+    closeButtonAria,
+  })
+  if (cancelled()) return results
+
+  // ----------------------------------------------------------------
+  // PS-11b: Close through debug API, verify cleanup
+  // ----------------------------------------------------------------
+  api.setPreviewSearchOpen!(true)
+  await sleep(200)
+  api.previewSearchSetQuery!(SEARCH_KEYWORD)
+  await sleep(300)
   api.setPreviewSearchOpen!(false)
   await sleep(300)
 
@@ -380,7 +441,7 @@ export async function testPreviewSearch(ctx: AutotestContext): Promise<TestResul
   const indexAfterClose = api.getPreviewSearchCurrentIndex!()
   const remainingMarks = preview?.querySelectorAll('mark.preview-search-highlight').length ?? -1
 
-  record('PS-11-close-cleanup', searchClosed && matchCountAfterClose === 0 && indexAfterClose === -1 && remainingMarks === 0, {
+  record('PS-11b-close-cleanup', searchClosed && matchCountAfterClose === 0 && indexAfterClose === -1 && remainingMarks === 0, {
     searchClosed,
     matchCountAfterClose,
     indexAfterClose,
