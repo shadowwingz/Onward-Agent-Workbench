@@ -36,6 +36,13 @@ import { GitEpubCompare, type GitEpubStatus } from '../GitEpubCompare/GitEpubCom
 import { inspectPdfCompareDom, inspectEpubCompareDom } from '../GitDiffViewer/GitDiffViewer'
 import { usePathCopy } from '../../hooks/usePathCopy'
 import { useCwdCopyHandler } from '../../hooks/useCwdCopyHandler'
+import {
+  coerceGitHistoryDiffDisplayMode,
+  resolveGitHistoryDiffDisplayMode,
+  toGitHistoryPatchDiffStyle,
+  type GitHistoryDiffDisplayMode,
+  type GitHistoryPatchDiffStyle
+} from './diffDisplayMode'
 import '../../styles/path-copy-toast.css'
 import './GitHistoryViewer.css'
 
@@ -274,11 +281,10 @@ export function GitHistoryViewer({
     const saved = localStorage.getItem(STORAGE_KEY_HIDE_WHITESPACE)
     return saved === 'true'
   })
-  const [diffStyle, setDiffStyle] = useState<'split' | 'unified'>(() => {
+  const [diffDisplayMode, setDiffDisplayMode] = useState<GitHistoryDiffDisplayMode>(() => {
     const prefs = getUIPreferences()
-    if (prefs.gitHistoryDiffStyle === 'unified' || prefs.gitHistoryDiffStyle === 'split') return prefs.gitHistoryDiffStyle
     const saved = localStorage.getItem(STORAGE_KEY_DIFF_STYLE)
-    return saved === 'unified' ? 'unified' : 'split'
+    return resolveGitHistoryDiffDisplayMode(prefs.gitHistoryDiffStyle, saved)
   })
   const [imageDisplayMode, setImageDisplayMode] = useState<ImageDisplayMode>(() => {
     const prefs = getUIPreferences()
@@ -584,6 +590,7 @@ export function GitHistoryViewer({
   }, [fileContextMenu])
 
   const diffFontSize = settings?.gitDiffFontSize ?? DEFAULT_GIT_DIFF_FONT_SIZE
+  const diffStyle = toGitHistoryPatchDiffStyle(diffDisplayMode)
   const diffOptions = useMemo(() => ({
     diffStyle,
     diffIndicators: 'classic' as const,
@@ -1346,10 +1353,18 @@ export function GitHistoryViewer({
         return true
       },
       getDiffStyle: () => diffStyle,
-      setDiffStyle: (style: 'split' | 'unified') => {
-        setDiffStyle(style)
-        localStorage.setItem(STORAGE_KEY_DIFF_STYLE, style)
-        updateUIPreferences({ gitHistoryDiffStyle: style })
+      getDiffDisplayMode: () => diffDisplayMode,
+      setDiffStyle: (style: GitHistoryPatchDiffStyle | GitHistoryDiffDisplayMode) => {
+        const mode = coerceGitHistoryDiffDisplayMode(style)
+        if (!mode) return
+        setDiffDisplayMode(mode)
+        localStorage.setItem(STORAGE_KEY_DIFF_STYLE, mode)
+        updateUIPreferences({ gitHistoryDiffStyle: mode })
+      },
+      setDiffDisplayMode: (mode: GitHistoryDiffDisplayMode) => {
+        setDiffDisplayMode(mode)
+        localStorage.setItem(STORAGE_KEY_DIFF_STYLE, mode)
+        updateUIPreferences({ gitHistoryDiffStyle: mode })
       },
       getHideWhitespace: () => hideWhitespace,
       setHideWhitespace: (value: boolean) => {
@@ -1368,7 +1383,7 @@ export function GitHistoryViewer({
         delete (window as any).__onwardGitHistoryDebugTerminalId
       }
     }
-  }, [isOpen, commits, selectedShas, files, selectedFile, selectedFileContent, loading, filesLoading, diffLoading, diffStyle, hideWhitespace, imageCompareMode, imageDisplayMode, svgViewMode, selectedRepoRoot, cachedParentCwd, repoSearch, cachedRepos, visibleRepoItems, setRepoExpanded, toggleImageCompareMode, toggleImageDisplayMode, switchRepo])
+  }, [isOpen, commits, selectedShas, files, selectedFile, selectedFileContent, loading, filesLoading, diffLoading, diffStyle, diffDisplayMode, hideWhitespace, imageCompareMode, imageDisplayMode, svgViewMode, selectedRepoRoot, cachedParentCwd, repoSearch, cachedRepos, visibleRepoItems, setRepoExpanded, toggleImageCompareMode, toggleImageDisplayMode, switchRepo])
 
   useSubpageEscape({ isOpen, onEscape: onClose })
 
@@ -1492,10 +1507,10 @@ export function GitHistoryViewer({
     updateUIPreferences({ gitHistoryHideWhitespace: value })
   }, [updateUIPreferences])
 
-  const handleDiffStyleChange = useCallback((style: 'split' | 'unified') => {
-    setDiffStyle(style)
-    localStorage.setItem(STORAGE_KEY_DIFF_STYLE, style)
-    updateUIPreferences({ gitHistoryDiffStyle: style })
+  const handleDiffDisplayModeChange = useCallback((mode: GitHistoryDiffDisplayMode) => {
+    setDiffDisplayMode(mode)
+    localStorage.setItem(STORAGE_KEY_DIFF_STYLE, mode)
+    updateUIPreferences({ gitHistoryDiffStyle: mode })
   }, [updateUIPreferences])
 
   const handleJumpToDiff = useCallback(() => {
@@ -1851,16 +1866,18 @@ export function GitHistoryViewer({
               <div className="git-history-diff-options-label">{t('gitHistory.options.displayMode')}</div>
               <div className="git-history-diff-options-buttons">
                 <button
-                  className={`git-history-option-btn ${diffStyle === 'unified' ? 'active' : ''}`}
-                  onClick={() => handleDiffStyleChange('unified')}
+                  className={`git-history-option-btn ${diffDisplayMode === 'side-by-side' ? 'active' : ''}`}
+                  onClick={() => handleDiffDisplayModeChange('side-by-side')}
+                  data-mode="side-by-side"
                 >
-                  {t('gitHistory.options.unified')}
+                  {t('gitDiff.viewMode.split')}
                 </button>
                 <button
-                  className={`git-history-option-btn ${diffStyle === 'split' ? 'active' : ''}`}
-                  onClick={() => handleDiffStyleChange('split')}
+                  className={`git-history-option-btn ${diffDisplayMode === 'inline' ? 'active' : ''}`}
+                  onClick={() => handleDiffDisplayModeChange('inline')}
+                  data-mode="inline"
                 >
-                  {t('gitHistory.options.split')}
+                  {t('gitDiff.viewMode.inline')}
                 </button>
               </div>
             </div>

@@ -301,8 +301,41 @@ export async function testGitHistoryMultiTerminalScope(ctx: AutotestContext): Pr
       expectedModified: 'history head\\n'
     })
 
+    let diffOptionButtons: Array<{ mode: string | null; label: string; active: boolean }> = []
+    const diffOptionsVisible = await waitFor(
+      'phase3.5-history-diff-options-visible',
+      () => {
+        const trigger = document.querySelector<HTMLButtonElement>('.git-history-diff-options-trigger')
+        if (!trigger) return false
+        if (!document.querySelector('.git-history-diff-options-popover')) trigger.click()
+        const buttons = Array.from(document.querySelectorAll<HTMLButtonElement>('.git-history-diff-options-buttons .git-history-option-btn'))
+        diffOptionButtons = buttons.map((button) => ({
+          mode: button.dataset.mode ?? null,
+          label: button.textContent?.trim() ?? '',
+          active: button.classList.contains('active')
+        }))
+        return diffOptionButtons.length >= 2
+      },
+      4000
+    )
+    const defaultDisplayMode = getHistoryApi()?.getDiffDisplayMode?.() ?? null
+    _assert('GHMS-13-diff-display-mode-default-inline', Boolean(
+      diffOptionsVisible &&
+      defaultDisplayMode === 'inline' &&
+      diffOptionButtons.some((button) => button.mode === 'side-by-side' && button.label === 'Side-by-side') &&
+      diffOptionButtons.some((button) => button.mode === 'inline' && button.label === 'Inline' && button.active)
+    ), {
+      diffOptionsVisible,
+      defaultDisplayMode,
+      diffOptionButtons
+    })
+
     const selectedShaBeforeRestore = getHistoryApi()?.getSelectedShas?.()[0] ?? null
-    getHistoryApi()?.setDiffStyle('unified')
+    if (getHistoryApi()?.setDiffDisplayMode) {
+      getHistoryApi()?.setDiffDisplayMode?.('side-by-side')
+    } else {
+      getHistoryApi()?.setDiffStyle('split')
+    }
     getHistoryApi()?.setHideWhitespace(true)
     await sleep(500)
     dispatchEscape()
@@ -330,12 +363,14 @@ export async function testGitHistoryMultiTerminalScope(ctx: AutotestContext): Pr
       closedForRestore &&
       reopenedForRestore &&
       restoredSelection &&
-      getHistoryApi()?.getDiffStyle() === 'unified' &&
+      getHistoryApi()?.getDiffDisplayMode?.() === 'side-by-side' &&
+      getHistoryApi()?.getDiffStyle() === 'split' &&
       getHistoryApi()?.getHideWhitespace() === true
     ), {
       selectedShaBeforeRestore,
       selectedShasAfterRestore: getHistoryApi()?.getSelectedShas?.() ?? [],
       selectedFileAfterRestore: getHistoryApi()?.getSelectedFile?.() ?? null,
+      diffDisplayMode: getHistoryApi()?.getDiffDisplayMode?.() ?? null,
       diffStyle: getHistoryApi()?.getDiffStyle?.() ?? null,
       hideWhitespace: getHistoryApi()?.getHideWhitespace?.() ?? null
     })

@@ -319,7 +319,9 @@ export interface GitHistoryDebugApi {
   selectFileByIndex: (index: number) => boolean
   selectFileByPath?: (path: string) => boolean
   getDiffStyle: () => 'split' | 'unified'
-  setDiffStyle: (style: 'split' | 'unified') => void
+  setDiffStyle: (style: 'split' | 'unified' | 'side-by-side' | 'inline') => void
+  getDiffDisplayMode?: () => 'side-by-side' | 'inline'
+  setDiffDisplayMode?: (mode: 'side-by-side' | 'inline') => void
   getHideWhitespace: () => boolean
   setHideWhitespace: (value: boolean) => void
 }

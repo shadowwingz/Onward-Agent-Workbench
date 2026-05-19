@@ -104,18 +104,29 @@ export async function testGitHistory(ctx: AutotestContext): Promise<TestResult[]
     }
   }
 
-  // GH-05: Diff style switching
+  // GH-05: Diff display mode default and switching
   if (!cancelled()) {
     if (getApi()?.isOpen()) {
-      getApi()!.setDiffStyle('unified')
+      const api = getApi()!
+      const defaultMode = api.getDiffDisplayMode?.() ?? (api.getDiffStyle() === 'unified' ? 'inline' : 'side-by-side')
+      _assert('GH-05a-diff-display-default-inline', defaultMode === 'inline', { defaultMode })
+      if (api.setDiffDisplayMode) {
+        api.setDiffDisplayMode('side-by-side')
+      } else {
+        api.setDiffStyle('split')
+      }
       await sleep(500)
-      const style = getApi()!.getDiffStyle()
-      _assert('GH-05-diff-style-unified', style === 'unified', { style })
+      const mode = api.getDiffDisplayMode?.() ?? (api.getDiffStyle() === 'unified' ? 'inline' : 'side-by-side')
+      _assert('GH-05b-diff-display-side-by-side', mode === 'side-by-side', { mode, style: api.getDiffStyle() })
       // recover
-      getApi()!.setDiffStyle('split')
+      if (api.setDiffDisplayMode) {
+        api.setDiffDisplayMode('inline')
+      } else {
+        api.setDiffStyle('unified')
+      }
       await sleep(300)
     } else {
-      results.push({ name: 'GH-05-diff-style-unified', ok: false, detail: { reason: 'not open' } })
+      results.push({ name: 'GH-05-diff-display-default-inline', ok: false, detail: { reason: 'not open' } })
     }
   }
 

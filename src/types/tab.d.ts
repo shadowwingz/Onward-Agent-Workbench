@@ -248,7 +248,7 @@ export interface UIPreferences {
   // Git History Viewer
   gitHistoryFileListWidth?: number
   gitHistoryHideWhitespace?: boolean
-  gitHistoryDiffStyle?: string
+  gitHistoryDiffStyle?: 'side-by-side' | 'inline' | 'split' | 'unified'
   gitHistorySummaryHeight?: number
   gitHistoryStates?: Record<string, unknown>
 }

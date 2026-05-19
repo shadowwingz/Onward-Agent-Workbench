@@ -128,6 +128,7 @@ point at files under `test/unittest/`.
 | Feature / Bug | Tests |
 |---|---|
 | Commit list, selection, file diff load | `run-git-history` (GH-*) |
+| Diff options display mode labels, default inline, legacy preference migration | `run-git-history-multi-terminal-scope` (GHMS-13) + `test/unittest/git-history-diff-display-mode.test.mts` |
 | Per-terminal scope: history reflects active terminal cwd | `run-git-history-multi-terminal-scope` (GHMS-*) |
 | Nested submodule history view | `run-git-nested-submodules` (GNS-*) |
 
