@@ -14,7 +14,7 @@
  */
 
 import type { AutotestContext, TestResult } from './types'
-import type { GitStateMirrorSnapshot } from '../types/electron'
+import type { GitStateMirrorSnapshot, GitStateMirrorWatcherStatus } from '../types/electron'
 import {
   loadMirrorFixtureManifest,
   resolveFixtureRepo,
@@ -55,6 +55,19 @@ function normalizePathForAssert(value: string | null): string | null {
   if (normalized.startsWith('/private/')) normalized = normalized.slice('/private'.length)
   if (normalized.length > 1 && normalized.endsWith('/')) normalized = normalized.slice(0, -1)
   return normalized
+}
+
+function summarizeWatcherStatus(status: GitStateMirrorWatcherStatus): Record<string, unknown> {
+  return {
+    cwd: status.cwd,
+    repoRoot: status.repoRoot,
+    health: status.health,
+    failureKind: status.failureKind,
+    failureCount: status.failureCount,
+    polling: status.polling,
+    pollingIntervalMs: status.pollingIntervalMs,
+    nextRetryAt: status.nextRetryAt
+  }
 }
 
 export async function testGitStateMirrorLatency(ctx: AutotestContext): Promise<TestResult[]> {
@@ -170,6 +183,84 @@ export async function testGitStateMirrorLatency(ctx: AutotestContext): Promise<T
   const disposeWatcherError = window.electronAPI.git.onMirrorWatcherError?.((cwd, message) => {
     watcherErrors.push({ cwd, message, at: performance.now() })
   })
+
+  const failureMode = window.electronAPI.debug.autotestGsmWatcherFailSubscribeOnce
+    ? 'subscribe'
+    : window.electronAPI.debug.autotestGsmWatcherFailCallbackOnce
+      ? 'callback'
+      : null
+
+  if (failureMode) {
+    const watcherStatuses: GitStateMirrorWatcherStatus[] = []
+    const disposeWatcherStatus = window.electronAPI.git.onMirrorWatcherStatus?.((status) => {
+      watcherStatuses.push(status)
+    })
+    await window.electronAPI.git.subscribeMirror(repoA.abs)
+    const assertionId = failureMode === 'subscribe'
+      ? 'GSM-15-watcher-subscribe-failure-recovers'
+      : 'GSM-16-watcher-callback-failure-recovers'
+    const preconditionId = failureMode === 'subscribe'
+      ? 'GSM-15a-subscribe-failure-precondition'
+      : 'GSM-16a-callback-failure-precondition'
+    await waitForHeaderState(preconditionId, repoA.abs, {
+      branch: repoA.entry.branch,
+      colour: 'clean',
+      cwd: repoA.abs
+    }, 'Failure-injection pass subscribes to repo-A and starts the watcher supervisor')
+
+    const statusForRepo = (status: GitStateMirrorWatcherStatus) => {
+      return normalizePathForAssert(status.cwd) === normalizePathForAssert(repoA.abs)
+    }
+    const currentStatusHistory = () => [
+      ...window.electronAPI.debug.getMirrorWatcherStatusHistory(),
+      ...watcherStatuses
+    ].filter(statusForRepo)
+    const hasRecoverySequence = await waitFor(`${assertionId}-status-sequence`, () => {
+      const relevant = currentStatusHistory()
+      const degradedIndex = relevant.findIndex((status) => (
+        status.health === 'recovering' || status.health === 'degraded-polling'
+      ))
+      const healthyAfter = degradedIndex >= 0 && relevant.some((status, index) => (
+        index > degradedIndex && status.health === 'healthy'
+      ))
+      return degradedIndex >= 0 && healthyAfter
+    }, 8000, 50)
+
+    const filename = failureMode === 'subscribe'
+      ? 'gsm-15-subscribe-failure.txt'
+      : 'gsm-16-callback-failure.txt'
+    await mutate.createUntrackedFile(repoA.abs, filename, `created by ${assertionId}\n`)
+    const updatedMirror = await waitForMirrorStatus(repoA.abs, 'added', 7000)
+    const deleteResult = await window.electronAPI.project.deletePath(repoA.abs, filename).catch((error) => ({
+      success: false,
+      error: error instanceof Error ? error.message : String(error)
+    }))
+    await pushOscCwd(terminalId, repoA.abs)
+    const restoredMirror = await waitForMirrorStatus(repoA.abs, 'clean', 7000)
+    const hardErrors = watcherErrors.filter((error) => (
+      normalizePathForAssert(error.cwd) === normalizePathForAssert(repoA.abs)
+    ))
+
+    record(assertionId, Boolean(hasRecoverySequence && updatedMirror && restoredMirror && hardErrors.length === 0), {
+      description: 'Watcher failure injection must recover through watcher-status, keep Git state fresh, and avoid the hard stale banner',
+      failureMode,
+      statusSequence: currentStatusHistory().map(summarizeWatcherStatus),
+      hardErrors,
+      updatedMirror: summarizeMirror(updatedMirror),
+      restoredMirror: summarizeMirror(restoredMirror),
+      deleteResult
+    })
+
+    disposeWatcherStatus?.()
+    window.electronAPI.git.unsubscribeMirror(repoA.abs)
+    disposeWatcherError?.()
+    log('git-state-mirror-latency:done', {
+      passed: results.filter((r) => r.ok).length,
+      failed: results.filter((r) => !r.ok).length,
+      total: results.length
+    })
+    return results
+  }
 
   await waitForHeaderState('GSM-01-repo-a-clean-header', repoA.abs, {
     branch: repoA.entry.branch,

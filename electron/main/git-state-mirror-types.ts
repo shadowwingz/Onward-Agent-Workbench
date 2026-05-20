@@ -96,6 +96,36 @@ export type MirrorDelta = Partial<Omit<MirrorState, 'cwd' | 'capturedAt'>> & {
   capturedAt: number
 }
 
+export type MirrorWatcherHealth =
+  | 'idle'
+  | 'attaching'
+  | 'healthy'
+  | 'recovering'
+  | 'degraded-polling'
+  | 'suspended'
+  | 'failed'
+  | 'detached'
+
+export type MirrorWatcherFailureKind =
+  | 'subscribe-error'
+  | 'callback-error'
+  | 'path-missing'
+  | 'polling-error'
+  | 'unknown'
+
+export interface MirrorWatcherStatus {
+  cwd: string
+  repoRoot: string | null
+  health: MirrorWatcherHealth
+  message: string | null
+  failureKind: MirrorWatcherFailureKind | null
+  failureCount: number
+  polling: boolean
+  pollingIntervalMs: number | null
+  nextRetryAt: number | null
+  updatedAt: number
+}
+
 // ---------------------------------------------------------------------------
 // Wire messages
 // ---------------------------------------------------------------------------
@@ -113,9 +143,10 @@ export type MirrorToMainMessage =
   | { kind: 'shutdown-complete' }
   | { kind: 'mirror-update'; cwd: string; state: MirrorState; delta: MirrorDelta }
   | { kind: 'file-body-update'; replyId: number; body: MirrorFileBody | null; error?: string }
-  // Phase 5: explicit watcher failure signal. parcel-watcher errors here
-  // are non-silent — renderer surfaces a banner so the user can manually
-  // refresh rather than silently miss FS changes.
+  | { kind: 'watcher-status'; status: MirrorWatcherStatus }
+  // Hard watcher failure signal. Transient parcel-watcher faults use
+  // watcher-status; this channel is emitted only when fallback refresh
+  // also fails and Git state may be stale.
   | { kind: 'watcher-error'; cwd: string; message: string }
   | { kind: 'log'; level: 'info' | 'warn' | 'error'; message: string; data?: Record<string, unknown> }
 

@@ -427,6 +427,36 @@ export type GitStateMirrorDelta = Partial<Omit<GitStateMirrorSnapshot, 'cwd' | '
   capturedAt: number
 }
 
+export type GitStateMirrorWatcherHealth =
+  | 'idle'
+  | 'attaching'
+  | 'healthy'
+  | 'recovering'
+  | 'degraded-polling'
+  | 'suspended'
+  | 'failed'
+  | 'detached'
+
+export type GitStateMirrorWatcherFailureKind =
+  | 'subscribe-error'
+  | 'callback-error'
+  | 'path-missing'
+  | 'polling-error'
+  | 'unknown'
+
+export interface GitStateMirrorWatcherStatus {
+  cwd: string
+  repoRoot: string | null
+  health: GitStateMirrorWatcherHealth
+  message: string | null
+  failureKind: GitStateMirrorWatcherFailureKind | null
+  failureCount: number
+  polling: boolean
+  pollingIntervalMs: number | null
+  nextRetryAt: number | null
+  updatedAt: number
+}
+
 export interface GitFileContentResult {
   success: boolean
   cwd: string
@@ -692,10 +722,11 @@ export interface GitAPI {
   unsubscribeMirror: (cwd: string) => void
   getMirror: (cwd: string) => Promise<GitStateMirrorSnapshot | null>
   onMirrorUpdate: (callback: (cwd: string, delta: GitStateMirrorDelta) => void) => () => void
+  onMirrorWatcherStatus: (callback: (status: GitStateMirrorWatcherStatus) => void) => () => void
   /**
    * Listen for parcel-watcher failure events from the mirror worker.
-   * Renderer should surface a banner ("FS watch unavailable, refresh
-   * manually") — there is no silent polling fallback by design.
+   * Renderer should surface a hard failure banner. Recovering/degraded
+   * states arrive through `onMirrorWatcherStatus`.
    */
   onMirrorWatcherError: (callback: (cwd: string, message: string) => void) => () => void
   pushCwd: (terminalId: string, newCwd: string | null) => void
@@ -1001,6 +1032,9 @@ export interface DebugAPI {
   autotestHtmlExpectedTitle: string | null
   autotestHtmlExpectedText: string | null
   autotestHtmlSkipSaveFlow: boolean
+  autotestGsmWatcherFailSubscribeOnce: boolean
+  autotestGsmWatcherFailCallbackOnce: boolean
+  getMirrorWatcherStatusHistory: () => GitStateMirrorWatcherStatus[]
   perfTraceCaptureContent: boolean
   virtualCursorDisabled: boolean
   log: (message: string, data?: unknown) => void

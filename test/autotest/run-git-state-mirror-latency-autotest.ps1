@@ -25,11 +25,11 @@ if (-not $AppBin -or -not (Test-Path $AppBin)) {
   exit 1
 }
 
-$UserDataDir = Join-Path $env:TEMP ("onward-gsm-userdata-" + [guid]::NewGuid())
+$UserDataRoot = Join-Path $env:TEMP ("onward-gsm-userdata-" + [guid]::NewGuid())
 $FixtureTmp  = Join-Path $env:TEMP ("onward-gsm-fixture-"  + [guid]::NewGuid())
 $FixtureSrc  = Join-Path $RepoRoot 'test\autotest\fixtures\git-state-mirror-latency'
 
-New-Item -ItemType Directory -Path $UserDataDir -Force | Out-Null
+New-Item -ItemType Directory -Path $UserDataRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $FixtureTmp  -Force | Out-Null
 
 try {
@@ -55,25 +55,49 @@ try {
 
   if (Test-Path $LogFile) { Remove-Item $LogFile -Force }
 
-  Write-Host 'Starting Git State Mirror latency autotest...'
-  Write-Host "  Binary:        $AppBin"
-  Write-Host "  Fixture src:   $FixtureSrc"
-  Write-Host "  Fixture tmp:   $FixtureTmp"
-  Write-Host "  Manifest:      $ManifestPath"
-  Write-Host "  User data dir: $UserDataDir"
-  Write-Host "  Log:           $LogFile"
+  @(
+    'Starting Git State Mirror latency autotest...'
+    "  Binary:         $AppBin"
+    "  Fixture src:    $FixtureSrc"
+    "  Fixture tmp:    $FixtureTmp"
+    "  Manifest:       $ManifestPath"
+    "  User data root: $UserDataRoot"
+    "  Log:            $LogFile"
+    ''
+  ) | Add-Content -Path $LogFile
 
-  $env:ONWARD_DEBUG = '1'
-  $env:ONWARD_PERF_TRACE = '1'
-  $env:ONWARD_REPO_ROOT = $RepoRoot
-  $env:ONWARD_USER_DATA_DIR = $UserDataDir
-  $env:ONWARD_AUTOTEST = '1'
-  $env:ONWARD_AUTOTEST_SUITE = 'git-state-mirror-latency'
-  $env:ONWARD_AUTOTEST_CWD = (Join-Path $FixtureTmp 'repo-A')
-  $env:ONWARD_AUTOTEST_FIXTURE_EXTRA = $ManifestPath
-  $env:ONWARD_AUTOTEST_EXIT = '1'
+  function Invoke-GsmPass {
+    param(
+      [string]$Label,
+      [string]$FailureEnvName = ''
+    )
+    $UserDataDir = Join-Path $UserDataRoot $Label
+    New-Item -ItemType Directory -Path $UserDataDir -Force | Out-Null
 
-  & $AppBin *> $LogFile
+    Add-Content -Path $LogFile -Value ''
+    Add-Content -Path $LogFile -Value "=== Git State Mirror latency pass: $Label ==="
+
+    $env:ONWARD_DEBUG = '1'
+    $env:ONWARD_PERF_TRACE = '1'
+    $env:ONWARD_REPO_ROOT = $RepoRoot
+    $env:ONWARD_USER_DATA_DIR = $UserDataDir
+    $env:ONWARD_AUTOTEST = '1'
+    $env:ONWARD_AUTOTEST_SUITE = 'git-state-mirror-latency'
+    $env:ONWARD_AUTOTEST_CWD = (Join-Path $FixtureTmp 'repo-A')
+    $env:ONWARD_AUTOTEST_FIXTURE_EXTRA = $ManifestPath
+    $env:ONWARD_AUTOTEST_EXIT = '1'
+    Remove-Item Env:\ONWARD_AUTOTEST_GSM_WATCHER_FAIL_SUBSCRIBE_ONCE -ErrorAction SilentlyContinue
+    Remove-Item Env:\ONWARD_AUTOTEST_GSM_WATCHER_FAIL_CALLBACK_ONCE -ErrorAction SilentlyContinue
+    if ($FailureEnvName) {
+      Set-Item -Path "Env:\$FailureEnvName" -Value '1'
+    }
+
+    & $AppBin *>> $LogFile
+  }
+
+  Invoke-GsmPass -Label 'baseline'
+  Invoke-GsmPass -Label 'subscribe-failure' -FailureEnvName 'ONWARD_AUTOTEST_GSM_WATCHER_FAIL_SUBSCRIBE_ONCE'
+  Invoke-GsmPass -Label 'callback-failure' -FailureEnvName 'ONWARD_AUTOTEST_GSM_WATCHER_FAIL_CALLBACK_ONCE'
 
   Write-Host ''
   Write-Host '=== Test log (last 60 lines) ==='
@@ -105,6 +129,24 @@ try {
     exit 1
   }
 
+  if (-not (Select-String -Path $LogFile -Pattern 'GSM-15-watcher-subscribe-failure-recovers' -Quiet)) {
+    Write-Host 'Missing GSM-15 marker; the subscribe failure recovery test did not run to completion'
+    Get-Content $LogFile -Tail 40 | Out-Host
+    exit 1
+  }
+
+  if (-not (Select-String -Path $LogFile -Pattern 'GSM-16-watcher-callback-failure-recovers' -Quiet)) {
+    Write-Host 'Missing GSM-16 marker; the callback failure recovery test did not run to completion'
+    Get-Content $LogFile -Tail 40 | Out-Host
+    exit 1
+  }
+
+  if (-not (Select-String -Path $LogFile -Pattern 'autotest watcher failure injection active' -Quiet)) {
+    Write-Host 'Missing watcher failure injection log marker'
+    Get-Content $LogFile -Tail 40 | Out-Host
+    exit 1
+  }
+
   if (-not (Select-String -Path $LogFile -Pattern 'git-state-mirror-latency:done' -Quiet)) {
     Write-Host 'Missing git-state-mirror-latency:done marker; the suite did not finish cleanly'
     Get-Content $LogFile -Tail 40 | Out-Host
@@ -115,7 +157,7 @@ try {
   Write-Host "  Log: $LogFile"
 
 } finally {
-  if (Test-Path $UserDataDir) { Remove-Item $UserDataDir -Recurse -Force -ErrorAction SilentlyContinue }
+  if (Test-Path $UserDataRoot) { Remove-Item $UserDataRoot -Recurse -Force -ErrorAction SilentlyContinue }
   if (Test-Path $FixtureTmp)  { Remove-Item $FixtureTmp  -Recurse -Force -ErrorAction SilentlyContinue }
   Get-ChildItem -Path $RepoRoot -Filter '__autotest_*' -Force | ForEach-Object {
     Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue

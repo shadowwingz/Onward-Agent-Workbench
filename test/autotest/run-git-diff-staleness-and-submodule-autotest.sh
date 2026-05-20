@@ -25,7 +25,20 @@ fi
 # previous run can't leak in and turn unrelated PRs into "test broke things"
 # investigations.
 # ---------------------------------------------------------------------------
-USER_DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/onward-gds-userdata.XXXXXX")"
+RUN_TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/onward-gds-run.XXXXXX")"
+USER_DATA_DIR="$RUN_TMP_DIR/user-data"
+mkdir -p "$USER_DATA_DIR"
+
+# Snapshot pre-existing trace chunks so post-mortem checks only accept events
+# produced by this runner invocation. `latest.txt` points at the chunk
+# directory, and shutdown can create tiny final chunks after the useful event
+# chunks, so checking only the newest file is not reliable.
+TRACE_DIR="$REPO_ROOT/traces/perf"
+TRACE_BEFORE_FILE="$RUN_TMP_DIR/main-traces-before.txt"
+TRACE_START_MARKER="$RUN_TMP_DIR/trace-start.marker"
+mkdir -p "$TRACE_DIR"
+find "$TRACE_DIR" -maxdepth 1 -type f -name 'perf-*.jsonl' -print | sort > "$TRACE_BEFORE_FILE"
+: > "$TRACE_START_MARKER"
 
 # ---------------------------------------------------------------------------
 # Build the fixture under test/autotest/fixtures/git-diff-staleness-and-submodule/runtime/
@@ -39,7 +52,7 @@ CLEAN_ROOT="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).cleanRoo
 MANIFEST_PATH="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).manifestPath)' "$FIXTURE_JSON")"
 
 cleanup() {
-  rm -rf "$USER_DATA_DIR" 2>/dev/null || true
+  rm -rf "$RUN_TMP_DIR" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
@@ -50,11 +63,13 @@ echo "  Binary:        $APP_BIN"
 echo "  Clean repo:    $CLEAN_ROOT"
 echo "  Manifest:      $MANIFEST_PATH"
 echo "  User data dir: $USER_DATA_DIR"
+echo "  Run temp dir:  $RUN_TMP_DIR"
 echo "  Watchdog:      ${WATCHDOG_SEC}s"
 echo "  Log:           $LOG_FILE"
 echo ""
 
 APP_EXIT=0
+TMPDIR="$RUN_TMP_DIR" \
 ONWARD_DEBUG=1 \
 ONWARD_PERF_TRACE=1 \
 ONWARD_REPO_ROOT="$REPO_ROOT" \
@@ -120,6 +135,12 @@ if ! grep -q "GDS-42-trace-marker-diff-tree-editor-jumps-expected" "$LOG_FILE"; 
   exit 1
 fi
 
+if ! grep -q "GDS-43-trace-marker-diff-model-sync-expected" "$LOG_FILE"; then
+  echo "Missing GDS-43 marker; the diff model-sync trace test did not run" >&2
+  tail -n 40 "$LOG_FILE" >&2
+  exit 1
+fi
+
 # ---------------------------------------------------------------------------
 # GDS-11/12: post-mortem trace inspection. Verify the new trace events
 # actually fired during the test session.
@@ -130,12 +151,22 @@ if [[ ! -f "$TRACE_LATEST_PATH" ]]; then
   exit 1
 fi
 
-TRACE_FILE="$(cat "$TRACE_LATEST_PATH")"
-if [[ -d "$TRACE_FILE" ]]; then
-  TRACE_FILE="$(find "$TRACE_FILE" -maxdepth 1 -type f -name 'perf-*.jsonl' -print | sort | tail -n 1)"
+TRACE_TARGET="$(cat "$TRACE_LATEST_PATH")"
+TRACE_FILES=()
+if [[ -d "$TRACE_TARGET" ]]; then
+  while IFS= read -r trace_file; do
+    if grep -Fxq "$trace_file" "$TRACE_BEFORE_FILE" && [[ ! "$trace_file" -nt "$TRACE_START_MARKER" ]]; then
+      continue
+    fi
+    TRACE_FILES+=("$trace_file")
+  done < <(find "$TRACE_TARGET" -maxdepth 1 -type f -name 'perf-*.jsonl' -print | sort)
+elif [[ -f "$TRACE_TARGET" ]]; then
+  if ! grep -Fxq "$TRACE_TARGET" "$TRACE_BEFORE_FILE" || [[ "$TRACE_TARGET" -nt "$TRACE_START_MARKER" ]]; then
+    TRACE_FILES+=("$TRACE_TARGET")
+  fi
 fi
-if [[ ! -f "$TRACE_FILE" ]]; then
-  echo "GDS-11/12 FAIL: trace file pointed by latest.txt missing: $TRACE_FILE" >&2
+if [[ "${#TRACE_FILES[@]}" -eq 0 ]]; then
+  echo "GDS-11/12 FAIL: no current-run main trace files found from latest.txt target: $TRACE_TARGET" >&2
   exit 1
 fi
 
@@ -151,25 +182,32 @@ fi
 # Chrome Trace JSON's `{"traceEvents":[...]}` wrapper and partial / truncated
 # files correctly — `grep -F` would false-positive on payloads whose `args`
 # field happens to embed the literal `"name":"X"` byte sequence.
-WORKER_TRACE_DIR="${TMPDIR:-/tmp}/onward-traces-perf-worker"
+WORKER_TRACE_DIR="$RUN_TMP_DIR/onward-traces-perf-worker"
 
 expect_event() {
   local label="$1"
   local needle="$2"
   local match
-  if match="$(node "$REPO_ROOT/test/autotest/check-trace-event.mjs" \
-    --main "$TRACE_FILE" \
-    --worker-dir "$WORKER_TRACE_DIR" \
-    --name "$needle")"; then
-    echo "PASS $label  ($needle in $match trace)"
-    return 0
-  fi
-  echo "FAIL $label  (missing $needle in main or worker traces)" >&2
+  local trace_file
+  for trace_file in "${TRACE_FILES[@]}"; do
+    if match="$(node "$REPO_ROOT/test/autotest/check-trace-event.mjs" \
+      --main "$trace_file" \
+      --worker-dir "$WORKER_TRACE_DIR" \
+      --name "$needle")"; then
+      if [[ "$match" == "main" ]]; then
+        echo "PASS $label  ($needle in main trace $(basename "$trace_file"))"
+      else
+        echo "PASS $label  ($needle in $match trace)"
+      fi
+      return 0
+    fi
+  done
+  echo "FAIL $label  (missing $needle in ${#TRACE_FILES[@]} main trace file(s) and worker traces)" >&2
   exit 1
 }
 
 echo ""
-echo "=== Trace event coverage (GDS-11/12/16/26/30/34/42) ==="
+echo "=== Trace event coverage (GDS-11/12/16/26/30/34/42/43) ==="
 expect_event "GDS-11"  "main:git.diff.submodule-filter"
 expect_event "GDS-12a" "main:git-state-mirror.fanout"
 expect_event "GDS-12b" "renderer:subpage.freshness-check"
@@ -190,8 +228,9 @@ expect_event "GDS-34"  "renderer:git-diff.body-prefetch"
 expect_event "GDS-42a" "renderer:git-diff.file-list-mode-change"
 expect_event "GDS-42b" "renderer:git-diff.jump-to-editor"
 expect_event "GDS-42c" "renderer:project-editor.jump-to-diff"
+expect_event "GDS-43"  "renderer:git-diff.model-sync"
 
 echo ""
 echo "Git Diff staleness + submodule filter autotest passed"
 echo "  Log:    $LOG_FILE"
-echo "  Trace:  $TRACE_FILE"
+echo "  Trace:  $TRACE_TARGET (${#TRACE_FILES[@]} main chunk(s))"

@@ -13,10 +13,9 @@
  *   - MirrorState compute + delta short-circuit
  *   - per-file body cache keyed by stat token
  *
- * Single rule: every recompute is triggered by an external event (FS
- * change, attach, switch-cwd, focus-resync). No periodic timers anywhere.
- * The only setTimeout in this file is a debounce window that coalesces
- * FS-event bursts — not a poll.
+ * File watcher failures are supervised inside this Worker Thread: Parcel
+ * stays the recursive fast path, while transient failures use restart
+ * backoff and temporary low-frequency git-status polling.
  */
 
 import { execFile } from 'child_process'
@@ -31,8 +30,15 @@ import {
   beginMirrorRecompute,
   classifyEventPath,
   completeMirrorAttach,
+  computeMirrorWatcherBackoffMs,
   createMirrorWorkerEntry,
   finishMirrorRecomputeIfCurrent,
+  isMirrorWatcherPathMissingError,
+  MIRROR_WATCHER_DEGRADED_POLLING_INTERVAL_MS,
+  MIRROR_WATCHER_IGNORE,
+  MIRROR_WATCHER_POLLING_FAILURE_THRESHOLD,
+  MIRROR_WATCHER_SUSPENDED_PROBE_INTERVAL_MS,
+  normaliseMirrorRepoRootKey,
   requestMirrorAttach,
   requestMirrorDetach,
   resolveMirrorWatcherRoot,
@@ -46,7 +52,10 @@ import type {
   MainToMirrorMessage,
   MirrorFileBody,
   MirrorState,
-  MirrorToMainMessage
+  MirrorToMainMessage,
+  MirrorWatcherFailureKind,
+  MirrorWatcherHealth,
+  MirrorWatcherStatus
 } from './git-state-mirror-types'
 
 const execFileAsync = promisify(execFile)
@@ -69,6 +78,37 @@ const MAX_FILE_BODY = 16 * 1024 * 1024
 const entries = new Map<string, MirrorWorkerEntryCore>()
 const inFlightOperations = new Set<Promise<void>>()
 let shuttingDown = false
+
+interface MirrorWatcherGroup {
+  repoRoot: string
+  repoRootKey: string
+  entries: Set<string>
+  dispose: (() => Promise<void>) | null
+  health: MirrorWatcherHealth
+  message: string | null
+  failureKind: MirrorWatcherFailureKind | null
+  failureCount: number
+  consecutivePollingFailures: number
+  restartTimer: NodeJS.Timeout | null
+  pollTimer: NodeJS.Timeout | null
+  suspendedProbeTimer: NodeJS.Timeout | null
+  pollInFlight: boolean
+  attachInFlight: boolean
+  restartGeneration: number
+  nextRetryAt: number | null
+  callbackFailureInjected: boolean
+}
+
+const watcherGroups = new Map<string, MirrorWatcherGroup>()
+const entryToGroupKey = new Map<string, string>()
+
+const autotestWatcherFailSubscribeOnce =
+  process.env.ONWARD_AUTOTEST === '1' &&
+  process.env.ONWARD_AUTOTEST_GSM_WATCHER_FAIL_SUBSCRIBE_ONCE === '1'
+const autotestWatcherFailCallbackOnce =
+  process.env.ONWARD_AUTOTEST === '1' &&
+  process.env.ONWARD_AUTOTEST_GSM_WATCHER_FAIL_CALLBACK_ONCE === '1'
+let autotestSubscribeFailurePending = autotestWatcherFailSubscribeOnce
 
 // Per-cwd MirrorState.generation counter. Bumped on every focus-resync
 // (the "Refresh Changes" path) so the renderer's DiffEditor key changes
@@ -121,6 +161,13 @@ function log(
   data?: Record<string, unknown>
 ): void {
   emit({ kind: 'log', level, message, data })
+}
+
+if (autotestWatcherFailSubscribeOnce || autotestWatcherFailCallbackOnce) {
+  log('warn', 'autotest watcher failure injection active', {
+    subscribeOnce: autotestWatcherFailSubscribeOnce,
+    callbackOnce: autotestWatcherFailCallbackOnce
+  })
 }
 
 function trackOperation(label: string, promise: Promise<void>): void {
@@ -336,13 +383,25 @@ function scheduleRecompute(entry: MirrorWorkerEntryCore): void {
     entry.debounceTimer = null
     entry.pendingSince = null
     entry.pendingPaths.clear()
-    void runRecompute(entry)
+    void runRecompute(entry, 'watcher')
   }, DEBOUNCE_MS)
 }
 
-async function runRecompute(entry: MirrorWorkerEntryCore): Promise<void> {
+async function runRecompute(
+  entry: MirrorWorkerEntryCore,
+  reason: 'attach' | 'watcher' | 'polling' | 'focus-resync' | 'osc-switch',
+  options: { queueIfBusy?: boolean } = {}
+): Promise<void> {
   if (shuttingDown) return
   if (entry.detachRequested) return
+  if (entry.recomputeInFlight) {
+    if (options.queueIfBusy !== false) {
+      entry.recomputeQueued = true
+    }
+    return
+  }
+  entry.recomputeInFlight = true
+  const startedAt = Date.now()
   const generation = beginMirrorRecompute(entry)
   let next: MirrorState
   try {
@@ -352,58 +411,490 @@ async function runRecompute(entry: MirrorWorkerEntryCore): Promise<void> {
       cwd: entry.cwd,
       error: error instanceof Error ? error.message : String(error)
     })
+    entry.recomputeInFlight = false
+    if (entry.recomputeQueued && !entry.detachRequested && !shuttingDown) {
+      entry.recomputeQueued = false
+      scheduleRecompute(entry)
+    }
     return
   }
   const delta = finishMirrorRecomputeIfCurrent(entry, generation, next)
+  performanceTrace.record(PERF_TRACE_EVENT.WORKER_GIT_STATE_MIRROR_RECOMPUTE_DONE, {
+    cwd: entry.cwd,
+    repoRoot: next.repoRoot,
+    reason,
+    fileCount: next.files.length,
+    branch: next.branch,
+    status: next.status,
+    durationMs: Date.now() - startedAt
+  })
+  entry.recomputeInFlight = false
+  if (entry.recomputeQueued && !entry.detachRequested && !shuttingDown) {
+    entry.recomputeQueued = false
+    scheduleRecompute(entry)
+  }
   if (!delta) return // stale, detached, or no-op
   // Short-circuit: only emit when delta has actual fields beyond capturedAt.
   if (Object.keys(delta).length <= 1) return
   emit({ kind: 'mirror-update', cwd: entry.cwd, state: next, delta })
 }
 
-async function startWatcher(entry: MirrorWorkerEntryCore): Promise<() => Promise<void>> {
+function activeEntriesForGroup(group: MirrorWatcherGroup): MirrorWorkerEntryCore[] {
+  const active: MirrorWorkerEntryCore[] = []
+  for (const cwd of group.entries) {
+    const entry = entries.get(cwd)
+    if (entry && !entry.detachRequested) {
+      active.push(entry)
+    }
+  }
+  return active
+}
+
+function createWatcherGroup(repoRoot: string): MirrorWatcherGroup {
+  const repoRootKey = normaliseMirrorRepoRootKey(repoRoot)
+  return {
+    repoRoot,
+    repoRootKey,
+    entries: new Set(),
+    dispose: null,
+    health: 'idle',
+    message: null,
+    failureKind: null,
+    failureCount: 0,
+    consecutivePollingFailures: 0,
+    restartTimer: null,
+    pollTimer: null,
+    suspendedProbeTimer: null,
+    pollInFlight: false,
+    attachInFlight: false,
+    restartGeneration: 0,
+    nextRetryAt: null,
+    callbackFailureInjected: false
+  }
+}
+
+function isWatcherGroupCurrent(group: MirrorWatcherGroup): boolean {
+  return !shuttingDown && group.entries.size > 0 && watcherGroups.get(group.repoRootKey) === group
+}
+
+function setTimerUnref(timer: NodeJS.Timeout): NodeJS.Timeout {
+  timer.unref?.()
+  return timer
+}
+
+function clearGroupRestartTimer(group: MirrorWatcherGroup): void {
+  if (group.restartTimer) {
+    clearTimeout(group.restartTimer)
+    group.restartTimer = null
+  }
+  group.nextRetryAt = null
+}
+
+function clearGroupPollTimer(group: MirrorWatcherGroup): void {
+  if (group.pollTimer) {
+    clearInterval(group.pollTimer)
+    group.pollTimer = null
+  }
+  group.pollInFlight = false
+}
+
+function clearGroupProbeTimer(group: MirrorWatcherGroup): void {
+  if (group.suspendedProbeTimer) {
+    clearInterval(group.suspendedProbeTimer)
+    group.suspendedProbeTimer = null
+  }
+}
+
+function buildWatcherStatus(group: MirrorWatcherGroup, cwd: string): MirrorWatcherStatus {
+  return {
+    cwd,
+    repoRoot: group.repoRoot,
+    health: group.health,
+    message: group.message,
+    failureKind: group.failureKind,
+    failureCount: group.failureCount,
+    polling: Boolean(group.pollTimer),
+    pollingIntervalMs: group.pollTimer ? MIRROR_WATCHER_DEGRADED_POLLING_INTERVAL_MS : null,
+    nextRetryAt: group.nextRetryAt,
+    updatedAt: Date.now()
+  }
+}
+
+function emitWatcherStatus(group: MirrorWatcherGroup): void {
+  for (const cwd of group.entries) {
+    const status = buildWatcherStatus(group, cwd)
+    const entry = entries.get(cwd)
+    if (entry) {
+      entry.watcherHealth = status.health
+      entry.watcherFailureCount = status.failureCount
+      entry.lastWatcherError = status.message
+      entry.lastWatcherFailureKind = status.failureKind
+      if (status.health === 'healthy') entry.lastWatcherHealthyAt = status.updatedAt
+    }
+    emit({ kind: 'watcher-status', status })
+  }
+}
+
+function updateWatcherHealth(
+  group: MirrorWatcherGroup,
+  health: MirrorWatcherHealth,
+  data: {
+    message?: string | null
+    failureKind?: MirrorWatcherFailureKind | null
+  } = {}
+): void {
+  const prevHealth = group.health
+  const prevMessage = group.message
+  const prevKind = group.failureKind
+  group.health = health
+  if ('message' in data) group.message = data.message ?? null
+  if ('failureKind' in data) group.failureKind = data.failureKind ?? null
+
+  emitWatcherStatus(group)
+  if (prevHealth !== group.health || prevMessage !== group.message || prevKind !== group.failureKind) {
+    performanceTrace.record(PERF_TRACE_EVENT.WORKER_GIT_STATE_MIRROR_WATCHER_STATUS_CHANGED, {
+      repoRoot: group.repoRoot,
+      health: group.health,
+      failureKind: group.failureKind,
+      failureCount: group.failureCount,
+      polling: Boolean(group.pollTimer)
+    })
+  }
+}
+
+async function disposeGroupWatcher(group: MirrorWatcherGroup): Promise<void> {
+  const dispose = group.dispose
+  group.dispose = null
+  if (!dispose) return
+  try {
+    await dispose()
+  } catch (error) {
+    log('warn', 'parcel-watcher unsubscribe failed', {
+      repoRoot: group.repoRoot,
+      error: error instanceof Error ? error.message : String(error)
+    })
+  }
+}
+
+function scheduleGroupRecompute(group: MirrorWatcherGroup, paths: string[]): void {
+  const activeEntries = activeEntriesForGroup(group)
+  for (const entry of activeEntries) {
+    for (const eventPath of paths) {
+      entry.pendingPaths.add(eventPath)
+    }
+    scheduleRecompute(entry)
+  }
+}
+
+function scheduleWatcherRestart(group: MirrorWatcherGroup, failureKind: MirrorWatcherFailureKind): void {
+  if (shuttingDown || group.entries.size === 0) return
+  if (group.restartTimer) return
+  const delayMs = computeMirrorWatcherBackoffMs(group.failureCount)
+  const generation = group.restartGeneration + 1
+  group.restartGeneration = generation
+  group.nextRetryAt = Date.now() + delayMs
+  performanceTrace.record(PERF_TRACE_EVENT.WORKER_GIT_STATE_MIRROR_WATCHER_RESTART_SCHEDULED, {
+    repoRoot: group.repoRoot,
+    health: group.health,
+    failureKind,
+    failureCount: group.failureCount,
+    delayMs,
+    polling: Boolean(group.pollTimer)
+  })
+  group.restartTimer = setTimerUnref(setTimeout(() => {
+    group.restartTimer = null
+    group.nextRetryAt = null
+    if (shuttingDown || group.entries.size === 0 || group.restartGeneration !== generation) return
+    void ensureWatcherForGroup(group, 'restart')
+  }, delayMs))
+  emitWatcherStatus(group)
+}
+
+async function runDegradedPoll(group: MirrorWatcherGroup): Promise<void> {
+  if (shuttingDown || group.entries.size === 0) return
+  if (group.pollInFlight) {
+    performanceTrace.record(PERF_TRACE_EVENT.WORKER_GIT_STATE_MIRROR_WATCHER_POLL, {
+      repoRoot: group.repoRoot,
+      result: 'skip-in-flight',
+      polling: true
+    })
+    return
+  }
+  group.pollInFlight = true
+  const startedAt = Date.now()
+  try {
+    const activeEntries = activeEntriesForGroup(group)
+    await Promise.all(activeEntries.map((entry) => runRecompute(entry, 'polling', { queueIfBusy: false })))
+    group.consecutivePollingFailures = 0
+    performanceTrace.record(PERF_TRACE_EVENT.WORKER_GIT_STATE_MIRROR_WATCHER_POLL, {
+      repoRoot: group.repoRoot,
+      result: 'success',
+      entryCount: activeEntries.length,
+      durationMs: Date.now() - startedAt
+    })
+  } catch (error) {
+    group.consecutivePollingFailures += 1
+    const message = error instanceof Error ? error.message : String(error)
+    log('warn', 'degraded watcher polling failed', {
+      repoRoot: group.repoRoot,
+      failureCount: group.consecutivePollingFailures,
+      error: message
+    })
+    performanceTrace.record(PERF_TRACE_EVENT.WORKER_GIT_STATE_MIRROR_WATCHER_POLL, {
+      repoRoot: group.repoRoot,
+      result: 'error',
+      error: message,
+      failureCount: group.consecutivePollingFailures,
+      durationMs: Date.now() - startedAt
+    })
+    if (group.consecutivePollingFailures >= MIRROR_WATCHER_POLLING_FAILURE_THRESHOLD) {
+      updateWatcherHealth(group, 'failed', {
+        message,
+        failureKind: 'polling-error'
+      })
+      for (const cwd of group.entries) {
+        emit({ kind: 'watcher-error', cwd, message })
+      }
+    }
+  } finally {
+    group.pollInFlight = false
+  }
+}
+
+function startDegradedPolling(group: MirrorWatcherGroup, failureKind: MirrorWatcherFailureKind, message: string): void {
+  if (!group.pollTimer) {
+    group.pollTimer = setTimerUnref(setInterval(() => {
+      void runDegradedPoll(group)
+    }, MIRROR_WATCHER_DEGRADED_POLLING_INTERVAL_MS))
+  }
+  updateWatcherHealth(group, 'degraded-polling', {
+    message,
+    failureKind
+  })
+  void runDegradedPoll(group)
+}
+
+async function runSuspendedProbe(group: MirrorWatcherGroup): Promise<void> {
+  if (shuttingDown || group.entries.size === 0) return
+  const startedAt = Date.now()
+  try {
+    await fs.access(group.repoRoot, fsConstants.F_OK)
+    performanceTrace.record(PERF_TRACE_EVENT.WORKER_GIT_STATE_MIRROR_WATCHER_SUSPENDED_PROBE, {
+      repoRoot: group.repoRoot,
+      result: 'found',
+      durationMs: Date.now() - startedAt
+    })
+    clearGroupProbeTimer(group)
+    updateWatcherHealth(group, 'recovering', {
+      message: null,
+      failureKind: 'path-missing'
+    })
+    await ensureWatcherForGroup(group, 'suspended-probe')
+  } catch (error) {
+    performanceTrace.record(PERF_TRACE_EVENT.WORKER_GIT_STATE_MIRROR_WATCHER_SUSPENDED_PROBE, {
+      repoRoot: group.repoRoot,
+      result: 'missing',
+      error: error instanceof Error ? error.message : String(error),
+      durationMs: Date.now() - startedAt
+    })
+  }
+}
+
+async function enterSuspended(group: MirrorWatcherGroup, message: string): Promise<void> {
+  clearGroupRestartTimer(group)
+  clearGroupPollTimer(group)
+  await disposeGroupWatcher(group)
+  updateWatcherHealth(group, 'suspended', {
+    message,
+    failureKind: 'path-missing'
+  })
+  if (!group.suspendedProbeTimer) {
+    group.suspendedProbeTimer = setTimerUnref(setInterval(() => {
+      void runSuspendedProbe(group)
+    }, MIRROR_WATCHER_SUSPENDED_PROBE_INTERVAL_MS))
+  }
+}
+
+async function handleWatcherFault(
+  group: MirrorWatcherGroup,
+  failureKind: MirrorWatcherFailureKind,
+  error: unknown
+): Promise<void> {
+  if (shuttingDown || group.entries.size === 0) return
+  const message = error instanceof Error ? error.message : String(error)
+  group.failureCount += 1
+  group.message = message
+  group.failureKind = failureKind
+  log('warn', 'parcel-watcher fault; starting recovery supervisor', {
+    repoRoot: group.repoRoot,
+    failureKind,
+    failureCount: group.failureCount,
+    error: message
+  })
+  await disposeGroupWatcher(group)
+
+  if (failureKind === 'path-missing' || isMirrorWatcherPathMissingError(error)) {
+    await enterSuspended(group, message)
+    return
+  }
+
+  updateWatcherHealth(group, 'recovering', {
+    message,
+    failureKind
+  })
+  startDegradedPolling(group, failureKind, message)
+  scheduleWatcherRestart(group, failureKind)
+}
+
+async function startWatcherForGroup(group: MirrorWatcherGroup): Promise<() => Promise<void>> {
   if (shuttingDown) {
     throw new Error('worker is shutting down')
+  }
+  if (autotestSubscribeFailurePending) {
+    autotestSubscribeFailurePending = false
+    throw new Error('autotest subscribe failure')
   }
   // Single parcel-watcher subscription covering both working tree and
   // .git/**. The callback uses classifyEventPath to drop noise (objects,
   // lockfiles, tmpfiles) and keep state-relevant paths.
-  const subscription = await parcelWatcher.subscribe(entry.watchedRoot, (err, events) => {
+  const subscription = await parcelWatcher.subscribe(group.repoRoot, (err, events) => {
     if (shuttingDown) return
     if (err) {
       log('error', 'parcel-watcher error', {
-        cwd: entry.cwd,
+        repoRoot: group.repoRoot,
         error: err.message
       })
-      // Phase 5: explicit watcher-failure signal to main + renderer. No
-      // silent fallback / polling — UI banner asks the user to manually
-      // refresh if they care about FS-event freshness.
-      emit({ kind: 'watcher-error', cwd: entry.cwd, message: err.message })
+      void handleWatcherFault(group, 'callback-error', err)
       return
     }
-    if (entry.detachRequested) return
-    let kept = 0
+    if (group.entries.size === 0) return
+    const keptPaths: string[] = []
     for (const event of events) {
-      const classified = classifyEventPath(event.path, entry.watchedRoot)
-      if (classified.drop) continue
-      entry.pendingPaths.add(event.path)
-      kept += 1
+      const classified = classifyEventPath(event.path, group.repoRoot)
+      if (classified.drop) {
+        performanceTrace.record(PERF_TRACE_EVENT.WORKER_GIT_STATE_MIRROR_WATCHER_FILTERED, {
+          repoRoot: group.repoRoot,
+          path: event.path,
+          kind: event.type,
+          reason: classified.reason
+        })
+        continue
+      }
+      keptPaths.push(event.path)
+      performanceTrace.record(PERF_TRACE_EVENT.WORKER_GIT_STATE_MIRROR_WATCHER_FIRE, {
+        repoRoot: group.repoRoot,
+        path: event.path,
+        kind: event.type
+      })
     }
-    if (kept > 0) {
-      scheduleRecompute(entry)
+    if (keptPaths.length > 0) {
+      scheduleGroupRecompute(group, keptPaths)
     }
-  })
+  }, { ignore: [...MIRROR_WATCHER_IGNORE] })
 
   return async () => {
     try {
       await subscription.unsubscribe()
     } catch (error) {
       log('warn', 'parcel-watcher unsubscribe failed', {
-        cwd: entry.cwd,
+        repoRoot: group.repoRoot,
         error: error instanceof Error ? error.message : String(error)
       })
     }
   }
+}
+
+async function ensureWatcherForGroup(
+  group: MirrorWatcherGroup,
+  reason: 'initial' | 'restart' | 'suspended-probe'
+): Promise<void> {
+  if (!isWatcherGroupCurrent(group) || group.attachInFlight) return
+  group.attachInFlight = true
+  clearGroupRestartTimer(group)
+  updateWatcherHealth(group, reason === 'initial' ? 'attaching' : 'recovering', {
+    message: group.message,
+    failureKind: group.failureKind
+  })
+  const startedAt = Date.now()
+  try {
+    await fs.access(group.repoRoot, fsConstants.F_OK)
+  } catch (error) {
+    group.attachInFlight = false
+    await handleWatcherFault(group, 'path-missing', error)
+    return
+  }
+  if (!isWatcherGroupCurrent(group)) {
+    group.attachInFlight = false
+    return
+  }
+
+  try {
+    const dispose = await startWatcherForGroup(group)
+    if (!isWatcherGroupCurrent(group)) {
+      group.attachInFlight = false
+      await dispose()
+      return
+    }
+    group.dispose = dispose
+    group.attachInFlight = false
+    group.failureCount = 0
+    group.consecutivePollingFailures = 0
+    group.message = null
+    group.failureKind = null
+    clearGroupPollTimer(group)
+    clearGroupProbeTimer(group)
+    updateWatcherHealth(group, 'healthy', {
+      message: null,
+      failureKind: null
+    })
+    performanceTrace.record(PERF_TRACE_EVENT.WORKER_GIT_STATE_MIRROR_WATCHER_RESTART_RESULT, {
+      repoRoot: group.repoRoot,
+      reason,
+      result: 'success',
+      durationMs: Date.now() - startedAt
+    })
+    await Promise.all(activeEntriesForGroup(group).map((entry) => runRecompute(entry, reason === 'initial' ? 'attach' : 'watcher')))
+    if (autotestWatcherFailCallbackOnce && !group.callbackFailureInjected) {
+      group.callbackFailureInjected = true
+      setTimerUnref(setTimeout(() => {
+        if (shuttingDown || group.entries.size === 0) return
+        void handleWatcherFault(group, 'callback-error', new Error('autotest callback failure'))
+      }, 20))
+    }
+  } catch (error) {
+    group.attachInFlight = false
+    performanceTrace.record(PERF_TRACE_EVENT.WORKER_GIT_STATE_MIRROR_WATCHER_RESTART_RESULT, {
+      repoRoot: group.repoRoot,
+      reason,
+      result: 'error',
+      error: error instanceof Error ? error.message : String(error),
+      durationMs: Date.now() - startedAt
+    })
+    await handleWatcherFault(group, 'subscribe-error', error)
+  }
+}
+
+async function detachEntryFromWatcherGroup(cwd: string): Promise<void> {
+  const groupKey = entryToGroupKey.get(cwd)
+  if (!groupKey) return
+  const group = watcherGroups.get(groupKey)
+  entryToGroupKey.delete(cwd)
+  if (!group) return
+  group.entries.delete(cwd)
+  const entry = entries.get(cwd)
+  if (entry) {
+    entry.watcherGroupKey = null
+    entry.watcherHealth = 'detached'
+  }
+  if (group.entries.size > 0) {
+    emitWatcherStatus(group)
+    return
+  }
+  clearGroupRestartTimer(group)
+  clearGroupPollTimer(group)
+  clearGroupProbeTimer(group)
+  await disposeGroupWatcher(group)
+  watcherGroups.delete(groupKey)
 }
 
 // ---------------------------------------------------------------------------
@@ -428,12 +919,17 @@ async function handleAttachWatch(cwd: string): Promise<void> {
   // We own the attach. Compute initial state first so consumers receive
   // a snapshot immediately upon attach.
   try {
-    await runRecompute(entry)
+    await runRecompute(entry, 'attach')
   } catch (error) {
     log('warn', 'initial recompute failed during attach', {
       cwd,
       error: error instanceof Error ? error.message : String(error)
     })
+  }
+  if (entry.detachRequested) {
+    entry.attachInFlight = false
+    entries.delete(cwd)
+    return
   }
 
   const watcherRoot = resolveMirrorWatcherRoot(entry.state)
@@ -451,22 +947,28 @@ async function handleAttachWatch(cwd: string): Promise<void> {
   }
   entry.watchedRoot = watcherRoot
 
-  let dispose: (() => Promise<void>) | null = null
-  try {
-    dispose = await startWatcher(entry)
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    log('error', 'failed to start parcel-watcher', { cwd, error: message })
-    // Phase 5: parcel-watcher subscribe failure (NFS, sandboxing, etc.)
-    // → renderer banner. Loud failure beats silent staleness.
-    emit({ kind: 'watcher-error', cwd, message })
-    entry.attachInFlight = false
-    return
+  const repoRootKey = normaliseMirrorRepoRootKey(watcherRoot)
+  let group = watcherGroups.get(repoRootKey)
+  const created = !group
+  if (!group) {
+    group = createWatcherGroup(watcherRoot)
+    watcherGroups.set(repoRootKey, group)
   }
+  group.entries.add(entry.cwd)
+  entryToGroupKey.set(entry.cwd, repoRootKey)
+  entry.watcherGroupKey = repoRootKey
 
-  const result = await completeMirrorAttach(entry, dispose)
+  const result = await completeMirrorAttach(entry, async () => {
+    await detachEntryFromWatcherGroup(entry.cwd)
+  })
   if (result === 'detached') {
     entries.delete(cwd)
+    return
+  }
+  if (created) {
+    await ensureWatcherForGroup(group, 'initial')
+  } else {
+    emitWatcherStatus(group)
   }
 }
 
@@ -497,7 +999,7 @@ async function handleFocusResync(cwd: string | null): Promise<void> {
     entry.pendingSince = null
     entry.pendingPaths.clear()
   }
-  await runRecompute(entry)
+  await runRecompute(entry, 'focus-resync')
 }
 
 async function handleRequestFileBody(
@@ -541,6 +1043,8 @@ async function shutdownWorker(): Promise<void> {
   }
 
   entries.clear()
+  watcherGroups.clear()
+  entryToGroupKey.clear()
   bodyCache.clear()
   mirrorGenerations.clear()
   await delay(NATIVE_WATCHER_SHUTDOWN_DRAIN_MS)
@@ -654,7 +1158,7 @@ parentPort.on('message', (msg: MainToMirrorMessage) => {
   }
 })
 
-// Announce readiness. From this point on the worker is purely reactive:
-// only acts on incoming messages or parcel-watcher events. No recurring
-// timer, no polling loop, no setInterval anywhere.
+// Announce readiness. From this point on the worker reacts to incoming
+// messages and parcel-watcher events; supervisor timers are only armed
+// while a watcher is recovering, polling, or suspended.
 emit({ kind: 'ready' })

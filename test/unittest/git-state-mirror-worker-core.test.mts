@@ -9,14 +9,21 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
+  addMirrorWatcherGroupEntry,
   beginMirrorRecompute,
+  beginMirrorPoll,
   classifyEventPath,
+  computeMirrorWatcherBackoffMs,
   completeMirrorAttach,
   computeMirrorDelta,
   createMirrorWorkerEntry,
+  finishMirrorPoll,
   finishMirrorRecomputeIfCurrent,
+  isMirrorWatcherPathMissingError,
+  MIRROR_WATCHER_IGNORE,
   requestMirrorAttach,
   requestMirrorDetach,
+  normaliseMirrorRepoRootKey,
   resolveMirrorWatcherRoot
 } from '../../electron/main/git-state-mirror-worker-core.ts'
 
@@ -84,6 +91,31 @@ test('git watcher allowlist still permits durable git state files', () => {
   })
 })
 
+test('Parcel ignore list keeps durable git state files visible', () => {
+  const ignored = new Set<string>(MIRROR_WATCHER_IGNORE as readonly string[])
+  assert.equal(ignored.has('.git/objects/**'), true)
+  assert.equal(ignored.has('node_modules/**'), true)
+  assert.equal(ignored.has('.git/index'), false)
+  assert.equal(ignored.has('.git/HEAD'), false)
+  assert.equal(ignored.has('.git/refs/**'), false)
+  assert.equal(ignored.has('.git/packed-refs'), false)
+})
+
+test('watcher backoff uses 800/1600/3200/5000 cap', () => {
+  assert.equal(computeMirrorWatcherBackoffMs(0), 800)
+  assert.equal(computeMirrorWatcherBackoffMs(1), 800)
+  assert.equal(computeMirrorWatcherBackoffMs(2), 1600)
+  assert.equal(computeMirrorWatcherBackoffMs(3), 3200)
+  assert.equal(computeMirrorWatcherBackoffMs(4), 5000)
+  assert.equal(computeMirrorWatcherBackoffMs(99), 5000)
+})
+
+test('path missing errors are classified for suspended watcher state', () => {
+  assert.equal(isMirrorWatcherPathMissingError(Object.assign(new Error('ENOENT: no such file or directory'), { code: 'ENOENT' })), true)
+  assert.equal(isMirrorWatcherPathMissingError(new Error('watched path does not exist')), true)
+  assert.equal(isMirrorWatcherPathMissingError(new Error('permission denied')), false)
+})
+
 test('watcher root is only armed for resolved git repositories', () => {
   const nonRepo: MirrorState = {
     cwd: '/Users/test/Projects',
@@ -129,6 +161,26 @@ test('detach while attach is in flight disposes the late watcher handle', async 
   assert.equal(entry.watcherDispose, null)
 })
 
+test('detach clears debounce/restart/poll/probe timers and pending paths', async () => {
+  const entry = createMirrorWorkerEntry('/repo')
+  entry.pendingPaths.add('/repo/file.txt')
+  entry.pendingSince = 123
+  entry.debounceTimer = setTimeout(() => {}, 10_000)
+  entry.restartTimer = setTimeout(() => {}, 10_000)
+  entry.pollTimer = setTimeout(() => {}, 10_000)
+  entry.suspendedProbeTimer = setTimeout(() => {}, 10_000)
+
+  const result = await requestMirrorDetach(entry)
+
+  assert.equal(result, 'idle')
+  assert.equal(entry.debounceTimer, null)
+  assert.equal(entry.restartTimer, null)
+  assert.equal(entry.pollTimer, null)
+  assert.equal(entry.suspendedProbeTimer, null)
+  assert.equal(entry.pendingSince, null)
+  assert.equal(entry.pendingPaths.size, 0)
+})
+
 test('rapid resubscribe cancels a pending detach during attach', async () => {
   const entry = createMirrorWorkerEntry('/repo')
   const calls: string[] = []
@@ -160,6 +212,33 @@ test('newer recompute wins over stale in-flight recompute completion', () => {
   assert.equal(oldDelta, null)
   assert.equal(entry.state?.status, 'modified')
   assert.equal(entry.state?.capturedAt, 200)
+})
+
+test('poll in flight skips next tick until current poll finishes', () => {
+  const entry = createMirrorWorkerEntry('/repo')
+  assert.equal(beginMirrorPoll(entry), 'start')
+  assert.equal(beginMirrorPoll(entry), 'skip-in-flight')
+  finishMirrorPoll(entry)
+  assert.equal(beginMirrorPoll(entry), 'start')
+  finishMirrorPoll(entry)
+})
+
+test('repo root dedupe reuses one watcher for cwd and subdir', () => {
+  const groups = new Map()
+  const root = '/Users/test/Projects/repo'
+  const first = addMirrorWatcherGroupEntry(groups, root, root)
+  const second = addMirrorWatcherGroupEntry(groups, root, `${root}/packages/app`)
+
+  assert.equal(first.created, true)
+  assert.equal(second.created, false)
+  assert.equal(groups.size, 1)
+  assert.equal(first.group, second.group)
+  assert.equal(second.group.entries.size, 2)
+})
+
+test('repo root key normalizes Windows drive letter and slashes', () => {
+  assert.equal(normaliseMirrorRepoRootKey('C:\\Repo\\Project\\'), 'c:/Repo/Project')
+  assert.equal(normaliseMirrorRepoRootKey('c:/Repo/Project'), 'c:/Repo/Project')
 })
 
 // ---------------------------------------------------------------------------

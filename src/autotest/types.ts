@@ -77,6 +77,16 @@ export interface GitDiffDebugApi {
     loading: boolean
     error: string | null
   } | null
+  getSelectedEditorModelContent?: () => {
+    originalContent: string | null
+    modifiedContent: string | null
+    expectedOriginalContent: string | null
+    expectedModifiedContent: string | null
+    originalUri: string | null
+    modifiedUri: string | null
+    originalMatchesState: boolean | null
+    modifiedMatchesState: boolean | null
+  } | null
   getCachedFileContentByPath?: (path: string, changeType?: string) => {
     filename: string
     changeType: string

@@ -69,3 +69,16 @@ export function resolveGitDiffRestoredSelection(
     (file.originalFilename ?? '') === (entry.originalFilename ?? '')
   ) ?? files.find((file) => file.filename === entry.filePath) ?? null
 }
+
+export function clearGitDiffMemorySelectionWhenEmpty(
+  memory: DiffViewMemory,
+  files: GitFileStatus[]
+): void {
+  if (files.length === 0) {
+    clearGitDiffMemorySelection(memory)
+  }
+}
+
+export function clearGitDiffMemorySelection(memory: DiffViewMemory): void {
+  memory.selectedFileKey = null
+}

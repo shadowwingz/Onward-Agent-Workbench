@@ -131,8 +131,9 @@ export const IPC = {
   GIT_STATE_MIRROR_REQUEST_FILE_BODY: 'git-state-mirror:request-file-body',
   GIT_STATE_MIRROR_FILE_BODY_UPDATE: 'git-state-mirror:file-body-update',
   GIT_STATE_PUSH_CWD: 'git-state-mirror:push-cwd',
-  // Phase 5: Worker thread → main → renderer broadcast for parcel-watcher
-  // failures. Renderer surfaces a banner (no silent fallback).
+  // Worker thread → main → renderer watcher supervisor health. Hard
+  // watcher-error is reserved for failed watcher + failed fallback refresh.
+  GIT_STATE_MIRROR_WATCHER_STATUS: 'git-state-mirror:watcher-status',
   GIT_STATE_MIRROR_WATCHER_ERROR: 'git-state-mirror:watcher-error',
   // Phase 5 PART 2: Refresh Changes button → main → Worker. Forces a
   // recompute + bumps mirror generation so the renderer's DiffEditor

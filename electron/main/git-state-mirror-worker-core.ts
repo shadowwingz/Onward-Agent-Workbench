@@ -5,9 +5,29 @@
 
 import { resolve } from 'path'
 
-import type { MirrorDelta, MirrorState } from './git-state-mirror-types'
+import type {
+  MirrorDelta,
+  MirrorState,
+  MirrorWatcherFailureKind,
+  MirrorWatcherHealth
+} from './git-state-mirror-types'
 
 export type MirrorWatcherFilterReason = 'gitObjects' | 'lockfile' | 'tmpfile' | 'gitInternal' | 'allowed'
+
+export const MIRROR_WATCHER_RESTART_BACKOFF_MS = [800, 1600, 3200] as const
+export const MIRROR_WATCHER_RESTART_BACKOFF_CAP_MS = 5000
+export const MIRROR_WATCHER_DEGRADED_POLLING_INTERVAL_MS = 3000
+export const MIRROR_WATCHER_SUSPENDED_PROBE_INTERVAL_MS = 5000
+export const MIRROR_WATCHER_POLLING_FAILURE_THRESHOLD = 3
+
+export const MIRROR_WATCHER_IGNORE = [
+  '.git/objects/**',
+  'node_modules/**',
+  'out/**',
+  'release/**',
+  'traces/**',
+  '.parcel-cache/**'
+] as const
 
 export interface MirrorWorkerEntryCore {
   cwd: string
@@ -20,6 +40,25 @@ export interface MirrorWorkerEntryCore {
   pendingSince: number | null
   pendingPaths: Set<string>
   recomputeGeneration: number
+  recomputeInFlight: boolean
+  recomputeQueued: boolean
+  watcherHealth: MirrorWatcherHealth
+  watcherFailureCount: number
+  lastWatcherError: string | null
+  lastWatcherFailureKind: MirrorWatcherFailureKind | null
+  lastWatcherHealthyAt: number | null
+  restartTimer: NodeJS.Timeout | null
+  pollTimer: NodeJS.Timeout | null
+  suspendedProbeTimer: NodeJS.Timeout | null
+  pollInFlight: boolean
+  restartGeneration: number
+  watcherGroupKey: string | null
+}
+
+export interface MirrorWatcherGroupCore {
+  repoRoot: string
+  repoRootKey: string
+  entries: Set<string>
 }
 
 export function createMirrorWorkerEntry(cwd: string): MirrorWorkerEntryCore {
@@ -34,7 +73,20 @@ export function createMirrorWorkerEntry(cwd: string): MirrorWorkerEntryCore {
     debounceTimer: null,
     pendingSince: null,
     pendingPaths: new Set(),
-    recomputeGeneration: 0
+    recomputeGeneration: 0,
+    recomputeInFlight: false,
+    recomputeQueued: false,
+    watcherHealth: 'idle',
+    watcherFailureCount: 0,
+    lastWatcherError: null,
+    lastWatcherFailureKind: null,
+    lastWatcherHealthyAt: null,
+    restartTimer: null,
+    pollTimer: null,
+    suspendedProbeTimer: null,
+    pollInFlight: false,
+    restartGeneration: 0,
+    watcherGroupKey: null
   }
 }
 
@@ -90,8 +142,76 @@ export function cleanupMirrorWorkerEntry(entry: MirrorWorkerEntryCore): void {
     clearTimeout(entry.debounceTimer)
     entry.debounceTimer = null
   }
+  clearMirrorWatcherTimers(entry)
   entry.pendingPaths.clear()
   entry.pendingSince = null
+  entry.pollInFlight = false
+  entry.recomputeQueued = false
+}
+
+export function clearMirrorWatcherTimers(entry: MirrorWorkerEntryCore): void {
+  if (entry.restartTimer) {
+    clearTimeout(entry.restartTimer)
+    entry.restartTimer = null
+  }
+  if (entry.pollTimer) {
+    clearTimeout(entry.pollTimer)
+    entry.pollTimer = null
+  }
+  if (entry.suspendedProbeTimer) {
+    clearTimeout(entry.suspendedProbeTimer)
+    entry.suspendedProbeTimer = null
+  }
+}
+
+export function computeMirrorWatcherBackoffMs(failureCount: number): number {
+  const safeCount = Math.max(1, Math.floor(failureCount))
+  return MIRROR_WATCHER_RESTART_BACKOFF_MS[safeCount - 1] ?? MIRROR_WATCHER_RESTART_BACKOFF_CAP_MS
+}
+
+export function isMirrorWatcherPathMissingError(error: unknown): boolean {
+  const maybe = error as { code?: unknown; name?: unknown; message?: unknown } | null
+  const code = typeof maybe?.code === 'string' ? maybe.code : ''
+  const name = typeof maybe?.name === 'string' ? maybe.name : ''
+  const message = typeof maybe?.message === 'string' ? maybe.message : String(error ?? '')
+  return /ENOENT|ENOTDIR|not found|no such file|path.*missing|does not exist/i.test(`${code} ${name} ${message}`)
+}
+
+export function normaliseMirrorRepoRootKey(repoRoot: string): string {
+  const slashNormalised = repoRoot.replace(/\\/g, '/').replace(/\/+$/, '')
+  if (/^[A-Za-z]:\//.test(slashNormalised)) {
+    return slashNormalised.replace(/^([A-Z]):/, (m) => m.toLowerCase())
+  }
+  return resolve(slashNormalised).replace(/\\/g, '/').replace(/\/+$/, '')
+}
+
+export function addMirrorWatcherGroupEntry(
+  groups: Map<string, MirrorWatcherGroupCore>,
+  repoRoot: string,
+  cwd: string
+): { group: MirrorWatcherGroupCore; created: boolean } {
+  const repoRootKey = normaliseMirrorRepoRootKey(repoRoot)
+  let group = groups.get(repoRootKey)
+  if (!group) {
+    group = {
+      repoRoot: resolve(repoRoot),
+      repoRootKey,
+      entries: new Set()
+    }
+    groups.set(repoRootKey, group)
+  }
+  group.entries.add(resolve(cwd))
+  return { group, created: group.entries.size === 1 }
+}
+
+export function beginMirrorPoll(entry: MirrorWorkerEntryCore): 'start' | 'skip-in-flight' {
+  if (entry.pollInFlight) return 'skip-in-flight'
+  entry.pollInFlight = true
+  return 'start'
+}
+
+export function finishMirrorPoll(entry: MirrorWorkerEntryCore): void {
+  entry.pollInFlight = false
 }
 
 export function requestMirrorAttach(entry: MirrorWorkerEntryCore): 'start' | 'already-attached' | 'already-in-flight' | 'resume-in-flight' {

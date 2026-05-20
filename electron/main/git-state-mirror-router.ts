@@ -38,7 +38,8 @@ import type {
   MirrorToMainMessage,
   MirrorState,
   MirrorDelta,
-  MirrorFileBody
+  MirrorFileBody,
+  MirrorWatcherStatus
 } from './git-state-mirror-types'
 
 /**
@@ -106,6 +107,8 @@ class GitStateMirrorRouter {
   private refCounts = new Map<string, number>()
   /** cwd → latest known snapshot, served immediately on new subscription. */
   private latest = new Map<string, MirrorState>()
+  /** cwd → latest watcher supervisor health, exposed to renderers/autotests. */
+  private watcherStatuses = new Map<string, MirrorWatcherStatus>()
   /** terminalId → last cwd pushed through OSC/native cwd detection. */
   private terminalCwds = new Map<string, string | null>()
 
@@ -171,6 +174,7 @@ class GitStateMirrorRouter {
     this.subs.clear()
     this.refCounts.clear()
     this.latest.clear()
+    this.watcherStatuses.clear()
     this.terminalCwds.clear()
     for (const [, pending] of this.pendingBodies) {
       pending.reject(new Error('GitStateMirrorRouter disposed'))
@@ -322,6 +326,25 @@ class GitStateMirrorRouter {
         }
         return
       }
+      case 'watcher-status':
+        this.watcherStatuses.set(msg.status.cwd, msg.status)
+        if (
+          process.env.ONWARD_DEBUG === '1' ||
+          msg.status.health === 'degraded-polling' ||
+          msg.status.health === 'suspended' ||
+          msg.status.health === 'failed'
+        ) {
+          console.log('[GitStateMirrorRouter] watcher-status', {
+            cwd: msg.status.cwd,
+            repoRoot: msg.status.repoRoot,
+            health: msg.status.health,
+            failureKind: msg.status.failureKind,
+            failureCount: msg.status.failureCount,
+            polling: msg.status.polling
+          })
+        }
+        this.fanoutWatcherStatus(msg.status)
+        return
       case 'log':
         if (msg.level === 'error') {
           console.error('[git-state-mirror-worker]', msg.message, msg.data ?? '')
@@ -483,6 +506,19 @@ class GitStateMirrorRouter {
     }
   }
 
+  private fanoutWatcherStatus(status: MirrorWatcherStatus): void {
+    for (const [wcId, cwdSet] of this.subs) {
+      if (!cwdSet.has(status.cwd)) continue
+      const wc = webContents.fromId(wcId)
+      if (!wc || wc.isDestroyed()) continue
+      try {
+        wc.send(IPC.GIT_STATE_MIRROR_WATCHER_STATUS, status)
+      } catch (error) {
+        console.warn('[GitStateMirrorRouter] watcher-status send failed:', error)
+      }
+    }
+  }
+
   /**
    * Drop subscriptions belonging to a webContents that has been destroyed
    * (renderer reload, window close, terminal-tab close). Without this every
@@ -505,11 +541,12 @@ class GitStateMirrorRouter {
   }
 
   /** Test hook for autotest — read-only. */
-  inspect(): { workerReady: boolean; subscribers: number; cwds: string[] } {
+  inspect(): { workerReady: boolean; subscribers: number; cwds: string[]; watcherStatuses: MirrorWatcherStatus[] } {
     return {
       workerReady: this.workerReady,
       subscribers: Array.from(this.subs.values()).reduce((acc, s) => acc + s.size, 0),
-      cwds: Array.from(this.refCounts.keys())
+      cwds: Array.from(this.refCounts.keys()),
+      watcherStatuses: Array.from(this.watcherStatuses.values())
     }
   }
 

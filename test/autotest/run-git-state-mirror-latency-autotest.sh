@@ -24,12 +24,12 @@ fi
 # are committed under test/autotest/fixtures/git-state-mirror-latency/ and
 # treated as read-only — we never write back into them.
 # ---------------------------------------------------------------------------
-USER_DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/onward-gsm-userdata.XXXXXX")"
+USER_DATA_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/onward-gsm-userdata.XXXXXX")"
 FIXTURE_TMP="$(mktemp -d "${TMPDIR:-/tmp}/onward-gsm-fixture.XXXXXX")"
 FIXTURE_SRC="$REPO_ROOT/test/autotest/fixtures/git-state-mirror-latency"
 
 cleanup() {
-  rm -rf "$USER_DATA_DIR" 2>/dev/null || true
+  rm -rf "$USER_DATA_ROOT" 2>/dev/null || true
   rm -rf "$FIXTURE_TMP" 2>/dev/null || true
   # Defence-in-depth: sweep any __autotest_* leftover at the repo root per
   # CLAUDE.md "__autotest_* sweep" hard rule.
@@ -71,25 +71,43 @@ node -e "
 
 rm -f "$LOG_FILE"
 
-echo "Starting Git State Mirror latency autotest..."
-echo "  Binary:        $APP_BIN"
-echo "  Fixture src:   $FIXTURE_SRC"
-echo "  Fixture tmp:   $FIXTURE_TMP"
-echo "  Manifest:      $MANIFEST_PATH"
-echo "  User data dir: $USER_DATA_DIR"
-echo "  Log:           $LOG_FILE"
-echo ""
+{
+  echo "Starting Git State Mirror latency autotest..."
+  echo "  Binary:         $APP_BIN"
+  echo "  Fixture src:    $FIXTURE_SRC"
+  echo "  Fixture tmp:    $FIXTURE_TMP"
+  echo "  Manifest:       $MANIFEST_PATH"
+  echo "  User data root: $USER_DATA_ROOT"
+  echo "  Log:            $LOG_FILE"
+  echo ""
+} >> "$LOG_FILE"
 
-ONWARD_DEBUG=1 \
-ONWARD_PERF_TRACE=1 \
-ONWARD_REPO_ROOT="$REPO_ROOT" \
-ONWARD_USER_DATA_DIR="$USER_DATA_DIR" \
-ONWARD_AUTOTEST=1 \
-ONWARD_AUTOTEST_SUITE=git-state-mirror-latency \
-ONWARD_AUTOTEST_CWD="$FIXTURE_TMP/repo-A" \
-ONWARD_AUTOTEST_FIXTURE_EXTRA="$MANIFEST_PATH" \
-ONWARD_AUTOTEST_EXIT=1 \
-"$APP_BIN" > "$LOG_FILE" 2>&1 || true
+run_pass() {
+  local label="$1"
+  shift
+  local user_data_dir="$USER_DATA_ROOT/$label"
+  mkdir -p "$user_data_dir"
+  {
+    echo ""
+    echo "=== Git State Mirror latency pass: $label ==="
+  } >> "$LOG_FILE"
+  env \
+    ONWARD_DEBUG=1 \
+    ONWARD_PERF_TRACE=1 \
+    ONWARD_REPO_ROOT="$REPO_ROOT" \
+    ONWARD_USER_DATA_DIR="$user_data_dir" \
+    ONWARD_AUTOTEST=1 \
+    ONWARD_AUTOTEST_SUITE=git-state-mirror-latency \
+    ONWARD_AUTOTEST_CWD="$FIXTURE_TMP/repo-A" \
+    ONWARD_AUTOTEST_FIXTURE_EXTRA="$MANIFEST_PATH" \
+    ONWARD_AUTOTEST_EXIT=1 \
+    "$@" \
+    "$APP_BIN" >> "$LOG_FILE" 2>&1 || true
+}
+
+run_pass "baseline"
+run_pass "subscribe-failure" ONWARD_AUTOTEST_GSM_WATCHER_FAIL_SUBSCRIBE_ONCE=1
+run_pass "callback-failure" ONWARD_AUTOTEST_GSM_WATCHER_FAIL_CALLBACK_ONCE=1
 
 echo ""
 echo "=== Test log (last 60 lines) ==="
@@ -118,6 +136,24 @@ fi
 
 if ! grep -q "GSM-14-force-refresh-bumps-generation" "$LOG_FILE"; then
   echo "Missing GSM-14 marker; the generation refresh test did not run to completion" >&2
+  tail -n 40 "$LOG_FILE" >&2
+  exit 1
+fi
+
+if ! grep -q "GSM-15-watcher-subscribe-failure-recovers" "$LOG_FILE"; then
+  echo "Missing GSM-15 marker; the subscribe failure recovery test did not run to completion" >&2
+  tail -n 40 "$LOG_FILE" >&2
+  exit 1
+fi
+
+if ! grep -q "GSM-16-watcher-callback-failure-recovers" "$LOG_FILE"; then
+  echo "Missing GSM-16 marker; the callback failure recovery test did not run to completion" >&2
+  tail -n 40 "$LOG_FILE" >&2
+  exit 1
+fi
+
+if ! grep -q "autotest watcher failure injection active" "$LOG_FILE"; then
+  echo "Missing watcher failure injection log marker" >&2
   tail -n 40 "$LOG_FILE" >&2
   exit 1
 fi

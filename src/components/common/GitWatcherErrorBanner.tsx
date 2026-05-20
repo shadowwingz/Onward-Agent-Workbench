@@ -6,62 +6,102 @@
 /**
  * GitWatcherErrorBanner.
  *
- * Phase 5 deliverable: visible, dismissable banner shown when the
- * GitStateMirror worker reports a parcel-watcher failure for any
- * subscribed repo. There is no silent fallback by design (per the
- * Onward state-flow architecture's "explicit failure + user-visible
- * prompt" decision) — this banner is the contract.
+ * Visible, dismissable banner shown when the GitStateMirror watcher
+ * supervisor is recovering, degraded, suspended, or fully failed.
  *
  * Mount once at App.tsx top level. The component owns its subscription
- * to `electronAPI.git.onMirrorWatcherError`; renders nothing when no
- * error is in flight.
+ * to GitStateMirror watcher health IPC; renders nothing while healthy.
  */
 
 import { useEffect, useState, useCallback } from 'react'
 
 import { useI18n } from '../../i18n/useI18n'
+import type { GitStateMirrorWatcherHealth, GitStateMirrorWatcherStatus } from '../../types/electron'
 
-interface WatcherErrorState {
+interface WatcherBannerState {
   cwd: string
-  message: string
+  health: GitStateMirrorWatcherHealth
+  message: string | null
   shownAt: number
+  hardFailure: boolean
 }
 
 export function GitWatcherErrorBanner(): JSX.Element | null {
   const { t } = useI18n()
-  const [error, setError] = useState<WatcherErrorState | null>(null)
+  const [banner, setBanner] = useState<WatcherBannerState | null>(null)
   const [refreshing, setRefreshing] = useState(false)
 
   useEffect(() => {
     const api = window.electronAPI?.git
-    if (!api?.onMirrorWatcherError) return
-    const dispose = api.onMirrorWatcherError((cwd, message) => {
-      setError({ cwd, message, shownAt: Date.now() })
-    })
-    return () => { dispose?.() }
+    const disposers: Array<() => void> = []
+    if (api?.onMirrorWatcherStatus) {
+      disposers.push(api.onMirrorWatcherStatus((status: GitStateMirrorWatcherStatus) => {
+        if (
+          status.health === 'idle' ||
+          status.health === 'attaching' ||
+          status.health === 'healthy' ||
+          status.health === 'detached'
+        ) {
+          setBanner((prev) => prev?.cwd === status.cwd ? null : prev)
+          return
+        }
+        setBanner({
+          cwd: status.cwd,
+          health: status.health,
+          message: status.message,
+          shownAt: status.updatedAt,
+          hardFailure: status.health === 'failed'
+        })
+      }))
+    }
+    if (api?.onMirrorWatcherError) {
+      disposers.push(api.onMirrorWatcherError((cwd, message) => {
+        setBanner({
+          cwd,
+          health: 'failed',
+          message,
+          shownAt: Date.now(),
+          hardFailure: true
+        })
+      }))
+    }
+    return () => {
+      for (const dispose of disposers) dispose?.()
+    }
   }, [])
 
   const onDismiss = useCallback(() => {
-    setError(null)
+    setBanner(null)
   }, [])
 
   const onRefresh = useCallback(() => {
-    if (!error) return
+    if (!banner) return
     setRefreshing(true)
-    void Promise.resolve(window.electronAPI?.git?.forceRefresh?.(error.cwd))
+    void Promise.resolve(window.electronAPI?.git?.forceRefresh?.(banner.cwd))
       .finally(() => {
         setRefreshing(false)
-        setError(null)
+        setBanner(null)
       })
-  }, [error])
+  }, [banner])
 
-  if (!error) return null
+  if (!banner) return null
 
   const repoLabel = (() => {
-    const cleaned = error.cwd.replace(/[\\/]+$/, '')
+    const cleaned = banner.cwd.replace(/[\\/]+$/, '')
     const parts = cleaned.split(/[\\/]/)
-    return parts[parts.length - 1] || error.cwd
+    return parts[parts.length - 1] || banner.cwd
   })()
+
+  const titleKey = (banner.hardFailure
+    ? 'gitState.watcherStatus.failed.title'
+    : `gitState.watcherStatus.${banner.health}.title`) as Parameters<typeof t>[0]
+  const bodyKey = (banner.hardFailure
+    ? 'gitState.watcherStatus.failed.body'
+    : `gitState.watcherStatus.${banner.health}.body`) as Parameters<typeof t>[0]
+  const background = banner.hardFailure
+    ? 'rgba(239, 68, 68, 0.95)'
+    : 'rgba(217, 119, 6, 0.96)'
+  const buttonColor = banner.hardFailure ? '#b91c1c' : '#92400e'
 
   return (
     <div
@@ -73,7 +113,7 @@ export function GitWatcherErrorBanner(): JSX.Element | null {
         left: '50%',
         transform: 'translateX(-50%)',
         zIndex: 9999,
-        background: 'rgba(239, 68, 68, 0.95)',
+        background,
         color: '#fff',
         borderRadius: 8,
         padding: '10px 14px',
@@ -88,30 +128,32 @@ export function GitWatcherErrorBanner(): JSX.Element | null {
     >
       <div style={{ flex: 1 }}>
         <div style={{ fontWeight: 600, marginBottom: 2 }}>
-          {t('gitState.watcherError.title')}
+          {t(titleKey)}
         </div>
         <div style={{ opacity: 0.92 }}>
-          {t('gitState.watcherError.body', { repo: repoLabel })}
+          {t(bodyKey, { repo: repoLabel })}
         </div>
       </div>
-      <button
-        type="button"
-        onClick={onRefresh}
-        disabled={refreshing}
-        style={{
-          background: '#fff',
-          color: '#b91c1c',
-          border: 'none',
-          borderRadius: 4,
-          padding: '4px 10px',
-          fontSize: 12,
-          fontWeight: 600,
-          cursor: refreshing ? 'default' : 'pointer',
-          opacity: refreshing ? 0.75 : 1
-        }}
-      >
-        {t('gitState.watcherError.reload')}
-      </button>
+      {banner.hardFailure && (
+        <button
+          type="button"
+          onClick={onRefresh}
+          disabled={refreshing}
+          style={{
+            background: '#fff',
+            color: buttonColor,
+            border: 'none',
+            borderRadius: 4,
+            padding: '4px 10px',
+            fontSize: 12,
+            fontWeight: 600,
+            cursor: refreshing ? 'default' : 'pointer',
+            opacity: refreshing ? 0.75 : 1
+          }}
+        >
+          {t('gitState.watcherError.reload')}
+        </button>
+      )}
       <button
         type="button"
         onClick={onDismiss}

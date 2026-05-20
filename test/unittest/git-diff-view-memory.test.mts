@@ -8,6 +8,8 @@ import assert from 'node:assert/strict'
 import type { GitFileStatus } from '../../src/types/electron.ts'
 import {
   buildGitDiffFileKey,
+  clearGitDiffMemorySelection,
+  clearGitDiffMemorySelectionWhenEmpty,
   resolveGitDiffRestoredSelection,
   type DiffViewMemory
 } from '../../src/components/GitDiffViewer/diffViewMemory.ts'
@@ -84,5 +86,49 @@ describe('git diff view memory', () => {
 
     const restored = resolveGitDiffRestoredSelection(files, '/repo', memory, null)
     assert.equal(restored, null)
+  })
+
+  it('clears remembered selection when a repo has no diff files', () => {
+    const file = gitFile('a.md')
+    const key = buildGitDiffFileKey('/repo', file)
+    const memory: DiffViewMemory = {
+      selectedFileKey: key,
+      entries: {
+        [key]: {
+          fileKey: key,
+          filePath: 'a.md',
+          anchor: null,
+          scrollTop: 0,
+          signature: null,
+          updatedAt: 1
+        }
+      }
+    }
+
+    clearGitDiffMemorySelectionWhenEmpty(memory, [])
+    assert.equal(memory.selectedFileKey, null)
+    assert.ok(memory.entries[key])
+  })
+
+  it('clears only the selected pointer while preserving scroll entries', () => {
+    const file = gitFile('a.md')
+    const key = buildGitDiffFileKey('/repo', file)
+    const memory: DiffViewMemory = {
+      selectedFileKey: key,
+      entries: {
+        [key]: {
+          fileKey: key,
+          filePath: 'a.md',
+          anchor: { line: 8, scrollTop: 120 },
+          scrollTop: 120,
+          signature: 'sig',
+          updatedAt: 1
+        }
+      }
+    }
+
+    clearGitDiffMemorySelection(memory)
+    assert.equal(memory.selectedFileKey, null)
+    assert.deepEqual(memory.entries[key]?.anchor, { line: 8, scrollTop: 120 })
   })
 })

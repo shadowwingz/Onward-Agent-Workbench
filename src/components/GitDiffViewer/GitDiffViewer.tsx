@@ -47,6 +47,7 @@ import {
   type HunkActionWidgetInstallResult
 } from './gitDiffHunkActions'
 import { resolveMonacoLanguageId } from './monacoLanguageMap'
+import { buildGitDiffModelSyncPlan } from './monacoModelSync'
 import {
   GitDiffClickLatencyTracker,
   type ClickLatencyMeasurement,
@@ -55,6 +56,8 @@ import {
 import { buildClickPhaseTraceRecords } from './clickLatencyTraceEmitter'
 import {
   buildGitDiffFileKey,
+  clearGitDiffMemorySelection,
+  clearGitDiffMemorySelectionWhenEmpty,
   resolveGitDiffRestoredSelection,
   type DiffViewAnchor,
   type DiffViewMemory,
@@ -349,6 +352,7 @@ type DiffSplitState = {
 }
 
 type FileContentLoadReason = 'select' | 'prefetch' | 'refresh' | 'auto-refresh' | 'debug'
+type GitDiffModelSyncReason = FileContentLoadReason | 'editor-mount' | 'state-change'
 
 type LastFileContentLoadInfo = {
   fileKey: string
@@ -664,6 +668,16 @@ type GitDiffDebugApi = {
     isBinary: boolean
     loading: boolean
     error: string | null
+  } | null
+  getSelectedEditorModelContent: () => {
+    originalContent: string | null
+    modifiedContent: string | null
+    expectedOriginalContent: string | null
+    expectedModifiedContent: string | null
+    originalUri: string | null
+    modifiedUri: string | null
+    originalMatchesState: boolean | null
+    modifiedMatchesState: boolean | null
   } | null
   getCachedFileContentByPath: (path: string, changeType?: GitFileStatus['changeType']) => {
     filename: string
@@ -1299,6 +1313,7 @@ export function GitDiffViewer({
   const visibleRepoItemsRef = useRef<RepoFilterTreeItem[]>([])
   const lastOpenScopeRef = useRef<string | null | undefined>(undefined)
   const resetDiffOnNextLoadRef = useRef(true)
+  const suppressSelectionRestoreOnNextLoadRef = useRef(false)
   const [diffRevealPhase, setDiffRevealPhase] = useState<DiffRevealPhase>('idle')
   const diffRevealPhaseRef = useRef<DiffRevealPhase>('idle')
   const diffRevealTimeoutRef = useRef<number | null>(null)
@@ -1701,6 +1716,11 @@ export function GitDiffViewer({
     selectedFileKey,
     selectedFileState
   ])
+
+  const clearCurrentMemorySelection = useCallback(() => {
+    const memory = getMemoryStore()
+    if (memory) clearGitDiffMemorySelection(memory)
+  }, [getMemoryStore])
 
   const scrollToFirstChange = useCallback(() => {
     const editor = diffEditorRef.current
@@ -2516,6 +2536,9 @@ export function GitDiffViewer({
     if (memoryKey) {
       diffMemoryRef.current[memoryKey] = memoryStore
     }
+    if (result.success) {
+      clearGitDiffMemorySelectionWhenEmpty(memoryStore, result.files)
+    }
 
     setFileContents((prev) => {
       const next: Record<string, FileContentState> = {}
@@ -2530,7 +2553,10 @@ export function GitDiffViewer({
       [...staleFileContentKeysRef.current].filter((key) => nextKeys.has(key))
     )
 
+    const suppressSelectionRestore = suppressSelectionRestoreOnNextLoadRef.current
+    suppressSelectionRestoreOnNextLoadRef.current = false
     const nextFile = result.success
+      && !suppressSelectionRestore
       ? resolveGitDiffRestoredSelection(
           result.files,
           repoRoot,
@@ -2866,6 +2892,9 @@ export function GitDiffViewer({
       const openingFromClosed = !wasOpenRef.current
       lastOpenScopeRef.current = nextScope
       resetDiffOnNextLoadRef.current = shouldReset
+      if (openingFromClosed) {
+        suppressSelectionRestoreOnNextLoadRef.current = true
+      }
       timingRef.current = {
         openRequestedAt,
         shellShownAt: performance.now(),
@@ -3018,9 +3047,10 @@ export function GitDiffViewer({
     coldMountRecordedRef.current = false
     if (wasOpenRef.current) {
       captureDiffView()
+      clearCurrentMemorySelection()
       wasOpenRef.current = false
     }
-  }, [captureDiffView, getMemoryKey, getMemoryStore, isOpen])
+  }, [captureDiffView, clearCurrentMemorySelection, getMemoryKey, getMemoryStore, isOpen])
 
   // Scroll capture is now registered via onDidScrollChange in handleEditorDidMount
   // Position restoration is done directly in handleEditorDidMount by checking memory storage (to avoid effect timing competition)
@@ -3148,6 +3178,94 @@ export function GitDiffViewer({
     modalSizeRef.current = modalSize
   }, [modalSize])
 
+  const syncCurrentDiffEditorModels = useCallback((
+    file: GitFileStatus,
+    state: FileContentState,
+    reason: GitDiffModelSyncReason
+  ) => {
+    const editor = diffEditorRef.current
+    if (!editor || !activeCwd || state.loading || state.error || state.isBinary || state.isImage || state.isPdf || state.isEpub) {
+      return null
+    }
+
+    const selected = selectedFileRef.current
+    const selectedKey = selected ? getFileKey(selected) : null
+    const fileKey = getFileKey(file)
+    if (!selected || selectedKey !== fileKey) return null
+
+    const originalEditor = editor.getOriginalEditor()
+    const modifiedEditor = editor.getModifiedEditor()
+    const originalModel = originalEditor.getModel()
+    const modifiedModel = modifiedEditor.getModel()
+    if (!originalModel || !modifiedModel) return null
+
+    const expectedOriginalUri = buildGitDiffModelPath(file, activeCwd, 'original')
+    const expectedModifiedUri = buildGitDiffModelPath(file, activeCwd, 'modified')
+    const originalUri = originalModel.uri.toString()
+    const modifiedUri = modifiedModel.uri.toString()
+    if (originalUri !== expectedOriginalUri || modifiedUri !== expectedModifiedUri) {
+      perfTrace(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_MODEL_SYNC, {
+        cwd: activeCwd,
+        terminalId,
+        fileKey,
+        filename: file.filename,
+        changeType: file.changeType,
+        reason,
+        result: 'uri-mismatch',
+        originalUri,
+        modifiedUri,
+        expectedOriginalUri,
+        expectedModifiedUri
+      })
+      return null
+    }
+
+    const startedAt = performance.now()
+    const nextOriginalContent = state.originalContent ?? ''
+    const nextModifiedContent = state.draftContent ?? state.modifiedContent ?? ''
+    const plan = buildGitDiffModelSyncPlan({
+      currentOriginalContent: originalModel.getValue(),
+      currentModifiedContent: modifiedModel.getValue(),
+      nextOriginalContent,
+      nextModifiedContent
+    })
+
+    if (plan.needsSync) {
+      const originalViewState = originalEditor.saveViewState()
+      const modifiedViewState = modifiedEditor.saveViewState()
+      suppressDraftChangeRef.current = true
+      try {
+        if (plan.originalChanged) originalModel.setValue(nextOriginalContent)
+        if (plan.modifiedChanged) modifiedModel.setValue(nextModifiedContent)
+      } finally {
+        suppressDraftChangeRef.current = false
+      }
+      if (originalViewState) originalEditor.restoreViewState(originalViewState)
+      if (modifiedViewState) modifiedEditor.restoreViewState(modifiedViewState)
+      scheduleDiffHunkActionWidgetInstall('model-sync')
+    }
+
+    const durationMs = +(performance.now() - startedAt).toFixed(1)
+    perfTrace(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_MODEL_SYNC, {
+      cwd: activeCwd,
+      terminalId,
+      fileKey,
+      filename: file.filename,
+      changeType: file.changeType,
+      reason,
+      result: plan.needsSync ? 'synced' : 'noop',
+      originalChanged: plan.originalChanged,
+      modifiedChanged: plan.modifiedChanged,
+      originalLen: plan.originalLen,
+      modifiedLen: plan.modifiedLen,
+      durationMs
+    })
+    return {
+      ...plan,
+      durationMs
+    }
+  }, [activeCwd, getFileKey, scheduleDiffHunkActionWidgetInstall, terminalId])
+
   const ensureFileContent = useCallback(async (
     file: GitFileStatus,
     force = false,
@@ -3181,6 +3299,7 @@ export function GitDiffViewer({
         },
         durationMs: 0
       }
+      syncCurrentDiffEditorModels(file, cached, reason)
       const editor = diffEditorRef.current
       if (editor) {
         window.setTimeout(() => {
@@ -3298,37 +3417,39 @@ export function GitDiffViewer({
           return
         }
 
-        setFileContents((prev) => {
-          const previous = prev[fileKey]
-          const draft = previous?.draftContent
-          const nextDraft = draft !== undefined && draft !== result.modifiedContent ? draft : undefined
-          staleFileContentKeysRef.current.delete(fileKey)
-          return {
-            ...prev,
-            [fileKey]: {
-              loading: false,
-              refreshing: false,
-              error: undefined,
-              originalContent: result.originalContent,
-              modifiedContent: result.modifiedContent,
-              draftContent: nextDraft,
-              isBinary: result.isBinary,
-              isImage: result.isImage,
-              isSvg: result.isSvg,
-              isPdf: result.isPdf,
-              isEpub: result.isEpub,
-              originalImageUrl: result.originalImageUrl,
-              modifiedImageUrl: result.modifiedImageUrl,
-              originalImageSize: result.originalImageSize,
-              modifiedImageSize: result.modifiedImageSize,
-              originalPreviewData: result.originalPreviewData,
-              modifiedPreviewData: result.modifiedPreviewData,
-              originalPreviewSize: result.originalPreviewSize,
-              modifiedPreviewSize: result.modifiedPreviewSize
-            }
-          }
-        })
+        const previous = fileContentsRef.current[fileKey]
+        const draft = previous?.draftContent
+        const nextDraft = draft !== undefined && draft !== result.modifiedContent ? draft : undefined
+        const nextState: FileContentState = {
+          loading: false,
+          refreshing: false,
+          error: undefined,
+          originalContent: result.originalContent,
+          modifiedContent: result.modifiedContent,
+          draftContent: nextDraft,
+          isBinary: result.isBinary,
+          isImage: result.isImage,
+          isSvg: result.isSvg,
+          isPdf: result.isPdf,
+          isEpub: result.isEpub,
+          originalImageUrl: result.originalImageUrl,
+          modifiedImageUrl: result.modifiedImageUrl,
+          originalImageSize: result.originalImageSize,
+          modifiedImageSize: result.modifiedImageSize,
+          originalPreviewData: result.originalPreviewData,
+          modifiedPreviewData: result.modifiedPreviewData,
+          originalPreviewSize: result.originalPreviewSize,
+          modifiedPreviewSize: result.modifiedPreviewSize
+        }
+        staleFileContentKeysRef.current.delete(fileKey)
+        const nextContents = {
+          ...fileContentsRef.current,
+          [fileKey]: nextState
+        }
+        fileContentsRef.current = nextContents
+        setFileContents(nextContents)
         clickLatencyTrackerRef.current.markStateSet(fileKey)
+        syncCurrentDiffEditorModels(file, nextState, reason)
         // Note: panel pill display does NOT depend on tokenize-settle seal —
         // tracker fires listeners at markIpcEnd, and the panel reads the
         // active measurement once cacheState/cacheSource are known. The
@@ -3433,7 +3554,7 @@ export function GitDiffViewer({
       delete inFlightRef.current[fileKey]
       delete inFlightForceRef.current[fileKey]
     }
-  }, [activeCwd, getFileKey, startTokenizeSettleTracking, t, terminalId])
+  }, [activeCwd, getFileKey, startTokenizeSettleTracking, syncCurrentDiffEditorModels, t, terminalId])
 
   // Bridge ensureFileContent into the watcher-invalidation listener
   // (registered above, before this callback is defined). The listener
@@ -3923,6 +4044,11 @@ export function GitDiffViewer({
       // file, if any. Tracker stays a no-op when no measurement is active.
       const currentFileKey = selectedFileRef.current ? getFileKey(selectedFileRef.current) : null
       if (currentFileKey) {
+        const currentState = fileContentsRef.current[currentFileKey]
+        const currentFile = selectedFileRef.current
+        if (currentFile && currentState) {
+          syncCurrentDiffEditorModels(currentFile, currentState, 'editor-mount')
+        }
         clickLatencyTrackerRef.current.markEditorReady(currentFileKey)
         if (!coldMountRecordedRef.current && gitDiffOpenAtRef.current !== null) {
           const coldMountMs = performance.now() - gitDiffOpenAtRef.current
@@ -4191,6 +4317,7 @@ export function GitDiffViewer({
       scheduleDiffSplitMeasurement,
       setSelectedLineRangeValue,
       startTokenizeSettleTracking,
+      syncCurrentDiffEditorModels,
       terminalId
     ]
   )
@@ -4210,6 +4337,9 @@ export function GitDiffViewer({
 
   useLayoutEffect(() => {
     if (!isOpen || !selectedFileKey || !selectedFileState || selectedFileState.loading) return
+    if (selectedFile) {
+      syncCurrentDiffEditorModels(selectedFile, selectedFileState, 'state-change')
+    }
     const active = clickLatencyTrackerRef.current.getActive()
     if (!active || active.fileKey !== selectedFileKey || active.stateSetAt === null) return
 
@@ -4239,11 +4369,13 @@ export function GitDiffViewer({
     isOpen,
     requestDiffRevealRestore,
     selectedFileKey,
+    selectedFile,
     selectedFileState,
     selectedFileState?.draftContent,
     selectedFileState?.modifiedContent,
     selectedFileState?.originalContent,
-    startTokenizeSettleTracking
+    startTokenizeSettleTracking,
+    syncCurrentDiffEditorModels
   ])
 
   useEffect(() => {
@@ -4543,10 +4675,11 @@ export function GitDiffViewer({
     if (!confirmCloseWithDraft()) return
     persistCurrentDiffSplitRatio()
     captureDiffView()
+    clearCurrentMemorySelection()
     detachDiffEditor()
     clearActiveDiffSelection()
     onClose()
-  }, [captureDiffView, clearActiveDiffSelection, confirmCloseWithDraft, detachDiffEditor, isOpen, onClose, persistCurrentDiffSplitRatio])
+  }, [captureDiffView, clearActiveDiffSelection, clearCurrentMemorySelection, confirmCloseWithDraft, detachDiffEditor, isOpen, onClose, persistCurrentDiffSplitRatio])
 
   useEffect(() => {
     const handleCloseEvent = (event: Event) => {
@@ -5078,6 +5211,35 @@ export function GitDiffViewer({
           isBinary: Boolean(state.isBinary),
           loading: Boolean(state.loading),
           error: state.error ?? null
+        }
+      },
+      getSelectedEditorModelContent: () => {
+        const editor = diffEditorRef.current
+        const file = selectedFileRef.current
+        const key = file ? getFileKey(file) : null
+        const state = key ? fileContentsRef.current[key] : null
+        if (!editor || !file || !key) return null
+        const originalModel = editor.getOriginalEditor().getModel()
+        const modifiedModel = editor.getModifiedEditor().getModel()
+        const originalContent = originalModel?.getValue() ?? null
+        const modifiedContent = modifiedModel?.getValue() ?? null
+        const expectedOriginalContent = state?.originalContent ?? null
+        const expectedModifiedContent = state
+          ? state.draftContent ?? state.modifiedContent ?? ''
+          : null
+        return {
+          originalContent,
+          modifiedContent,
+          expectedOriginalContent,
+          expectedModifiedContent,
+          originalUri: originalModel?.uri.toString() ?? null,
+          modifiedUri: modifiedModel?.uri.toString() ?? null,
+          originalMatchesState: expectedOriginalContent === null || originalContent === null
+            ? null
+            : originalContent === expectedOriginalContent,
+          modifiedMatchesState: expectedModifiedContent === null || modifiedContent === null
+            ? null
+            : modifiedContent === expectedModifiedContent
         }
       },
       getCachedFileContentByPath: (path: string, changeType?: GitFileStatus['changeType']) => {

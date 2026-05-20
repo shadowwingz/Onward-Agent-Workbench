@@ -116,6 +116,7 @@ point at files under `test/unittest/`.
 | Bug fix: parent diff hides "internal-only" dirty submodule entries | `run-git-diff-staleness-and-submodule` (GDS-01..05, GDS-13, GDS-14) |
 | Bug fix: 3-second request cache invalidated by FS watcher | `run-git-diff-staleness-and-submodule` (GDS-06..10, GDS-12, GDS-15) |
 | Bug fix: GitStateMirror parcel-watcher shutdown exits cleanly after an active subscription | `run-git-state-mirror-quit` (GSMQ-*) |
+| GitStateMirror watcher supervisor recovery, degraded polling, and failure injection | `run-git-state-mirror-latency` (GSM-15, GSM-16) |
 | Snapshot service caches submodule meta (cache-hit / capture / invalidate) | `run-git-diff-staleness-and-submodule` (GDS-11, GDS-16) |
 | Trace markers emitted on watcher / freshness / snapshot paths | `run-git-diff-staleness-and-submodule` (GDS-12, GDS-16) |
 | Image diff (PNG / SVG) in Diff modes 2up / swipe / onion | `run-image-diff` (ID-01, ID-02, ID-03, ID-19) |

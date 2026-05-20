@@ -19,6 +19,21 @@ import type {
 // in the main process; renderer-side spans match that default unless
 // ONWARD_PERF_TRACE=0 explicitly disables the diagnostic capture.
 const preloadPerfTraceEnabled = process.env.ONWARD_PERF_TRACE !== '0'
+const preloadAutotestEnabled = process.env.ONWARD_AUTOTEST === '1'
+const MIRROR_WATCHER_STATUS_HISTORY_LIMIT = 100
+const mirrorWatcherStatusHistory: unknown[] = []
+
+if (preloadAutotestEnabled) {
+  ipcRenderer.on(IPC.GIT_STATE_MIRROR_WATCHER_STATUS, (_event, status: unknown) => {
+    mirrorWatcherStatusHistory.push(status)
+    if (mirrorWatcherStatusHistory.length > MIRROR_WATCHER_STATUS_HISTORY_LIMIT) {
+      mirrorWatcherStatusHistory.splice(
+        0,
+        mirrorWatcherStatusHistory.length - MIRROR_WATCHER_STATUS_HISTORY_LIMIT
+      )
+    }
+  })
+}
 
 /**
  * Wrap an ipcRenderer.invoke() call with a renderer-side latency span.
@@ -789,10 +804,16 @@ export interface GitAPI {
    */
   onMirrorUpdate: (callback: (cwd: string, delta: unknown) => void) => () => void
   /**
-   * Listen for explicit parcel-watcher failures. Phase 5: renderer is
-   * expected to surface a banner so the user can manually refresh, since
-   * the no-polling architecture has no silent fallback. `cwd` is the repo
-   * whose watcher failed; `message` is the system error text.
+   * Listen to GitStateMirror watcher supervisor health transitions.
+   * Recovering/degraded/suspended states are fallback health, not stale
+   * terminal state by themselves; watcher-error remains the hard failure
+   * channel.
+   */
+  onMirrorWatcherStatus: (callback: (status: unknown) => void) => () => void
+  /**
+   * Listen for hard parcel-watcher failures after fallback refresh has
+   * failed. Recovering/degraded/suspended states arrive through
+   * `onMirrorWatcherStatus`.
    */
   onMirrorWatcherError: (callback: (cwd: string, message: string) => void) => () => void
   /**
@@ -1172,6 +1193,9 @@ export interface DebugAPI {
   autotestHtmlExpectedTitle: string | null
   autotestHtmlExpectedText: string | null
   autotestHtmlSkipSaveFlow: boolean
+  autotestGsmWatcherFailSubscribeOnce: boolean
+  autotestGsmWatcherFailCallbackOnce: boolean
+  getMirrorWatcherStatusHistory: () => unknown[]
   perfTraceCaptureContent: boolean
   // ONWARD_DISABLE_VIRTUAL_CURSOR=1 disables the Prompt textarea's
   // click-anywhere virtual-cursor feature and falls back to plain
@@ -1725,9 +1749,18 @@ const gitAPI: GitAPI = {
     }
   },
 
-  // Phase 5: subscribe to parcel-watcher failure events. Renderer is
-  // expected to surface a banner ("FS watch unavailable — refresh
-  // manually") rather than silently degrade.
+  onMirrorWatcherStatus: (callback: (status: unknown) => void) => {
+    const listener = (_: Electron.IpcRendererEvent, status: unknown) => {
+      callback(status)
+    }
+    ipcRenderer.on(IPC.GIT_STATE_MIRROR_WATCHER_STATUS, listener)
+    return () => {
+      ipcRenderer.removeListener(IPC.GIT_STATE_MIRROR_WATCHER_STATUS, listener)
+    }
+  },
+
+  // Hard watcher failure events. Degraded watcher health is delivered by
+  // onMirrorWatcherStatus while fallback refresh is still working.
   onMirrorWatcherError: (callback: (cwd: string, message: string) => void) => {
     const listener = (_: Electron.IpcRendererEvent, cwd: string, message: string) => {
       callback(cwd, message)
@@ -2056,6 +2089,10 @@ const debugAutotestHtmlFixturePath = process.env.ONWARD_AUTOTEST_HTML_FIXTURE_PA
 const debugAutotestHtmlExpectedTitle = process.env.ONWARD_AUTOTEST_HTML_EXPECTED_TITLE || null
 const debugAutotestHtmlExpectedText = process.env.ONWARD_AUTOTEST_HTML_EXPECTED_TEXT || null
 const debugAutotestHtmlSkipSaveFlow = process.env.ONWARD_AUTOTEST_HTML_SKIP_SAVE_FLOW === '1'
+const debugAutotestGsmWatcherFailSubscribeOnce =
+  debugAutotestEnabled && process.env.ONWARD_AUTOTEST_GSM_WATCHER_FAIL_SUBSCRIBE_ONCE === '1'
+const debugAutotestGsmWatcherFailCallbackOnce =
+  debugAutotestEnabled && process.env.ONWARD_AUTOTEST_GSM_WATCHER_FAIL_CALLBACK_ONCE === '1'
 const perfTraceCaptureContent = process.env.ONWARD_PERF_TRACE_CAPTURE_CONTENT === '1'
 const virtualCursorDisabled = process.env.ONWARD_DISABLE_VIRTUAL_CURSOR === '1'
 const gitDiffPerformanceDiagnosticsEnabled =
@@ -2082,6 +2119,11 @@ const debugAPI: DebugAPI = {
   autotestHtmlExpectedTitle: debugAutotestHtmlExpectedTitle,
   autotestHtmlExpectedText: debugAutotestHtmlExpectedText,
   autotestHtmlSkipSaveFlow: debugAutotestHtmlSkipSaveFlow,
+  autotestGsmWatcherFailSubscribeOnce: debugAutotestGsmWatcherFailSubscribeOnce,
+  autotestGsmWatcherFailCallbackOnce: debugAutotestGsmWatcherFailCallbackOnce,
+  getMirrorWatcherStatusHistory: () => {
+    return mirrorWatcherStatusHistory.slice()
+  },
   perfTraceCaptureContent,
   virtualCursorDisabled,
   log: (message: string, data?: unknown) => {

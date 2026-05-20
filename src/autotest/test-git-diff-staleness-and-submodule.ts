@@ -301,6 +301,51 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     return result
   }
 
+  const getSelectedFileContentSnapshot = () =>
+    window.__onwardGitDiffDebug?.getSelectedFileContent?.() ?? null
+  const getSelectedEditorModelSnapshot = () =>
+    window.__onwardGitDiffDebug?.getSelectedEditorModelContent?.() ?? null
+
+  const waitForSelectedContentAndModel = async (
+    label: string,
+    expectedModifiedContent: string,
+    options: {
+      expectedOriginalContent?: string
+      expectedEditorModifiedContent?: string
+      expectedDraftContent?: string | null
+      timeoutMs?: number
+    } = {}
+  ): Promise<boolean> => {
+    const expectedOriginalContent = options.expectedOriginalContent
+    const timeoutMs = options.timeoutMs ?? 6000
+    return waitFor(label, () => {
+      const state = getSelectedFileContentSnapshot()
+      const model = getSelectedEditorModelSnapshot()
+      if (!state || state.loading || state.error || !model) return false
+      if (state.modifiedContent !== expectedModifiedContent) return false
+      if (
+        expectedOriginalContent !== undefined &&
+        state.originalContent !== expectedOriginalContent
+      ) {
+        return false
+      }
+      if (
+        Object.prototype.hasOwnProperty.call(options, 'expectedDraftContent') &&
+        state.draftContent !== options.expectedDraftContent
+      ) {
+        return false
+      }
+      const expectedEditorModifiedContent =
+        options.expectedEditorModifiedContent ??
+        state.draftContent ??
+        expectedModifiedContent
+      return model.modifiedContent === expectedEditorModifiedContent &&
+        model.expectedModifiedContent === expectedEditorModifiedContent &&
+        model.modifiedMatchesState === true &&
+        model.originalMatchesState === true
+    }, timeoutMs, 50)
+  }
+
   const clearDiffState = async () => {
     const stagedDiff = await callDiff(cleanRoot, true)
     for (const file of stagedDiff.files) {
@@ -646,9 +691,11 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     if (api1 && api1.getSelectedFile()?.filename !== parentFile) {
       api1.selectFileByPath(parentFile)
     }
-    await waitFor('GDS-17-first-content-ready', () => Boolean(window.__onwardGitDiffDebug?.isSelectedReady()), 6000)
-    const firstSnapshot = window.__onwardGitDiffDebug?.getSelectedFileContent?.() ?? null
+    const firstModelFresh = await waitForSelectedContentAndModel('GDS-17-first-content-model-ready', v1Modified)
+    const firstSnapshot = getSelectedFileContentSnapshot()
+    const firstModelSnapshot = getSelectedEditorModelSnapshot()
     log('GDS-17-first-snapshot', firstSnapshot)
+    log('GDS-17-first-model-snapshot', firstModelSnapshot)
 
     window.dispatchEvent(new CustomEvent('git-diff:close', { detail: { terminalId } }))
     await waitFor('GDS-17-close', () => !window.__onwardGitDiffDebug?.isOpen(), 4000)
@@ -670,24 +717,36 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     if (api2 && api2.getSelectedFile()?.filename !== parentFile) {
       api2.selectFileByPath(parentFile)
     }
-    await waitFor('GDS-17-second-content-ready', () => Boolean(window.__onwardGitDiffDebug?.isSelectedReady()), 6000)
-    // Give any in-flight refetch a brief settling window — if the fix
-    // routes invalidation through fileContents, the loading state will
-    // toggle once and we want to capture the post-refresh snapshot, not
-    // a transient mid-fetch one.
-    await sleep(120)
-    const secondSnapshot = window.__onwardGitDiffDebug?.getSelectedFileContent?.() ?? null
+    const secondModelFresh = await waitForSelectedContentAndModel('GDS-17-second-content-model-ready', v2Modified, {
+      timeoutMs: 7000
+    })
+    const secondSnapshot = getSelectedFileContentSnapshot()
+    const secondModelSnapshot = getSelectedEditorModelSnapshot()
     log('GDS-17-second-snapshot', secondSnapshot)
+    log('GDS-17-second-model-snapshot', secondModelSnapshot)
 
     const sawV2 = secondSnapshot?.modifiedContent === v2Modified
     const sawV1Stale = secondSnapshot?.modifiedContent === v1Modified
-    record('GDS-17-reentry-shows-latest-content', Boolean(sawV2 && !sawV1Stale), {
+    const modelSawV2 = secondModelSnapshot?.modifiedContent === v2Modified
+    record('GDS-17-reentry-shows-latest-content', Boolean(
+      firstModelFresh &&
+      secondModelFresh &&
+      sawV2 &&
+      modelSawV2 &&
+      !sawV1Stale
+    ), {
       firstModifiedContent: firstSnapshot?.modifiedContent ?? null,
+      firstModelModifiedContent: firstModelSnapshot?.modifiedContent ?? null,
       secondModifiedContent: secondSnapshot?.modifiedContent ?? null,
+      secondModelModifiedContent: secondModelSnapshot?.modifiedContent ?? null,
       expected: v2Modified,
+      firstModelFresh,
+      secondModelFresh,
       sawV2,
+      modelSawV2,
       sawV1Stale,
-      probeAvailable: typeof window.__onwardGitDiffDebug?.getSelectedFileContent === 'function'
+      contentProbeAvailable: typeof window.__onwardGitDiffDebug?.getSelectedFileContent === 'function',
+      modelProbeAvailable: typeof window.__onwardGitDiffDebug?.getSelectedEditorModelContent === 'function'
     })
 
     window.dispatchEvent(new CustomEvent('git-diff:close', { detail: { terminalId } }))
@@ -760,15 +819,21 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     if (window.__onwardGitDiffDebug?.getSelectedFile()?.filename !== parentFile) {
       window.__onwardGitDiffDebug?.selectFileByPath(parentFile)
     }
-    await waitFor('GDS-19-v1-ready', () => window.__onwardGitDiffDebug?.getSelectedFileContent?.()?.modifiedContent === v1Modified, 6000)
+    await waitForSelectedContentAndModel('GDS-19-v1-model-ready', v1Modified)
 
     await window.electronAPI.git.saveFileContent(cleanRoot, parentFile, v2Modified)
-    const refreshed = await waitFor('GDS-19-v2-refresh', () => {
-      const state = window.__onwardGitDiffDebug?.getSelectedFileContent?.()
-      return state?.modifiedContent === v2Modified && state?.draftContent === null
-    }, 6000, 50)
-    record('GDS-19-open-view-selected-body-refreshes', refreshed, {
-      snapshot: window.__onwardGitDiffDebug?.getSelectedFileContent?.() ?? null,
+    const refreshed = await waitForSelectedContentAndModel('GDS-19-v2-refresh-model-ready', v2Modified, {
+      expectedDraftContent: null
+    })
+    const refreshedState = getSelectedFileContentSnapshot()
+    const refreshedModel = getSelectedEditorModelSnapshot()
+    record('GDS-19-open-view-selected-body-refreshes', Boolean(
+      refreshed &&
+      refreshedState?.draftContent === null
+    ), {
+      snapshot: refreshedState,
+      modelSnapshot: refreshedModel,
+      draftContent: refreshedState?.draftContent ?? null,
       expected: v2Modified
     })
     window.dispatchEvent(new CustomEvent('git-diff:close', { detail: { terminalId } }))
@@ -790,20 +855,29 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     if (window.__onwardGitDiffDebug?.getSelectedFile()?.filename !== parentFile) {
       window.__onwardGitDiffDebug?.selectFileByPath(parentFile)
     }
-    await waitFor('GDS-20-v1-ready', () => window.__onwardGitDiffDebug?.getSelectedFileContent?.()?.modifiedContent === v1Modified, 6000)
+    await waitForSelectedContentAndModel('GDS-20-v1-model-ready', v1Modified)
     const draftSet = window.__onwardGitDiffDebug?.setSelectedDraftContent?.(localDraft) === true
     await waitFor('GDS-20-draft-visible', () => {
       const state = window.__onwardGitDiffDebug?.getSelectedFileContent?.()
-      return state?.draftContent === localDraft && window.__onwardGitDiffDebug?.getIsDraftDirty?.() === true
+      const model = window.__onwardGitDiffDebug?.getSelectedEditorModelContent?.()
+      return state?.draftContent === localDraft &&
+        model?.modifiedContent === localDraft &&
+        model.modifiedMatchesState === true &&
+        window.__onwardGitDiffDebug?.getIsDraftDirty?.() === true
     }, 3000, 50)
 
     await window.electronAPI.git.saveFileContent(cleanRoot, parentFile, v2Modified)
     const refreshed = await waitFor('GDS-20-draft-preserved-after-refresh', () => {
-      const state = window.__onwardGitDiffDebug?.getSelectedFileContent?.()
-      return state?.modifiedContent === v2Modified && state?.draftContent === localDraft
+      const state = getSelectedFileContentSnapshot()
+      const model = getSelectedEditorModelSnapshot()
+      return state?.modifiedContent === v2Modified &&
+        state.draftContent === localDraft &&
+        model?.modifiedContent === localDraft &&
+        model.modifiedMatchesState === true
     }, 6000, 50)
     record('GDS-20-draft-preserved-during-external-refresh', draftSet && refreshed, {
-      snapshot: window.__onwardGitDiffDebug?.getSelectedFileContent?.() ?? null,
+      snapshot: getSelectedFileContentSnapshot(),
+      modelSnapshot: getSelectedEditorModelSnapshot(),
       expectedModifiedContent: v2Modified,
       expectedDraftContent: localDraft,
       debugDraftApiAvailable: typeof window.__onwardGitDiffDebug?.setSelectedDraftContent === 'function'
@@ -812,6 +886,124 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     await waitFor('GDS-20-draft-cleared-before-close', () => window.__onwardGitDiffDebug?.getIsDraftDirty?.() !== true, 3000, 50)
     window.dispatchEvent(new CustomEvent('git-diff:close', { detail: { terminalId } }))
     await waitFor('GDS-20-close', () => !window.__onwardGitDiffDebug?.isOpen(), 4000)
+  }
+
+  // ─────────────── GDS-43: repeated same-file refresh keeps Monaco model fresh ───────────────
+  // The user-facing stale-diff regression happens when the same file is edited
+  // repeatedly while Monaco keeps the same original/modified model URI alive.
+  // This case repeats both automatic watcher refreshes and explicit Refresh
+  // Changes inside the test, then closes/reopens the view. The assertion reads
+  // the React file-content cache and the live Monaco models, because only the
+  // latter proves what the user actually sees.
+  if (!cancelled()) {
+    await restoreBaseline()
+    const seedContent = 'parent source line\nGDS-43 seed\n'
+
+    await window.electronAPI.git.saveFileContent(cleanRoot, parentFile, seedContent)
+    await sleep(280)
+    window.dispatchEvent(new CustomEvent('git-diff:open', { detail: { terminalId } }))
+    await waitFor('GDS-43-open', () => Boolean(window.__onwardGitDiffDebug?.isOpen()), 6000)
+    await waitFor('GDS-43-list', () => Boolean(window.__onwardGitDiffDebug?.getFileList().some((f) => f.filename === parentFile)), 6000)
+    if (window.__onwardGitDiffDebug?.getSelectedFile()?.filename !== parentFile) {
+      window.__onwardGitDiffDebug?.selectFileByPath(parentFile)
+    }
+    const seedReady = await waitForSelectedContentAndModel('GDS-43-seed-model-ready', seedContent, {
+      expectedDraftContent: null
+    })
+
+    const automaticIterations: Array<{
+      iteration: number
+      ok: boolean
+      stateModified: string | null
+      modelModified: string | null
+      modelMatchesState: boolean | null
+      draftContent: string | null
+    }> = []
+    for (let iteration = 1; iteration <= 5; iteration += 1) {
+      const content = `parent source line\nGDS-43 automatic same-file edit ${iteration}\n`
+      await window.electronAPI.git.saveFileContent(cleanRoot, parentFile, content)
+      const ok = await waitForSelectedContentAndModel(`GDS-43-automatic-${iteration}-model-ready`, content, {
+        expectedDraftContent: null,
+        timeoutMs: 7000
+      })
+      const state = getSelectedFileContentSnapshot()
+      const model = getSelectedEditorModelSnapshot()
+      automaticIterations.push({
+        iteration,
+        ok,
+        stateModified: state?.modifiedContent ?? null,
+        modelModified: model?.modifiedContent ?? null,
+        modelMatchesState: model?.modifiedMatchesState ?? null,
+        draftContent: state?.draftContent ?? null
+      })
+    }
+
+    const manualIterations: Array<{
+      iteration: number
+      refreshResult: boolean
+      ok: boolean
+      stateModified: string | null
+      modelModified: string | null
+      modelMatchesState: boolean | null
+      draftContent: string | null
+      loadReason: string | null
+      cacheSource: string | null
+    }> = []
+    let latestContent = seedContent
+    for (let iteration = 1; iteration <= 5; iteration += 1) {
+      const content = `parent source line\nGDS-43 manual refresh same-file edit ${iteration}\n`
+      latestContent = content
+      await window.electronAPI.git.saveFileContent(cleanRoot, parentFile, content)
+      const refreshResult = await window.__onwardGitDiffDebug?.refreshChanges?.() === true
+      const ok = await waitForSelectedContentAndModel(`GDS-43-manual-${iteration}-model-ready`, content, {
+        expectedDraftContent: null,
+        timeoutMs: 7000
+      })
+      const state = getSelectedFileContentSnapshot()
+      const model = getSelectedEditorModelSnapshot()
+      const load = window.__onwardGitDiffDebug?.getLastFileContentLoad?.() ?? null
+      manualIterations.push({
+        iteration,
+        refreshResult,
+        ok,
+        stateModified: state?.modifiedContent ?? null,
+        modelModified: model?.modifiedContent ?? null,
+        modelMatchesState: model?.modifiedMatchesState ?? null,
+        draftContent: state?.draftContent ?? null,
+        loadReason: load?.reason ?? null,
+        cacheSource: load?.cacheInfo?.source ?? null
+      })
+    }
+
+    window.dispatchEvent(new CustomEvent('git-diff:close', { detail: { terminalId } }))
+    await waitFor('GDS-43-close-before-reopen', () => !window.__onwardGitDiffDebug?.isOpen(), 4000)
+    window.dispatchEvent(new CustomEvent('git-diff:open', { detail: { terminalId } }))
+    await waitFor('GDS-43-reopen', () => Boolean(window.__onwardGitDiffDebug?.isOpen()), 6000)
+    await waitFor('GDS-43-reopen-list', () => Boolean(window.__onwardGitDiffDebug?.getFileList().some((f) => f.filename === parentFile)), 6000)
+    if (window.__onwardGitDiffDebug?.getSelectedFile()?.filename !== parentFile) {
+      window.__onwardGitDiffDebug?.selectFileByPath(parentFile)
+    }
+    const reopenReady = await waitForSelectedContentAndModel('GDS-43-reopen-latest-model-ready', latestContent, {
+      expectedDraftContent: null,
+      timeoutMs: 7000
+    })
+
+    record('GDS-43-repeated-same-file-refresh-keeps-model-fresh', Boolean(
+      seedReady &&
+      automaticIterations.every((item) => item.ok) &&
+      manualIterations.every((item) => item.refreshResult && item.ok) &&
+      reopenReady
+    ), {
+      seedReady,
+      automaticIterations,
+      manualIterations,
+      reopenReady,
+      finalState: getSelectedFileContentSnapshot(),
+      finalModel: getSelectedEditorModelSnapshot(),
+      expectedFinalContent: latestContent
+    })
+    window.dispatchEvent(new CustomEvent('git-diff:close', { detail: { terminalId } }))
+    await waitFor('GDS-43-final-close', () => !window.__onwardGitDiffDebug?.isOpen(), 4000)
   }
 
   // ─────────────── GDS-21/22: VS Code-style resource semantics ───────────────
@@ -1567,6 +1759,13 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
         'renderer:git-diff.file-list-mode-change',
         'renderer:git-diff.jump-to-editor',
         'renderer:project-editor.jump-to-diff'
+      ]
+    })
+    record('GDS-43-trace-marker-diff-model-sync-expected', Boolean(traceInfo?.logPath), {
+      tracePath: traceInfo?.logPath ?? null,
+      enabled: traceInfo?.enabled ?? null,
+      eventsToVerifyInRunner: [
+        'renderer:git-diff.model-sync'
       ]
     })
   }

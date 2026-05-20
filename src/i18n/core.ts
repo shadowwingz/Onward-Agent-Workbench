@@ -904,7 +904,7 @@ const en = {
   'gitDiff.debug.terms.listCache.title': 'List cache',
   'gitDiff.debug.terms.listCache.body': 'Caches the changed-file list per project. The panel shows your current project: file count, line totals, and when the list was last produced — either reused from the in-memory cache, fetched fresh from Git, or force-refreshed (you pressed Refresh Changes). If "Last fetched" shows a different project, your current project\'s entry was either evicted or never fetched.',
   'gitDiff.debug.terms.watcher.title': 'Watcher health',
-  'gitDiff.debug.terms.watcher.body': 'GitStateMirror authority health for active Git Diff projects. Watcher errors invalidate caches immediately and surface a manual refresh action so the next refresh is active, not silently stale.',
+  'gitDiff.debug.terms.watcher.body': 'GitStateMirror authority health for active Git Diff projects. Recovering/degraded watcher states keep refreshing automatically; only hard watcher failures invalidate caches as watcher-error and surface manual refresh.',
   'gitDiff.debug.terms.scheduler.title': 'Precompute scheduler',
   'gitDiff.debug.terms.scheduler.body': 'Background worker that pre-warms the per-file content cache after a list invalidation so the next click lands on cached data. Status shows the live state for this project. Last burst summarises the most recent completed wave (when, how long, completion vs error counts). Funnel shows how aggressively eligibility filtering trimmed the working set — large "filtered" counts mean many submodules / deletions / binaries; large "capped" counts mean the per-burst cap (100 files) is too tight.',
   'gitDiff.debug.terms.history.title': 'History',
@@ -1400,7 +1400,15 @@ const en = {
   'gitState.watcherError.title': 'Git status auto-refresh unavailable',
   'gitState.watcherError.body': 'File-system watch failed for {{repo}}. The Git status shown may be stale. Refresh Git status manually to retry.',
   'gitState.watcherError.dismiss': 'Dismiss',
-  'gitState.watcherError.reload': 'Refresh Git status'
+  'gitState.watcherError.reload': 'Refresh Git status',
+  'gitState.watcherStatus.recovering.title': 'Git watcher is recovering',
+  'gitState.watcherStatus.recovering.body': 'File watcher is recovering for {{repo}}. Git status is being refreshed automatically.',
+  'gitState.watcherStatus.degraded-polling.title': 'Git watcher is degraded',
+  'gitState.watcherStatus.degraded-polling.body': 'File watcher is degraded for {{repo}}. Onward is using periodic Git refresh.',
+  'gitState.watcherStatus.suspended.title': 'Project path unavailable',
+  'gitState.watcherStatus.suspended.body': '{{repo}} is unavailable. Onward will resume watching when the path returns.',
+  'gitState.watcherStatus.failed.title': 'Git status may be stale',
+  'gitState.watcherStatus.failed.body': 'File watcher and fallback refresh failed for {{repo}}. Refresh Git status manually to retry.'
 } as const satisfies TranslationDictionary
 
 export type TranslationKey = keyof typeof en
@@ -2293,7 +2301,7 @@ const zhCN: LocaleTranslations = {
   'gitDiff.debug.terms.listCache.title': '列表缓存',
   'gitDiff.debug.terms.listCache.body': '按项目缓存"变更文件列表"。面板展示的是当前项目的情况：文件数、行数总和，以及这份列表的来源——是在内存缓存里复用、刚去 git 真拉、还是 Refresh 触发的强制刷新。如果"上次拉取"显示的是另一个项目，说明当前项目的条目要么被淘汰、要么从来没拉过。',
   'gitDiff.debug.terms.watcher.title': 'Watcher 健康状态',
-  'gitDiff.debug.terms.watcher.body': 'GitStateMirror 权威路径针对活跃 Git Diff 项目的健康状态。watcher 出错会立即失效缓存并显示手动刷新入口，下一次刷新走主动重取，不会静默沿用旧数据。',
+  'gitDiff.debug.terms.watcher.body': 'GitStateMirror 权威路径针对活跃 Git Diff 项目的健康状态。watcher recovering / degraded 状态会继续自动刷新；只有硬失败才以 watcher-error 失效缓存并显示手动刷新入口。',
   'gitDiff.debug.terms.scheduler.title': '预计算调度器',
   'gitDiff.debug.terms.scheduler.body': '在文件列表失效之后，后台预热"每文件正文"缓存的 worker，让你下一次点击变更文件时直接落到已缓存的数据上。状态展示当前项目的实时阶段。上次预热汇总当前项目最近一次完成的批次（多久前完成、耗时、完成 vs 错误数）。筛选漏斗反映 isEligible 把工作集筛得多狠——筛掉数大说明 submodule / 已删除 / 二进制多；截断数大说明每批 100 上限不够用。',
   'gitDiff.debug.terms.history.title': '历史',
@@ -2785,9 +2793,17 @@ const zhCN: LocaleTranslations = {
 
   // Phase 5: parcel-watcher failure banner.
   'gitState.watcherError.title': 'Git 状态自动刷新不可用',
-  'gitState.watcherError.body': '{{repo}} 的文件系统监听失败,显示的 Git 状态可能已过时。手动刷新 Git 状态可重试。',
+  'gitState.watcherError.body': '{{repo}} 的文件系统监听失败，显示的 Git 状态可能已过时。手动刷新 Git 状态可重试。',
   'gitState.watcherError.dismiss': '关闭',
-  'gitState.watcherError.reload': '刷新 Git 状态'
+  'gitState.watcherError.reload': '刷新 Git 状态',
+  'gitState.watcherStatus.recovering.title': 'Git watcher 正在恢复',
+  'gitState.watcherStatus.recovering.body': '{{repo}} 的文件监听正在恢复。Git 状态会自动刷新。',
+  'gitState.watcherStatus.degraded-polling.title': 'Git watcher 已降级',
+  'gitState.watcherStatus.degraded-polling.body': '{{repo}} 的文件监听已降级。Onward 正在使用周期性 Git 刷新。',
+  'gitState.watcherStatus.suspended.title': '项目路径不可用',
+  'gitState.watcherStatus.suspended.body': '{{repo}} 当前不可用。路径恢复后 Onward 会自动继续监听。',
+  'gitState.watcherStatus.failed.title': 'Git 状态可能已过时',
+  'gitState.watcherStatus.failed.body': '{{repo}} 的文件监听和兜底刷新都失败了。请手动刷新 Git 状态后重试。'
 }
 
 const translations: Record<AppLocale, LocaleTranslations> = {
