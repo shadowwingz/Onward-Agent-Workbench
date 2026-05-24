@@ -76,6 +76,7 @@ SCRIPTS: List[str] = [
     "test/autotest/run-git-diff-identical-blob-autotest.sh",
     "test/autotest/run-git-diff-recursive-submodules-autotest.sh",
     "test/autotest/run-git-diff-staleness-and-submodule-autotest.sh",
+    "test/autotest/run-git-large-file-confirmation-autotest.sh",
     "test/autotest/run-git-state-mirror-quit-autotest.sh",
     "test/autotest/run-git-state-mirror-latency-autotest.sh",
     "test/autotest/run-git-diff-subdir-autotest.sh",

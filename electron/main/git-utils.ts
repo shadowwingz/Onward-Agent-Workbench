@@ -12,11 +12,17 @@ import { constants } from 'fs'
 import { resolve, relative, sep, isAbsolute, dirname, delimiter, basename, join } from 'path'
 import { fileURLToPath } from 'url'
 import { gitRuntimeManager, type GitTaskKind, type GitTaskPriority } from './git-runtime-manager'
-import { MAX_IMAGE_FILE_SIZE, bufferToImageDataUrl, isSupportedImageFile } from './image-utils'
+import { bufferToImageDataUrl, isSupportedImageFile } from './image-utils'
 import { performanceTrace } from './performance-trace'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 import { gitDiffCacheInvalidator } from './git-diff-cache-invalidator'
 import { GitDiffRequestCacheController } from './git-diff-request-cache'
+import {
+  GIT_LARGE_FILE_CONFIRM_SIZE,
+  gitLargeFileReadMaxBuffer,
+  requiresGitLargeFileConfirmation,
+  type GitLargeFilePromptOptions
+} from './git-large-file-policy'
 // Static circular import is intentional and safe: every consumer below
 // reads `gitRepositorySnapshotService` / `snapshotToLegacySubmoduleInfos`
 // from inside async function bodies, never at module-eval time. ESM live
@@ -34,8 +40,6 @@ import {
 
 const PDF_EXT = '.pdf'
 const EPUB_EXT = '.epub'
-const MAX_PDF_DIFF_FILE_SIZE = 32 * 1024 * 1024
-const MAX_EPUB_DIFF_FILE_SIZE = 16 * 1024 * 1024
 
 function isPdfFilename(filename: string | undefined): boolean {
   return Boolean(filename && filename.toLowerCase().endsWith(PDF_EXT))
@@ -289,6 +293,7 @@ export interface GitHistoryFileContentOptions {
   base: string
   head: string
   file: Pick<GitHistoryFile, 'filename' | 'originalFilename' | 'status'>
+  allowLargeFile?: boolean
 }
 
 export interface GitHistoryFileContentResult extends GitFileContentResult {
@@ -337,6 +342,9 @@ export interface GitFileContentResult {
   modifiedImageUrl?: string
   originalImageSize?: number
   modifiedImageSize?: number
+  requiresLargeFileConfirmation?: boolean
+  largeFileSizeBytes?: number
+  largeFileThresholdBytes?: number
   cacheInfo?: GitDiffContentCacheInfo
   error?: string
 }
@@ -356,7 +364,6 @@ export interface GitFileActionResult {
 
 // Timeout for command execution (milliseconds)
 export const EXEC_TIMEOUT = 10000
-const MAX_FILE_SIZE = 1024 * 1024  // 1MB
 export const MAX_DIFF_OUTPUT = 10 * 1024 * 1024 // 10MB
 
 // Short TTL + in-flight reuse: avoid frequent forks (lsof/git) causing CPU spikes and cwd read failures.
@@ -388,6 +395,7 @@ const SUBMODULE_CACHE_TTL = 5000
 const superprojectCache = new Map<string, { value: string | null; at: number }>()
 const singleRepoDiffCache = new Map<string, { value: { files: GitFileStatus[]; error?: string }; at: number }>()
 const singleRepoDiffInFlight = new Map<string, Promise<{ files: GitFileStatus[]; error?: string }>>()
+const singleRepoDiffInFlightTokens = new Map<string, symbol>()
 let gitDiffRequestCacheController: GitDiffRequestCacheController<GitDiffResult> | null = null
 
 /**
@@ -550,10 +558,6 @@ function toGitPath(cwd: string, filename: string): string | null {
   if (!resolved) return null
   const relativePath = relative(cwd, resolved)
   return relativePath.split(sep).join('/')
-}
-
-function hasNullByte(content: string): boolean {
-  return content.includes('\u0000')
 }
 
 function normalizeGitStatusFromCode(statusCode: string): TerminalGitStatus {
@@ -1804,7 +1808,8 @@ async function getSingleRepoDiff(
   repoRoot: string,
   gitExecutable: string,
   repoLabel: string,
-  gitDirHint?: string | null
+  gitDirHint?: string | null,
+  options?: { force?: boolean }
 ): Promise<{ files: GitFileStatus[]; error?: string }> {
   const normalizedRoot = resolve(repoRoot)
   let gitDir = gitDirHint ?? null
@@ -1814,7 +1819,7 @@ async function getSingleRepoDiff(
   }
 
   const inFlightKey = `${normalizedRoot}::${repoLabel}`
-  const inFlight = singleRepoDiffInFlight.get(inFlightKey)
+  const inFlight = options?.force ? null : singleRepoDiffInFlight.get(inFlightKey)
   if (inFlight) {
     const result = await inFlight
     return {
@@ -1823,6 +1828,7 @@ async function getSingleRepoDiff(
     }
   }
 
+  const taskToken = Symbol(inFlightKey)
   const task = (async () => {
     const diffMeta: GitTaskMeta = { repoKey: repoRoot, repoConcurrencyLimit: 1, priority: 'normal' }
 
@@ -1876,19 +1882,25 @@ async function getSingleRepoDiff(
         repoLabel
       }))
     }
-    clearSingleRepoDiffCache(repoRoot)
-    singleRepoDiffCache.set(cacheKey, { value, at: Date.now() })
+    if (singleRepoDiffInFlightTokens.get(inFlightKey) === taskToken) {
+      clearSingleRepoDiffCache(repoRoot)
+      singleRepoDiffCache.set(cacheKey, { value, at: Date.now() })
+    }
     return value
   })()
 
   singleRepoDiffInFlight.set(inFlightKey, task)
+  singleRepoDiffInFlightTokens.set(inFlightKey, taskToken)
   try {
     const result = await task
     return {
       files: cloneGitFileStatuses(result.files)
     }
   } finally {
-    singleRepoDiffInFlight.delete(inFlightKey)
+    if (singleRepoDiffInFlightTokens.get(inFlightKey) === taskToken) {
+      singleRepoDiffInFlight.delete(inFlightKey)
+      singleRepoDiffInFlightTokens.delete(inFlightKey)
+    }
   }
 }
 
@@ -1954,6 +1966,7 @@ async function loadGitDiff(cwd: string, options?: GitDiffLoadOptions): Promise<G
     const repoRoot = meta.repoRoot
     const repoName = basename(repoRoot)
     const loadScope = options?.scope === 'root-only' ? 'root-only' : 'full'
+    const force = options?.force === true
     // Phase 1 of the lesson #13 follow-up: discovery now goes through the
     // snapshot service. The service owns ".gitmodules + git submodule
     // status + getGitRepoMeta validation" as a single atomic structural
@@ -1986,7 +1999,7 @@ async function loadGitDiff(cwd: string, options?: GitDiffLoadOptions): Promise<G
       ? allRepos
       : allRepos.filter((repo) => !repo.isSubmodule)
     const results = await Promise.allSettled(
-      reposToLoad.map((repo) => getSingleRepoDiff(repo.root, gitExecutable, repo.label, repo.gitDir))
+      reposToLoad.map((repo) => getSingleRepoDiff(repo.root, gitExecutable, repo.label, repo.gitDir, { force }))
     )
     const resultByRepoRoot = new Map(reposToLoad.map((repo, index) => [repo.root, results[index]]))
 
@@ -2328,6 +2341,8 @@ export async function getGitHistoryDiff(
 type GitReaderResult = {
   content: string
   isBinary: boolean
+  sizeBytes?: number
+  requiresLargeFileConfirmation?: boolean
   imageDataUrl?: string
   imageSize?: number
   isSvg?: boolean
@@ -2337,21 +2352,70 @@ type GitReaderResult = {
   previewSize?: number
 }
 
-async function readWorkingFile(fullPath: string, filename?: string): Promise<GitReaderResult> {
+function buildGitLargeFileReaderResult(sizeBytes: number): GitReaderResult {
+  return {
+    content: '',
+    isBinary: false,
+    sizeBytes,
+    requiresLargeFileConfirmation: true
+  }
+}
+
+function isGitLargeFilePromptResult(result: GitReaderResult): boolean {
+  return result.requiresLargeFileConfirmation === true && typeof result.sizeBytes === 'number'
+}
+
+function buildGitLargeFileContentResult(
+  cwd: string,
+  filename: string,
+  sizeBytes: number
+): GitFileContentResult {
+  return {
+    success: false,
+    cwd,
+    filename,
+    originalContent: '',
+    modifiedContent: '',
+    isBinary: false,
+    requiresLargeFileConfirmation: true,
+    largeFileSizeBytes: sizeBytes,
+    largeFileThresholdBytes: GIT_LARGE_FILE_CONFIRM_SIZE,
+    error: 'The current diff exceeds 3 MB.'
+  }
+}
+
+function buildGitHistoryLargeFileContentResult(
+  cwd: string,
+  base: string,
+  head: string,
+  filename: string,
+  sizeBytes: number
+): GitHistoryFileContentResult {
+  return {
+    ...buildGitLargeFileContentResult(cwd, filename, sizeBytes),
+    base,
+    head
+  }
+}
+
+function execStdoutToBuffer(stdout: unknown): Buffer {
+  if (Buffer.isBuffer(stdout)) return stdout
+  if (typeof stdout === 'string') return Buffer.from(stdout, 'utf-8')
+  return Buffer.from(stdout as ArrayBufferLike)
+}
+
+async function readWorkingFile(
+  fullPath: string,
+  filename?: string,
+  options?: GitLargeFilePromptOptions
+): Promise<GitReaderResult> {
   const isImage = filename ? isSupportedImageFile(filename) : false
   const isSvg = filename ? filename.toLowerCase().endsWith('.svg') : false
   const isPdf = isPdfFilename(filename)
   const isEpub = isEpubFilename(filename)
-  const sizeLimit = isPdf
-    ? MAX_PDF_DIFF_FILE_SIZE
-    : isEpub
-      ? MAX_EPUB_DIFF_FILE_SIZE
-      : isImage
-        ? MAX_IMAGE_FILE_SIZE
-        : MAX_FILE_SIZE
   const fileStat = await stat(fullPath)
-  if (fileStat.size > sizeLimit) {
-    throw new Error(`File is too large to load (>${Math.floor(sizeLimit / 1024)}KB).`)
+  if (requiresGitLargeFileConfirmation(fileStat.size, options)) {
+    return buildGitLargeFileReaderResult(fileStat.size)
   }
   const buffer = await readFile(fullPath)
   const isBinary = buffer.includes(0)
@@ -2362,43 +2426,39 @@ async function readWorkingFile(fullPath: string, filename?: string): Promise<Git
       isPdf: isPdf || undefined,
       isEpub: isEpub || undefined,
       previewData: buffer.toString('base64'),
-      previewSize: buffer.length
+      previewSize: buffer.length,
+      sizeBytes: buffer.length
     }
   }
   if (isBinary) {
     if (isImage && filename) {
       const imageSize = buffer.length
-      return { content: '', isBinary: true, imageDataUrl: bufferToImageDataUrl(buffer, filename), imageSize }
+      return { content: '', isBinary: true, imageDataUrl: bufferToImageDataUrl(buffer, filename), imageSize, sizeBytes: buffer.length }
     }
-    return { content: '', isBinary: true }
+    return { content: '', isBinary: true, sizeBytes: buffer.length }
   }
   if (isSvg) {
     const textContent = buffer.toString('utf-8')
     const imageSize = buffer.length
     const imageDataUrl = `data:image/svg+xml;base64,${buffer.toString('base64')}`
-    return { content: textContent, isBinary: false, imageDataUrl, imageSize, isSvg: true }
+    return { content: textContent, isBinary: false, imageDataUrl, imageSize, isSvg: true, sizeBytes: buffer.length }
   }
-  return { content: buffer.toString('utf-8'), isBinary: false }
+  return { content: buffer.toString('utf-8'), isBinary: false, sizeBytes: buffer.length }
 }
 
 async function readGitFileByRef(
   cwd: string,
   gitExecutable: string,
   ref: string,
-  filename?: string
+  filename?: string,
+  options?: GitLargeFilePromptOptions
 ): Promise<GitReaderResult> {
   const isImage = filename ? isSupportedImageFile(filename) : false
   const isSvg = filename ? filename.toLowerCase().endsWith('.svg') : false
   const isPdf = isPdfFilename(filename)
   const isEpub = isEpubFilename(filename)
-  const sizeLimit = isPdf
-    ? MAX_PDF_DIFF_FILE_SIZE
-    : isEpub
-      ? MAX_EPUB_DIFF_FILE_SIZE
-      : isImage
-        ? MAX_IMAGE_FILE_SIZE
-        : MAX_FILE_SIZE
 
+  let size: number | null = null
   try {
     const sizeResult = await execFileAsync(gitExecutable, ['cat-file', '-s', ref], {
       cwd,
@@ -2406,97 +2466,75 @@ async function readGitFileByRef(
       env: getExecEnv()
     })
     const sizeText = typeof sizeResult.stdout === 'string' ? sizeResult.stdout : sizeResult.stdout.toString('utf-8')
-    const size = parseInt(sizeText.trim(), 10)
-    if (Number.isFinite(size) && size > sizeLimit) {
-      throw new Error(`File is too large to load (>${Math.floor(sizeLimit / 1024)}KB).`)
+    const parsedSize = parseInt(sizeText.trim(), 10)
+    if (Number.isFinite(parsedSize)) {
+      size = parsedSize
+    }
+    if (size !== null && requiresGitLargeFileConfirmation(size, options)) {
+      return buildGitLargeFileReaderResult(size)
     }
   } catch (error) {
     throw new Error(`Failed to read Git file metadata: ${String(error)}`)
   }
 
+  const blobResult = await execFileAsync(gitExecutable, ['cat-file', 'blob', ref], {
+    cwd,
+    timeout: EXEC_TIMEOUT,
+    env: getExecEnv(),
+    maxBuffer: gitLargeFileReadMaxBuffer(size),
+    encoding: 'buffer' as BufferEncoding
+  })
+  const buffer = execStdoutToBuffer(blobResult.stdout)
+
   if (isSvg) {
-    const blobResult = await execFileAsync(gitExecutable, ['cat-file', 'blob', ref], {
-      cwd,
-      timeout: EXEC_TIMEOUT,
-      env: getExecEnv(),
-      maxBuffer: MAX_IMAGE_FILE_SIZE * 2,
-      encoding: 'buffer' as BufferEncoding
-    })
-    const buffer = Buffer.isBuffer(blobResult.stdout)
-      ? blobResult.stdout
-      : Buffer.from(blobResult.stdout as unknown as ArrayBufferLike)
     const textContent = buffer.toString('utf-8')
     const imageSize = buffer.length
     const imageDataUrl = `data:image/svg+xml;base64,${buffer.toString('base64')}`
-    return { content: textContent, isBinary: false, imageDataUrl, imageSize, isSvg: true }
+    return { content: textContent, isBinary: false, imageDataUrl, imageSize, isSvg: true, sizeBytes: buffer.length }
   }
 
   if (isImage && filename) {
-    const blobResult = await execFileAsync(gitExecutable, ['cat-file', 'blob', ref], {
-      cwd,
-      timeout: EXEC_TIMEOUT,
-      env: getExecEnv(),
-      maxBuffer: MAX_IMAGE_FILE_SIZE * 2,
-      encoding: 'buffer' as BufferEncoding
-    })
-    const buffer = Buffer.isBuffer(blobResult.stdout)
-      ? blobResult.stdout
-      : Buffer.from(blobResult.stdout as unknown as ArrayBufferLike)
     const imageSize = buffer.length
-    return { content: '', isBinary: true, imageDataUrl: bufferToImageDataUrl(buffer, filename), imageSize }
+    return { content: '', isBinary: true, imageDataUrl: bufferToImageDataUrl(buffer, filename), imageSize, sizeBytes: buffer.length }
   }
 
   if (isPdf || isEpub) {
-    const blobResult = await execFileAsync(gitExecutable, ['cat-file', 'blob', ref], {
-      cwd,
-      timeout: EXEC_TIMEOUT,
-      env: getExecEnv(),
-      maxBuffer: sizeLimit * 2,
-      encoding: 'buffer' as BufferEncoding
-    })
-    const buffer = Buffer.isBuffer(blobResult.stdout)
-      ? blobResult.stdout
-      : Buffer.from(blobResult.stdout as unknown as ArrayBufferLike)
     return {
       content: '',
       isBinary: true,
       isPdf: isPdf || undefined,
       isEpub: isEpub || undefined,
       previewData: buffer.toString('base64'),
-      previewSize: buffer.length
+      previewSize: buffer.length,
+      sizeBytes: buffer.length
     }
   }
 
-  const contentResult = await execFileAsync(gitExecutable, ['-c', 'core.quotepath=false', 'show', ref], {
-    cwd,
-    timeout: EXEC_TIMEOUT,
-    env: getExecEnv(),
-    maxBuffer: MAX_FILE_SIZE * 2
-  })
-  const contentText = typeof contentResult.stdout === 'string' ? contentResult.stdout : contentResult.stdout.toString('utf-8')
-  const isBinary = hasNullByte(contentText)
+  const isBinary = buffer.includes(0)
   if (isBinary) {
-    return { content: '', isBinary: true }
+    return { content: '', isBinary: true, sizeBytes: buffer.length }
   }
-  return { content: contentText, isBinary: false }
+  return { content: buffer.toString('utf-8'), isBinary: false, sizeBytes: buffer.length }
 }
 
 async function readGitHeadFile(
   cwd: string,
   gitExecutable: string,
   gitPath: string,
-  filename?: string
+  filename?: string,
+  options?: GitLargeFilePromptOptions
 ): Promise<GitReaderResult> {
-  return readGitFileByRef(cwd, gitExecutable, `HEAD:${gitPath}`, filename)
+  return readGitFileByRef(cwd, gitExecutable, `HEAD:${gitPath}`, filename, options)
 }
 
 async function readGitIndexFile(
   cwd: string,
   gitExecutable: string,
   gitPath: string,
-  filename?: string
+  filename?: string,
+  options?: GitLargeFilePromptOptions
 ): Promise<GitReaderResult> {
-  return readGitFileByRef(cwd, gitExecutable, `:${gitPath}`, filename)
+  return readGitFileByRef(cwd, gitExecutable, `:${gitPath}`, filename, options)
 }
 
 async function readGitRevisionFile(
@@ -2504,9 +2542,10 @@ async function readGitRevisionFile(
   gitExecutable: string,
   revision: string,
   gitPath: string,
-  filename?: string
+  filename?: string,
+  options?: GitLargeFilePromptOptions
 ): Promise<GitReaderResult> {
-  return readGitFileByRef(cwd, gitExecutable, `${revision}:${gitPath}`, filename)
+  return readGitFileByRef(cwd, gitExecutable, `${revision}:${gitPath}`, filename, options)
 }
 
 export async function getGitHistoryFileContent(
@@ -2594,7 +2633,10 @@ export async function getGitHistoryFileContent(
           error: 'Invalid file path.'
         }
       }
-      const originalResult = await readGitRevisionFile(repoRoot, gitExecutable, base, gitPath, originalTarget)
+      const originalResult = await readGitRevisionFile(repoRoot, gitExecutable, base, gitPath, originalTarget, options)
+      if (isGitLargeFilePromptResult(originalResult)) {
+        return buildGitHistoryLargeFileContentResult(repoRoot, base, head, filename, originalResult.sizeBytes ?? 0)
+      }
       originalContent = originalResult.content
       if (originalResult.isBinary) {
         isBinary = true
@@ -2631,7 +2673,10 @@ export async function getGitHistoryFileContent(
           error: 'Invalid file path.'
         }
       }
-      const modifiedResult = await readGitRevisionFile(repoRoot, gitExecutable, head, gitPath, filename)
+      const modifiedResult = await readGitRevisionFile(repoRoot, gitExecutable, head, gitPath, filename, options)
+      if (isGitLargeFilePromptResult(modifiedResult)) {
+        return buildGitHistoryLargeFileContentResult(repoRoot, base, head, filename, modifiedResult.sizeBytes ?? 0)
+      }
       modifiedContent = modifiedResult.content
       if (modifiedResult.isBinary) {
         isBinary = true
@@ -2825,7 +2870,8 @@ async function getSubmoduleEntryContent(
 export async function getGitFileContent(
   cwd: string,
   file: Pick<GitFileStatus, 'filename' | 'status' | 'originalFilename' | 'changeType' | 'isSubmoduleEntry'>,
-  overrideRepoRoot?: string
+  overrideRepoRoot?: string,
+  options?: GitFileContentRequestOptions
 ): Promise<GitFileContentResult> {
   const gitInstalled = await checkGitInstalled()
   const gitExecutable = await resolveGitExecutable()
@@ -2909,7 +2955,10 @@ export async function getGitFileContent(
             error: 'Invalid file path.'
           }
         }
-        const originalResult = await readGitHeadFile(repoRoot, gitExecutable, gitPath, originalTarget)
+        const originalResult = await readGitHeadFile(repoRoot, gitExecutable, gitPath, originalTarget, options)
+        if (isGitLargeFilePromptResult(originalResult)) {
+          return buildGitLargeFileContentResult(repoRoot, filename, originalResult.sizeBytes ?? 0)
+        }
         originalContent = originalResult.content
         if (originalResult.isBinary) {
           isBinary = true
@@ -2930,7 +2979,10 @@ export async function getGitFileContent(
             error: 'Invalid file path.'
           }
         }
-        const modifiedResult = await readGitIndexFile(repoRoot, gitExecutable, gitPath, filename)
+        const modifiedResult = await readGitIndexFile(repoRoot, gitExecutable, gitPath, filename, options)
+        if (isGitLargeFilePromptResult(modifiedResult)) {
+          return buildGitLargeFileContentResult(repoRoot, filename, modifiedResult.sizeBytes ?? 0)
+        }
         modifiedContent = modifiedResult.content
         if (modifiedResult.isBinary) {
           isBinary = true
@@ -2951,7 +3003,10 @@ export async function getGitFileContent(
             error: 'Invalid file path.'
           }
         }
-        const originalResult = await readGitIndexFile(repoRoot, gitExecutable, gitPath, originalTarget)
+        const originalResult = await readGitIndexFile(repoRoot, gitExecutable, gitPath, originalTarget, options)
+        if (isGitLargeFilePromptResult(originalResult)) {
+          return buildGitLargeFileContentResult(repoRoot, filename, originalResult.sizeBytes ?? 0)
+        }
         originalContent = originalResult.content
         if (originalResult.isBinary) {
           isBinary = true
@@ -2972,7 +3027,10 @@ export async function getGitFileContent(
             error: 'Invalid file path.'
           }
         }
-        const workingResult = await readWorkingFile(fullPath, filename)
+        const workingResult = await readWorkingFile(fullPath, filename, options)
+        if (isGitLargeFilePromptResult(workingResult)) {
+          return buildGitLargeFileContentResult(repoRoot, filename, workingResult.sizeBytes ?? 0)
+        }
         modifiedContent = workingResult.content
         if (workingResult.isBinary) {
           isBinary = true
@@ -2993,7 +3051,10 @@ export async function getGitFileContent(
             error: 'Invalid file path.'
           }
         }
-        const workingResult = await readWorkingFile(fullPath, filename)
+        const workingResult = await readWorkingFile(fullPath, filename, options)
+        if (isGitLargeFilePromptResult(workingResult)) {
+          return buildGitLargeFileContentResult(repoRoot, filename, workingResult.sizeBytes ?? 0)
+        }
         modifiedContent = workingResult.content
         if (workingResult.isBinary) {
           isBinary = true

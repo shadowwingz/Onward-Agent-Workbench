@@ -4,7 +4,7 @@
  */
 
 import { app, ipcMain, BrowserWindow, Menu, dialog, shell, clipboard } from 'electron'
-import { join, resolve, sep } from 'path'
+import { dirname, join, resolve, sep } from 'path'
 import { readFileSync, statSync, writeFileSync } from 'fs'
 import { ptyManager, PtyOptions } from './pty-manager'
 import { TerminalGitInfoBridge } from './terminal-git-info-bridge'
@@ -86,6 +86,27 @@ type DebugApiTerminalWriteResult = {
   status: number
   body?: string
   error?: string
+}
+
+function invalidateGitDiffAfterKnownMutation(project: string | undefined | null): void {
+  if (!project) return
+  gitDiffCacheInvalidator.invalidate(project, 'manual')
+  invalidateContentCacheForProject(project, 'invalidated-mutation')
+}
+
+async function invalidateGitDiffAfterProjectFileSave(root: string, fullPath: string | null): Promise<void> {
+  const projects = new Set<string>([resolve(root)])
+  if (fullPath) {
+    try {
+      const repoRoot = await gitIpcWorkerClient.resolveRepoRoot(dirname(fullPath))
+      if (repoRoot) projects.add(repoRoot)
+    } catch {
+      // Non-git project saves still invalidate the editor root bucket.
+    }
+  }
+  for (const project of projects) {
+    invalidateGitDiffAfterKnownMutation(project)
+  }
 }
 
 const BRACKETED_PASTE_ENABLE_RE = /\x1b\[\?2004h/g
@@ -1760,25 +1781,25 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   // next click refetches fresh without waiting for the async mirror delta.
   ipcMain.handle(IPC.GIT_SAVE_FILE_CONTENT, async (_, cwd: string, filename: string, content: string) => {
     const result = await gitIpcWorkerClient.saveFileContent(cwd, filename, content)
-    invalidateContentCacheForProject(cwd, 'invalidated-mutation')
+    if (result.success) invalidateGitDiffAfterKnownMutation(cwd)
     return result
   })
 
   ipcMain.handle(IPC.GIT_STAGE_FILE, async (_, cwd: string, filename: string, repoRoot?: string) => {
     const result = await gitIpcWorkerClient.stageFile(cwd, filename, repoRoot)
-    invalidateContentCacheForProject(repoRoot ?? cwd, 'invalidated-mutation')
+    if (result.success) invalidateGitDiffAfterKnownMutation(repoRoot ?? cwd)
     return result
   })
 
   ipcMain.handle(IPC.GIT_UNSTAGE_FILE, async (_, cwd: string, filename: string, repoRoot?: string) => {
     const result = await gitIpcWorkerClient.unstageFile(cwd, filename, repoRoot)
-    invalidateContentCacheForProject(repoRoot ?? cwd, 'invalidated-mutation')
+    if (result.success) invalidateGitDiffAfterKnownMutation(repoRoot ?? cwd)
     return result
   })
 
   ipcMain.handle(IPC.GIT_DISCARD_FILE, async (_, cwd: string, file: Pick<GitFileStatus, 'filename' | 'changeType' | 'status' | 'isSubmoduleEntry'>, repoRoot?: string) => {
     const result = await gitIpcWorkerClient.discardFile(cwd, file, repoRoot)
-    invalidateContentCacheForProject(repoRoot ?? cwd, 'invalidated-mutation')
+    if (result.success) invalidateGitDiffAfterKnownMutation(repoRoot ?? cwd)
     return result
   })
 
@@ -1788,7 +1809,7 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
 
   ipcMain.handle(IPC.GIT_UPDATE_INDEX_CONTENT, async (_, cwd: string, filename: string, content: string) => {
     const result = await gitIpcWorkerClient.updateIndexContent(cwd, filename, content)
-    invalidateContentCacheForProject(cwd, 'invalidated-mutation')
+    if (result.success) invalidateGitDiffAfterKnownMutation(cwd)
     return result
   })
 
@@ -1891,11 +1912,16 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
 
   ipcMain.handle(IPC.PROJECT_SAVE_FILE, async (_, root: string, path: string, content: string) => {
     const result = await saveProjectFile(root, path, content)
+    let fullPath: string | null = null
     if (result.success && fileWatchManager) {
-      const fullPath = resolveInRoot(resolve(root), path)
+      fullPath = resolveInRoot(resolve(root), path)
       if (fullPath) {
         fileWatchManager.suppressNext(fullPath)
       }
+    }
+    if (result.success) {
+      if (!fullPath) fullPath = resolveInRoot(resolve(root), path)
+      await invalidateGitDiffAfterProjectFileSave(root, fullPath)
     }
     return result
   })

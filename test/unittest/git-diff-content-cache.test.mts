@@ -116,6 +116,14 @@ test('invalidateProject drops the whole bucket; other projects unaffected', () =
   assert.deepEqual(cache.get('/p2', 'a.ts'), { payload: '2a' })
 })
 
+test('invalidateProject advances generation even when the bucket is empty', () => {
+  const { cache } = makeCache()
+  const before = cache.getProjectGeneration('/missing')
+  assert.equal(cache.isProjectGenerationCurrent('/missing', before), true)
+  assert.equal(cache.invalidateProject('/missing'), 0)
+  assert.equal(cache.isProjectGenerationCurrent('/missing', before), false)
+})
+
 test('invalidateEntry surgically removes one file', () => {
   const { cache } = makeCache()
   cache.put('/p1', 'a.ts', { payload: '1a' }, 10)
@@ -134,6 +142,15 @@ test('invalidateAll clears every bucket', () => {
   const dropped = cache.invalidateAll()
   assert.equal(dropped, 3)
   assert.equal(cache.inspectStats().totalEntries, 0)
+})
+
+test('invalidateAll advances the global generation for in-flight fetch guards', () => {
+  const { cache } = makeCache()
+  const beforeP1 = cache.getProjectGeneration('/p1')
+  const beforeP2 = cache.getProjectGeneration('/p2')
+  cache.invalidateAll()
+  assert.equal(cache.isProjectGenerationCurrent('/p1', beforeP1), false)
+  assert.equal(cache.isProjectGenerationCurrent('/p2', beforeP2), false)
 })
 
 test('inspectStats reports byte totals and configured limits', () => {

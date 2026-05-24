@@ -61,6 +61,8 @@ export interface GitDiffContentCacheStats {
   singleFileByteLimit: number
 }
 
+export type GitDiffContentCacheGeneration = string
+
 interface ProjectBucket<T> {
   project: string
   entries: Map<string, GitDiffContentCacheEntry<T>>
@@ -78,6 +80,8 @@ export class GitDiffContentCache<T> {
   private readonly maxProjects: number
   private readonly singleFileByteLimit: number
   private readonly recentProjectQueueEvictions = new Map<string, number>()
+  private readonly projectGenerations = new Map<string, number>()
+  private globalGeneration = 0
   private touchCounter = 0
 
   constructor(options: GitDiffContentCacheOptions = {}) {
@@ -94,6 +98,14 @@ export class GitDiffContentCache<T> {
     entry.touchOrder = this.nextTouchOrder()
     this.moveProjectToFront(project)
     return entry.value
+  }
+
+  getProjectGeneration(project: string): GitDiffContentCacheGeneration {
+    return `${this.globalGeneration}:${this.projectGenerations.get(project) ?? 0}`
+  }
+
+  isProjectGenerationCurrent(project: string, generation: GitDiffContentCacheGeneration): boolean {
+    return this.getProjectGeneration(project) === generation
   }
 
   /**
@@ -132,14 +144,21 @@ export class GitDiffContentCache<T> {
     if (!entry) return false
     bucket.entries.delete(key)
     bucket.bytes -= entry.bytes
-    if (bucket.entries.size === 0) this.deleteProject(project)
+    if (bucket.entries.size === 0) {
+      this.deleteProject(project)
+    } else {
+      this.bumpProjectGeneration(project)
+    }
     return true
   }
 
   /** Drops every entry for the given project. Returns count of dropped entries. */
   invalidateProject(project: string): number {
     const bucket = this.projects.get(project)
-    if (!bucket) return 0
+    if (!bucket) {
+      this.bumpProjectGeneration(project)
+      return 0
+    }
     const dropped = bucket.entries.size
     this.deleteProject(project)
     return dropped
@@ -151,6 +170,8 @@ export class GitDiffContentCache<T> {
     for (const bucket of this.projects.values()) dropped += bucket.entries.size
     this.projects.clear()
     this.projectQueue.length = 0
+    this.projectGenerations.clear()
+    this.globalGeneration += 1
     return dropped
   }
 
@@ -207,19 +228,25 @@ export class GitDiffContentCache<T> {
       if (sizeDelta !== 0) return sizeDelta
       return a[1].touchOrder - b[1].touchOrder
     })
+    let evictedAny = false
     for (const [key, entry] of sorted) {
       if (bucket.bytes <= this.projectByteLimit) break
       bucket.entries.delete(key)
       bucket.bytes -= entry.bytes
+      evictedAny = true
     }
-    if (bucket.entries.size === 0) this.deleteProject(bucket.project)
+    if (bucket.entries.size === 0) {
+      this.deleteProject(bucket.project)
+    } else if (evictedAny) {
+      this.bumpProjectGeneration(bucket.project)
+    }
   }
 
   private evictProjectsIfOverLimit(): void {
     while (this.projectQueue.length > this.maxProjects) {
       const victim = this.projectQueue.pop()
       if (!victim) return
-      this.projects.delete(victim)
+      this.deleteProject(victim)
       this.recentProjectQueueEvictions.set(victim, Date.now())
     }
   }
@@ -234,6 +261,11 @@ export class GitDiffContentCache<T> {
     this.projects.delete(project)
     const existingIndex = this.projectQueue.indexOf(project)
     if (existingIndex >= 0) this.projectQueue.splice(existingIndex, 1)
+    this.bumpProjectGeneration(project)
+  }
+
+  private bumpProjectGeneration(project: string): void {
+    this.projectGenerations.set(project, (this.projectGenerations.get(project) ?? 0) + 1)
   }
 
   private nextTouchOrder(): number {

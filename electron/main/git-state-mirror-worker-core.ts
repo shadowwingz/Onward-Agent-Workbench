@@ -306,6 +306,7 @@ export function computeMirrorDelta(prev: MirrorState | null, next: MirrorState):
   if (prev.submodulesLoading !== next.submodulesLoading) out.submodulesLoading = next.submodulesLoading
   if (!sameFileList(prev.files, next.files)) out.files = next.files
   if (!sameRepos(prev.repos, next.repos)) out.repos = next.repos
+  if (prev.changeFingerprint !== next.changeFingerprint) out.changeFingerprint = next.changeFingerprint
   // Generation is always included when it changed — Refresh Changes
   // is the trigger that bumps generation even when underlying data
   // (branch/status/files) is byte-identical.

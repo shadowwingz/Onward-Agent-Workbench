@@ -64,6 +64,7 @@ function mergeDelta(prev: GitStateMirrorSnapshot | null, cwd: string, delta: Git
     status: null,
     files: [],
     capturedAt: 0,
+    changeFingerprint: '',
     generation: 0
   }
   return {

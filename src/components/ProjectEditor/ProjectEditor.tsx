@@ -4488,7 +4488,7 @@ export function ProjectEditor({
     const openToken = openFileTokenRef.current + 1
     openFileTokenRef.current = openToken
     setIsLoadingFile(true)
-    const readOptions: { openMode?: ProjectFileOpenMode; confirmLargeText?: boolean } = {}
+    const readOptions: { openMode?: ProjectFileOpenMode } = {}
     let result = await window.electronAPI.project.readFile(root, path, readOptions)
     while (true) {
       if (openToken !== openFileTokenRef.current) {
@@ -4522,31 +4522,6 @@ export function ProjectEditor({
           setIsLoadingFile(true)
           debugLog('openFile:binary-choice', { path, mode: choice.mode, remember: choice.remember })
         }
-        result = await window.electronAPI.project.readFile(root, path, readOptions)
-        continue
-      }
-
-      if (result.requiresConfirmation) {
-        setIsLoadingFile(false)
-        const confirmed = await requestConfirm({
-          title: result.readOnly
-            ? t('projectEditor.largeFile.readOnlyTitle')
-            : t('projectEditor.largeFile.warningTitle'),
-          message: result.readOnly
-            ? t('projectEditor.largeFile.readOnlyConfirmMessage', { size: formatFileSize(result.sizeBytes ?? 0) })
-            : t('projectEditor.largeFile.warningMessage', { size: formatFileSize(result.sizeBytes ?? 0) }),
-          confirmText: result.readOnly
-            ? t('projectEditor.largeFile.openReadOnly')
-            : t('projectEditor.largeFile.openAnyway'),
-          cancelText: t('common.cancel')
-        })
-        if (openToken !== openFileTokenRef.current) return
-        if (!confirmed) {
-          debugLog('openFile:large-confirm-cancelled', { path })
-          return
-        }
-        readOptions.confirmLargeText = true
-        setIsLoadingFile(true)
         result = await window.electronAPI.project.readFile(root, path, readOptions)
         continue
       }

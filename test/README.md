@@ -119,6 +119,7 @@ point at files under `test/unittest/`.
 | GitStateMirror watcher supervisor recovery, degraded polling, and failure injection | `run-git-state-mirror-latency` (GSM-15, GSM-16) |
 | Snapshot service caches submodule meta (cache-hit / capture / invalidate) | `run-git-diff-staleness-and-submodule` (GDS-11, GDS-16) |
 | Trace markers emitted on watcher / freshness / snapshot paths | `run-git-diff-staleness-and-submodule` (GDS-12, GDS-16) |
+| Files over 3 MB prompt in Git Diff, cancel shows a clear message, continue displays content | `run-git-large-file-confirmation` (GLF-01..06) + `test/unittest/git-large-file-policy.test.mts` |
 | Image diff (PNG / SVG) in Diff modes 2up / swipe / onion | `run-image-diff` (ID-01, ID-02, ID-03, ID-19) |
 | Image diff in Git History (PNG / SVG) | `run-image-diff` (ID-13..18) |
 | PDF / EPUB compare in Diff + Git History (added / deleted / modified, single-pane collapse) | `run-pdf-epub-diff` (`git-diff-pdf-*`, `git-diff-epub-*`, `git-history-pdf-*`, `git-history-epub-*`) |
@@ -130,6 +131,7 @@ point at files under `test/unittest/`.
 |---|---|
 | Commit list, selection, file diff load | `run-git-history` (GH-*) |
 | Diff options display mode labels, default inline, legacy preference migration | `run-git-history-multi-terminal-scope` (GHMS-13) + `test/unittest/git-history-diff-display-mode.test.mts` |
+| Files over 3 MB prompt in Git History, cancel shows a clear message, continue displays content | `run-git-large-file-confirmation` (GLF-07..13) + `test/unittest/git-large-file-policy.test.mts` |
 | Per-terminal scope: history reflects active terminal cwd | `run-git-history-multi-terminal-scope` (GHMS-*) |
 | Nested submodule history view | `run-git-nested-submodules` (GNS-*) |
 
@@ -144,7 +146,7 @@ point at files under `test/unittest/`.
 | Editor restore on app reopen (last file, cursor, scroll) | `run-project-editor-restore` (PE-*) |
 | Restore unit logic (Set / Map serialisation, key normalization) | `run-project-editor-restore-unit` (PEU-*) |
 | File open positions exact-line scroll | `run-project-editor-open-position` (POP-*) |
-| Large text warning, read-only chunk viewer, unknown binary open choices, supported PNG/PDF/EPUB bypass binary prompt, large GIF + EPUB preview both use file:// URLs (no base64 IPC, no main-process buffer copy), supported file types (PDF / SQLite / EPUB) have no hard size cap | `run-project-editor-large-file` (PLF-*) |
+| Direct open with no file-size confirmation, read-only chunk viewer for very large text, unknown binary open choices, supported PNG/PDF/EPUB bypass binary prompt, large GIF + EPUB preview both use file:// URLs (no base64 IPC, no main-process buffer copy), supported file types (PDF / SQLite / EPUB) have no hard size cap | `run-project-editor-large-file` (PLF-*) + `test/unittest/project-editor-large-file-policy.test.mts` |
 | Editor scope = active terminal (multi-terminal isolation) | `run-project-editor-multi-terminal-scope` (PEMS-*) |
 | SQLite viewer (open `.db`, table list, paging) | `run-project-editor-sqlite` (PSQL-*) |
 | File index cache + Quick Open behaviour, including ignored `.git/index.lock` / `node_modules/.cache` watcher noise | `run-file-index-cache-ui` (FIC-01..26) |

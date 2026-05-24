@@ -141,6 +141,30 @@ if ! grep -q "GDS-43-trace-marker-diff-model-sync-expected" "$LOG_FILE"; then
   exit 1
 fi
 
+if ! grep -q "GDS-44-trace-marker-stable-status-fingerprint-expected" "$LOG_FILE"; then
+  echo "Missing GDS-44 marker; the stable-status fingerprint trace test did not run" >&2
+  tail -n 40 "$LOG_FILE" >&2
+  exit 1
+fi
+
+if ! grep -q "GDS-45-project-save-immediately-reopens-fresh-diff" "$LOG_FILE"; then
+  echo "Missing GDS-45 marker; the project-save synchronous invalidation test did not run" >&2
+  tail -n 40 "$LOG_FILE" >&2
+  exit 1
+fi
+
+if ! grep -q "GDS-46-closed-parent-view-submodule-edits-refresh-diff" "$LOG_FILE"; then
+  echo "Missing GDS-46 marker; the closed parent-view submodule freshness test did not run" >&2
+  tail -n 40 "$LOG_FILE" >&2
+  exit 1
+fi
+
+if ! grep -q "GDS-46-trace-marker-auxiliary-mirror-subscription-expected" "$LOG_FILE"; then
+  echo "Missing GDS-46 trace marker; the auxiliary Mirror subscription trace test did not run" >&2
+  tail -n 40 "$LOG_FILE" >&2
+  exit 1
+fi
+
 # ---------------------------------------------------------------------------
 # GDS-11/12: post-mortem trace inspection. Verify the new trace events
 # actually fired during the test session.
@@ -207,7 +231,7 @@ expect_event() {
 }
 
 echo ""
-echo "=== Trace event coverage (GDS-11/12/16/26/30/34/42/43) ==="
+echo "=== Trace event coverage (GDS-11/12/16/26/30/34/42/43/44) ==="
 expect_event "GDS-11"  "main:git.diff.submodule-filter"
 expect_event "GDS-12a" "main:git-state-mirror.fanout"
 expect_event "GDS-12b" "renderer:subpage.freshness-check"
@@ -229,6 +253,8 @@ expect_event "GDS-42a" "renderer:git-diff.file-list-mode-change"
 expect_event "GDS-42b" "renderer:git-diff.jump-to-editor"
 expect_event "GDS-42c" "renderer:project-editor.jump-to-diff"
 expect_event "GDS-43"  "renderer:git-diff.model-sync"
+expect_event "GDS-44"  "worker:git-state-mirror.change-fingerprint"
+expect_event "GDS-46"  "renderer:git-diff.aux-mirror-subscription"
 
 echo ""
 echo "Git Diff staleness + submodule filter autotest passed"

@@ -284,6 +284,7 @@ export const PERF_TRACE_EVENT = {
   MAIN_GIT_DIFF_SUBMODULE_FILTER: 'main:git.diff.submodule-filter',
   MAIN_GIT_DIFF_CONTENT_CACHE_HIT: 'main:git.diff.content-cache.hit',
   MAIN_GIT_DIFF_CONTENT_CACHE_MISS: 'main:git.diff.content-cache.miss',
+  MAIN_GIT_DIFF_CONTENT_CACHE_SKIP_STALE_GENERATION: 'main:git.diff.content-cache.skip-stale-generation',
   MAIN_GIT_DIFF_CONTENT_CACHE_INVALIDATE_PROJECT: 'main:git.diff.content-cache.invalidate-project',
   MAIN_GIT_DIFF_CONTENT_CACHE_INVALIDATE_LRU: 'main:git.diff.content-cache.invalidate-lru',
   MAIN_GIT_DIFF_PRECOMPUTE_SCHEDULE: 'main:git.diff.precompute.schedule',
@@ -387,6 +388,7 @@ export const PERF_TRACE_EVENT = {
   WORKER_GIT_STATE_MIRROR_WATCHER_RESTART_RESULT: 'worker:git-state-mirror.watcher-restart-result',
   WORKER_GIT_STATE_MIRROR_WATCHER_POLL: 'worker:git-state-mirror.watcher-poll',
   WORKER_GIT_STATE_MIRROR_WATCHER_SUSPENDED_PROBE: 'worker:git-state-mirror.watcher-suspended-probe',
+  WORKER_GIT_STATE_MIRROR_CHANGE_FINGERPRINT: 'worker:git-state-mirror.change-fingerprint',
   WORKER_GIT_STATE_MIRROR_RECOMPUTE_DONE: 'worker:git-state-mirror.recompute-status-done',
   MAIN_GIT_STATE_MIRROR_FANOUT: 'main:git-state-mirror.fanout',
   MAIN_GIT_STATE_MIRROR_WORKER_SHUTDOWN: 'main:git-state-mirror.worker-shutdown',
@@ -404,6 +406,7 @@ export const PERF_TRACE_EVENT = {
   RENDERER_GIT_DIFF_FILE_LIST_MODE_CHANGE: 'renderer:git-diff.file-list-mode-change',
   RENDERER_GIT_DIFF_JUMP_TO_EDITOR: 'renderer:git-diff.jump-to-editor',
   RENDERER_GIT_DIFF_SPLIT_MODE_TOGGLE: 'renderer:git-diff.split-mode-toggle',
+  RENDERER_GIT_DIFF_AUX_MIRROR_SUBSCRIPTION: 'renderer:git-diff.aux-mirror-subscription',
   RENDERER_PROJECT_EDITOR_JUMP_TO_DIFF: 'renderer:project-editor.jump-to-diff',
 
   // ───────── Renderer — Git Diff click → paint phase chain ─────────

@@ -122,43 +122,25 @@ export async function testProjectEditorLargeFile(ctx: AutotestContext): Promise<
     })
     if (cancelled()) return results
 
-    const warnedOpen = api()!.openFileByPathAsUser(warnedTextPath)
-    const warnedDialog = await waitFor(
-      'plf-4mb-warning-dialog',
-      () => api()?.getDialogState?.()?.type === 'confirm',
-      8000
-    )
-    record('PLF-06-4mb-text-shows-warning', warnedDialog, {
-      dialog: api()?.getDialogState?.()
-    })
-    api()?.confirmDialog?.()
-    await warnedOpen
+    await api()!.openFileByPathAsUser(warnedTextPath)
     const warnedOpened = await waitFor(
-      'plf-4mb-opened-after-confirm',
+      'plf-4mb-opened-without-confirm',
       () => api()?.getActiveFilePath?.() === warnedTextPath &&
         (api()?.getEditorContent?.().length ?? 0) >= 4 * ONE_MB &&
+        api()?.getDialogState?.() === null &&
         !api()?.getLargeFileState?.(),
       16000
     )
-    record('PLF-07-4mb-text-opens-after-confirm', warnedOpened, {
+    record('PLF-06-4mb-text-opens-without-confirm', warnedOpened, {
+      dialog: api()?.getDialogState?.(),
       contentLength: api()?.getEditorContent?.().length ?? 0,
       largeState: api()?.getLargeFileState?.()
     })
     if (cancelled()) return results
 
-    const largeOpen = api()!.openFileByPathAsUser(largeTextPath)
-    const largeDialog = await waitFor(
-      'plf-31mb-readonly-dialog',
-      () => api()?.getDialogState?.()?.type === 'confirm',
-      8000
-    )
-    record('PLF-08-31mb-text-shows-readonly-warning', largeDialog, {
-      dialog: api()?.getDialogState?.()
-    })
-    api()?.confirmDialog?.()
-    await largeOpen
+    await api()!.openFileByPathAsUser(largeTextPath)
     const largeReady = await waitFor(
-      'plf-31mb-readonly-ready',
+      'plf-31mb-readonly-ready-without-confirm',
       () => {
         const state = api()?.getLargeFileState?.()
         return state?.mode === 'large-text' &&
@@ -167,11 +149,13 @@ export async function testProjectEditorLargeFile(ctx: AutotestContext): Promise<
           !state.loading &&
           state.textLength > 0 &&
           state.bytesRead > 0 &&
+          api()?.getDialogState?.() === null &&
           (api()?.getEditorContent?.().length ?? -1) === 0
       },
       16000
     )
-    record('PLF-09-31mb-text-opens-readonly-chunked', largeReady, {
+    record('PLF-07-31mb-text-opens-readonly-chunked-without-confirm', largeReady, {
+      dialog: api()?.getDialogState?.(),
       state: api()?.getLargeFileState?.(),
       editorContentLength: api()?.getEditorContent?.().length ?? -1
     })

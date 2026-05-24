@@ -355,6 +355,7 @@ export interface GitHistoryFileContentOptions {
   base: string
   head: string
   file: Pick<GitHistoryFile, 'filename' | 'originalFilename' | 'status'>
+  allowLargeFile?: boolean
 }
 
 export type TerminalGitStatus = 'clean' | 'modified' | 'added' | 'unknown'
@@ -390,6 +391,7 @@ export interface GitDiffContentCacheInfo {
 export interface GitFileContentRequestOptions {
   force?: boolean
   missReason?: GitDiffContentCacheMissReason
+  allowLargeFile?: boolean
 }
 
 export interface TerminalGitInfo {
@@ -415,6 +417,7 @@ export interface GitStateMirrorSnapshot {
   repos?: GitRepoContext[]
   submodulesLoading?: boolean
   capturedAt: number
+  changeFingerprint: string
   generation: number
 }
 
@@ -477,6 +480,9 @@ export interface GitFileContentResult {
   modifiedPreviewData?: string
   originalPreviewSize?: number
   modifiedPreviewSize?: number
+  requiresLargeFileConfirmation?: boolean
+  largeFileSizeBytes?: number
+  largeFileThresholdBytes?: number
   cacheInfo?: GitDiffContentCacheInfo
   error?: string
 }
@@ -520,7 +526,6 @@ export type ProjectFileChunkMode = 'text' | 'binary'
 
 export interface ProjectReadOptions {
   openMode?: ProjectFileOpenMode
-  confirmLargeText?: boolean
 }
 
 export interface ProjectReadResult {

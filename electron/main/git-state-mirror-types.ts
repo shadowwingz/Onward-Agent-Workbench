@@ -54,6 +54,12 @@ export interface MirrorState {
   /** Captured `Date.now()` when the worker generated this state. */
   capturedAt: number
   /**
+   * Fingerprint of changed resources, including tracked working-tree file
+   * stat tokens and durable index metadata. This changes when a file that is
+   * already `M` is edited again, even if `git status` keeps the same shape.
+   */
+  changeFingerprint: string
+  /**
    * Monotonic generation counter, incremented by the Worker on every
    * recompute that produces a state change. Renderer uses this as a
    * lifecycle key (DiffEditor `key` prop, fileContentsRef cache bucket)

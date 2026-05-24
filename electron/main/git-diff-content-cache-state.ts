@@ -45,6 +45,7 @@ export interface GitDiffContentCacheInfo {
 export interface GitFileContentRequestOptions {
   force?: boolean
   missReason?: GitDiffContentCacheMissReason
+  allowLargeFile?: boolean
 }
 
 /**
@@ -91,7 +92,7 @@ export interface FetchFileContentArgs {
 
 export interface FetchFileContentDeps<T extends CacheableFetchResult> {
   cache: GitDiffContentCache<T>
-  fetchFromWorker: (cwd: string, file: ContentCacheFile, repoRoot?: string) => Promise<T>
+  fetchFromWorker: (cwd: string, file: ContentCacheFile, repoRoot?: string, options?: GitFileContentRequestOptions) => Promise<T>
   schedulerPendingProjects: () => string[]
   schedulerInFlightProjects: () => string[]
   recentMissReason: (project: string) => GitDiffContentCacheMissReason | null
@@ -100,6 +101,7 @@ export interface FetchFileContentDeps<T extends CacheableFetchResult> {
   recordHit?: (info: { project: string; filename: string; changeType: string }) => void
   recordMiss?: (info: { project: string; filename: string; changeType: string; reason: GitDiffContentCacheMissReason; force: boolean }) => void
   recordSkipTooLarge?: (info: { project: string; filename: string; bytes: number }) => void
+  recordSkipStaleGeneration?: (info: { project: string; filename: string; changeType: string }) => void
 }
 
 function withCacheInfo<T extends CacheableFetchResult>(result: T, info: GitDiffContentCacheInfo): T {
@@ -144,8 +146,10 @@ function resolveMissReason<T extends CacheableFetchResult>(
  *   force=true                       → fall through to worker, missReason from caller
  *   worker.success=false             → state='miss'  missReason='worker-error'  NOT cached
  *   worker.success=true ∧ stored=true→ state='miss'  missReason=resolved        cached
- *   worker.success=true ∧ stored=false (single-file-too-large)
- *                                    → state='miss'  missReason='single-file-too-large'  NOT cached
+   *   worker.success=true ∧ stored=false (single-file-too-large)
+   *                                    → state='miss'  missReason='single-file-too-large'  NOT cached
+   *   worker.success=true ∧ generation changed during fetch
+   *                                    → state='miss'  missReason=resolved  NOT cached
  *
  * Miss-reason resolution order:
  *   1. caller-provided `options.missReason` wins (renderer force-refresh,
@@ -162,6 +166,7 @@ export function createFetchFileContentWithCache<T extends CacheableFetchResult>(
     const key = buildCacheKey(args.file)
     const force = Boolean(args.options?.force)
     const hadProjectBeforeLookup = deps.cache.hasProject(project)
+    const generationAtFetchStart = deps.cache.getProjectGeneration(project)
 
     const cached = force ? null : deps.cache.get(project, key)
     if (cached) {
@@ -186,14 +191,26 @@ export function createFetchFileContentWithCache<T extends CacheableFetchResult>(
       reason: missReason,
       force
     })
-    const result = await deps.fetchFromWorker(args.cwd, args.file, args.repoRoot)
+    const result = await deps.fetchFromWorker(args.cwd, args.file, args.repoRoot, args.options)
     let stored = false
     let bytes = 0
     let finalMissReason: GitDiffContentCacheMissReason = result.success ? missReason : 'worker-error'
     if (result.success) {
       bytes = deps.estimateBytes(result)
-      stored = deps.cache.put(project, key, withoutCacheInfo(result), bytes)
-      if (!stored && bytes > 0) {
+      if (deps.cache.isProjectGenerationCurrent(project, generationAtFetchStart)) {
+        stored = deps.cache.put(project, key, withoutCacheInfo(result), bytes)
+      } else {
+        deps.recordSkipStaleGeneration?.({
+          project,
+          filename: args.file.filename,
+          changeType: args.file.changeType
+        })
+      }
+      if (
+        !stored &&
+        bytes > 0 &&
+        deps.cache.isProjectGenerationCurrent(project, generationAtFetchStart)
+      ) {
         finalMissReason = 'single-file-too-large'
         deps.recordSkipTooLarge?.({
           project,

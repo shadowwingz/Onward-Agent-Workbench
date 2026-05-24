@@ -20,6 +20,7 @@ import {
   stageGitFile,
   unstageGitFile,
   updateGitIndexContent,
+  type GitFileContentRequestOptions,
   type GitFileStatus,
   type GitHistoryDiffOptions,
   type GitHistoryFileContentOptions
@@ -97,7 +98,8 @@ async function dispatch(method: GitIpcWorkerMethod, payload: Record<string, unkn
       return await getGitFileContent(
         cwd,
         payload.file as Pick<GitFileStatus, 'filename' | 'status' | 'originalFilename' | 'changeType' | 'isSubmoduleEntry'>,
-        typeof payload.repoRoot === 'string' ? payload.repoRoot : undefined
+        typeof payload.repoRoot === 'string' ? payload.repoRoot : undefined,
+        payload.options as GitFileContentRequestOptions | undefined
       )
     case 'saveFileContent':
       return await saveGitFileContent(cwd, stringPayload(payload, 'filename'), stringPayload(payload, 'content'))

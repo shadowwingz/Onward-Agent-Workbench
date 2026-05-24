@@ -99,10 +99,11 @@ function failingWorkerResult(): MockFileContentResult {
 }
 
 interface MockDeps extends FetchFileContentDeps<MockFileContentResult> {
-  workerCalls: Array<{ cwd: string; file: ContentCacheFile; repoRoot?: string }>
+  workerCalls: Array<{ cwd: string; file: ContentCacheFile; repoRoot?: string; options?: { force?: boolean; missReason?: GitDiffContentCacheMissReason } }>
   hits: Array<{ project: string; filename: string }>
   misses: Array<{ project: string; filename: string; reason: GitDiffContentCacheMissReason; force: boolean }>
   tooLarge: Array<{ project: string; filename: string; bytes: number }>
+  staleGenerationSkips: Array<{ project: string; filename: string; changeType: string }>
   pendingProjects: Set<string>
   inFlightProjects: Set<string>
   recentMisses: Map<string, GitDiffContentCacheMissReason>
@@ -110,7 +111,7 @@ interface MockDeps extends FetchFileContentDeps<MockFileContentResult> {
 
 function makeDeps(opts: {
   cache?: GitDiffContentCache<MockFileContentResult>
-  fetchFromWorker?: (cwd: string, file: ContentCacheFile, repoRoot?: string) => Promise<MockFileContentResult>
+  fetchFromWorker?: (cwd: string, file: ContentCacheFile, repoRoot?: string, options?: { force?: boolean; missReason?: GitDiffContentCacheMissReason }) => Promise<MockFileContentResult>
 } = {}): MockDeps {
   const cache = opts.cache ?? new GitDiffContentCache<MockFileContentResult>({
     projectByteLimit: 10 * 1024,
@@ -121,14 +122,15 @@ function makeDeps(opts: {
   const hits: MockDeps['hits'] = []
   const misses: MockDeps['misses'] = []
   const tooLarge: MockDeps['tooLarge'] = []
+  const staleGenerationSkips: MockDeps['staleGenerationSkips'] = []
   const pendingProjects = new Set<string>()
   const inFlightProjects = new Set<string>()
   const recentMisses = new Map<string, GitDiffContentCacheMissReason>()
 
   const defaultWorker = async (_cwd: string, file: ContentCacheFile) => makeWorkerResult(file.filename)
-  const fetchFromWorker = async (cwd: string, file: ContentCacheFile, repoRoot?: string) => {
-    workerCalls.push({ cwd, file, repoRoot })
-    return await (opts.fetchFromWorker ?? defaultWorker)(cwd, file, repoRoot)
+  const fetchFromWorker = async (cwd: string, file: ContentCacheFile, repoRoot?: string, options?: { force?: boolean; missReason?: GitDiffContentCacheMissReason }) => {
+    workerCalls.push({ cwd, file, repoRoot, options })
+    return await (opts.fetchFromWorker ?? defaultWorker)(cwd, file, repoRoot, options)
   }
 
   return {
@@ -142,10 +144,14 @@ function makeDeps(opts: {
     recordHit: (info) => { hits.push({ project: info.project, filename: info.filename }) },
     recordMiss: (info) => { misses.push({ project: info.project, filename: info.filename, reason: info.reason, force: info.force }) },
     recordSkipTooLarge: (info) => { tooLarge.push({ project: info.project, filename: info.filename, bytes: info.bytes }) },
+    recordSkipStaleGeneration: (info) => {
+      staleGenerationSkips.push({ project: info.project, filename: info.filename, changeType: info.changeType })
+    },
     workerCalls,
     hits,
     misses,
     tooLarge,
+    staleGenerationSkips,
     pendingProjects,
     inFlightProjects,
     recentMisses
@@ -237,6 +243,7 @@ test('force=true bypasses cache: miss / worker called / passed-in missReason pre
   assert.equal(result.cacheInfo?.state, 'miss')
   assert.equal(result.cacheInfo?.source, 'worker-rebuild')
   assert.equal(result.cacheInfo?.missReason, 'renderer-force-refresh')
+  assert.equal(deps.workerCalls.at(-1)?.options?.force, true)
 })
 
 test('after invalidateProject + rememberMissReason(invalidated-watch): next click reports invalidated-watch', async () => {
@@ -584,4 +591,44 @@ test('e2e: invalidation while precompute is mid-burst — renderer click during 
   assert.equal(result.cacheInfo?.missReason, 'precompute-pending')
   fakeTimer.flushAll()
   await nextTick()
+})
+
+test('e2e: in-flight worker result after invalidation is returned but not stored', async () => {
+  let resolveFirst: (() => void) | null = null
+  let calls = 0
+  const deps = makeDeps({
+    fetchFromWorker: async (_cwd, file) => {
+      calls += 1
+      if (calls === 1) {
+        await new Promise<void>((resolve) => {
+          resolveFirst = resolve
+        })
+        return makeWorkerResult(file.filename, 'stale-content')
+      }
+      return makeWorkerResult(file.filename, 'fresh-content')
+    }
+  })
+  const fetchFn = createFetchFileContentWithCache(deps)
+  const file = unstagedModify('a.ts')
+
+  const firstFetch = fetchFn({ cwd: '/proj', file, repoRoot: '/proj' })
+  await nextTick()
+  assert.equal(deps.workerCalls.length, 1)
+  assert.ok(resolveFirst, 'first worker call should be waiting')
+
+  deps.cache.invalidateProject('/proj')
+  resolveFirst()
+  const firstResult = await firstFetch
+  assert.equal(firstResult.modifiedContent, 'stale-content')
+  assert.equal(firstResult.cacheInfo?.state, 'miss')
+  assert.equal(firstResult.cacheInfo?.stored, false)
+  assert.deepEqual(deps.staleGenerationSkips, [
+    { project: '/proj', filename: 'a.ts', changeType: 'unstaged' }
+  ])
+
+  deps.workerCalls.length = 0
+  const secondResult = await fetchFn({ cwd: '/proj', file, repoRoot: '/proj' })
+  assert.equal(secondResult.modifiedContent, 'fresh-content')
+  assert.equal(secondResult.cacheInfo?.state, 'miss')
+  assert.equal(deps.workerCalls.length, 1, 'stale in-flight result must not become a later cache hit')
 })

@@ -4,6 +4,7 @@
  */
 
 import type { AutotestContext, TestResult } from './types'
+import type { TerminalShellKind } from '../utils/terminal-command'
 
 /**
  * Git Diff staleness + submodule c/m/u filter regression suite (GDS-01..GDS-15).
@@ -44,6 +45,7 @@ interface FixtureManifest {
   uninitializedRoot: string
   submoduleRelPath: string
   parentEditableFile: string
+  stableStatusEditableFile: string
   submoduleEditableFile: string
   submoduleUntrackedRelPath: string
 }
@@ -90,6 +92,49 @@ function dirname(path: string): string {
   const cleaned = path.replace(/[\\/]+$/, '')
   const idx = Math.max(cleaned.lastIndexOf('/'), cleaned.lastIndexOf('\\'))
   return idx >= 0 ? cleaned.slice(0, idx) : cleaned
+}
+
+function joinAbsolutePath(root: string, relPath: string, platform: string): string {
+  const separator = platform === 'win32' ? '\\' : '/'
+  const cleanedRoot = root.replace(/[\\/]+$/, '')
+  const cleanedRel = relPath.replace(/^[\\/]+/, '')
+  const platformRel = platform === 'win32'
+    ? cleanedRel.replace(/[\\/]+/g, '\\')
+    : cleanedRel.replace(/[\\/]+/g, '/')
+  return `${cleanedRoot}${separator}${platformRel}`
+}
+
+function quotePosixLiteral(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`
+}
+
+function quotePowerShellLiteral(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`
+}
+
+function toUtf16LeBase64(value: string): string {
+  let binary = ''
+  for (let i = 0; i < value.length; i += 1) {
+    const code = value.charCodeAt(i)
+    binary += String.fromCharCode(code & 0xff, code >> 8)
+  }
+  return btoa(binary)
+}
+
+function buildExternalWriteCommand(
+  platform: string,
+  shellKind: TerminalShellKind | undefined,
+  fullPath: string,
+  content: string
+): string {
+  const powershellScript = `Set-Content -LiteralPath ${quotePowerShellLiteral(fullPath)} -Value ${quotePowerShellLiteral(content)} -NoNewline -Encoding UTF8`
+  if (shellKind === 'powershell') {
+    return `${powershellScript}\r`
+  }
+  if (platform === 'win32') {
+    return `powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${toUtf16LeBase64(powershellScript)}\r`
+  }
+  return `printf %s ${quotePosixLiteral(content)} > ${quotePosixLiteral(fullPath)}\r`
 }
 
 async function loadManifest(extraPath: string | null): Promise<FixtureManifest | null> {
@@ -281,8 +326,11 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
   const pointerRoot = manifest.pointerChangedRoot
   const subPath = manifest.submoduleRelPath
   const parentFile = manifest.parentEditableFile
-  const subFile = `${subPath}/${manifest.submoduleEditableFile}`
+  const stableStatusFile = manifest.stableStatusEditableFile
+  const subEditableFile = manifest.submoduleEditableFile
+  const subFile = `${subPath}/${subEditableFile}`
   const subUntracked = manifest.submoduleUntrackedRelPath
+  const platform = window.electronAPI.platform
 
   // Helper: capture trace-event names emitted since this point. Implemented via
   // the debug bridge on the main side which exposes a counter snapshot.
@@ -305,6 +353,68 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     window.__onwardGitDiffDebug?.getSelectedFileContent?.() ?? null
   const getSelectedEditorModelSnapshot = () =>
     window.__onwardGitDiffDebug?.getSelectedEditorModelContent?.() ?? null
+
+  const resolveTerminalShellKind = async (): Promise<TerminalShellKind | undefined> => {
+    try {
+      return (await window.electronAPI.terminal.getInputCapabilities(terminalId)).shellKind
+    } catch {
+      return undefined
+    }
+  }
+
+  const readProjectTextFile = async (root: string, relPath: string): Promise<string | null> => {
+    const result = await window.electronAPI.project.readFile(root, relPath)
+    if (!result.success || typeof result.content !== 'string') return null
+    return result.content
+  }
+
+  const waitForProjectTextFile = async (
+    label: string,
+    root: string,
+    relPath: string,
+    expectedContent: string,
+    timeoutMs = 8000
+  ): Promise<boolean> => {
+    const startedAt = performance.now()
+    logTiming('wait:start', { waitLabel: label, timeoutMs, intervalMs: 120 })
+    while (performance.now() - startedAt < timeoutMs) {
+      if (await readProjectTextFile(root, relPath) === expectedContent) {
+        logTiming('wait:end', {
+          waitLabel: label,
+          ok: true,
+          elapsedMs: elapsed(startedAt),
+          timeoutMs,
+          intervalMs: 120
+        })
+        return true
+      }
+      await baseSleep(120)
+    }
+    logTiming('wait:end', {
+      waitLabel: label,
+      ok: false,
+      elapsedMs: elapsed(startedAt),
+      timeoutMs,
+      intervalMs: 120
+    })
+    return false
+  }
+
+  const writeProjectFileViaTerminal = async (
+    root: string,
+    relPath: string,
+    content: string,
+    label: string
+  ): Promise<{ success: boolean; accepted: boolean; fileObserved: boolean; shellKind: TerminalShellKind | undefined; fullPath: string }> => {
+    const shellKind = await resolveTerminalShellKind()
+    const fullPath = joinAbsolutePath(root, relPath, platform)
+    const command = buildExternalWriteCommand(platform, shellKind, fullPath, content)
+    const accepted = await window.electronAPI.terminal.write(terminalId, command)
+    await window.electronAPI.git.notifyTerminalActivity(terminalId)
+    const fileObserved = await waitForProjectTextFile(`terminal-write-observed:${label}`, root, relPath, content)
+    await window.electronAPI.git.notifyTerminalActivity(terminalId)
+    return { success: accepted && fileObserved, accepted, fileObserved, shellKind, fullPath }
+  }
 
   const waitForSelectedContentAndModel = async (
     label: string,
@@ -377,6 +487,7 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
   const restoreBaseline = async () => {
     await clearDiffState()
     await window.electronAPI.git.saveFileContent(cleanRoot, parentFile, 'parent source line\n')
+    await window.electronAPI.git.saveFileContent(cleanRoot, stableStatusFile, '# Repeated edit target\n\nbaseline body\n')
     await window.electronAPI.git.saveFileContent(cleanRoot, subFile, '# Submodule\n\nbaseline content\n')
     await window.electronAPI.project.deletePath(cleanRoot, subUntracked)
     // Drop the request-level cache for the clean root so the next call is
@@ -1006,6 +1117,207 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     await waitFor('GDS-43-final-close', () => !window.__onwardGitDiffDebug?.isOpen(), 4000)
   }
 
+  // ─────────────── GDS-44: external repeated edits invalidate despite stable git status ───────────────
+  // The user-reported repro is any tracked file that is already modified and
+  // then edited repeatedly outside Git Diff. `git status --porcelain` keeps the
+  // same shape (`M <path>`), so the mirror must still emit a delta based on
+  // changed-resource fingerprinting. It writes through the terminal shell, not
+  // any app save IPC, so the test only passes if the Mirror observes the
+  // external file mutation and invalidates Git Diff from that signal.
+  if (!cancelled()) {
+    await restoreBaseline()
+    const v1Content = '# Repeated edit target\n\nGDS-44 edit v1\n'
+    const v2Content = '# Repeated edit target\n\nGDS-44 edit v2 same status\n'
+    const v3Content = '# Repeated edit target\n\nGDS-44 edit v3 manual refresh\n'
+
+    const writeV1 = await writeProjectFileViaTerminal(cleanRoot, stableStatusFile, v1Content, 'GDS-44-v1')
+    await sleep(320)
+    window.dispatchEvent(new CustomEvent('git-diff:open', { detail: { terminalId } }))
+    await waitFor('GDS-44-first-open', () => Boolean(window.__onwardGitDiffDebug?.isOpen()), 6000)
+    await waitFor('GDS-44-first-list', () => Boolean(window.__onwardGitDiffDebug?.getFileList().some((f) => f.filename === stableStatusFile)), 6000)
+    if (window.__onwardGitDiffDebug?.getSelectedFile()?.filename !== stableStatusFile) {
+      window.__onwardGitDiffDebug?.selectFileByPath(stableStatusFile)
+    }
+    const firstReady = await waitForSelectedContentAndModel('GDS-44-v1-model-ready', v1Content, {
+      expectedDraftContent: null,
+      timeoutMs: 7000
+    })
+
+    window.dispatchEvent(new CustomEvent('git-diff:close', { detail: { terminalId } }))
+    await waitFor('GDS-44-close-before-external-edit', () => !window.__onwardGitDiffDebug?.isOpen(), 4000)
+
+    const writeV2 = await writeProjectFileViaTerminal(cleanRoot, stableStatusFile, v2Content, 'GDS-44-v2')
+    await sleep(500)
+    window.dispatchEvent(new CustomEvent('git-diff:open', { detail: { terminalId } }))
+    await waitFor('GDS-44-second-open', () => Boolean(window.__onwardGitDiffDebug?.isOpen()), 6000)
+    await waitFor('GDS-44-second-list', () => Boolean(window.__onwardGitDiffDebug?.getFileList().some((f) => f.filename === stableStatusFile)), 6000)
+    if (window.__onwardGitDiffDebug?.getSelectedFile()?.filename !== stableStatusFile) {
+      window.__onwardGitDiffDebug?.selectFileByPath(stableStatusFile)
+    }
+    const secondReady = await waitForSelectedContentAndModel('GDS-44-v2-model-ready-after-closed-edit', v2Content, {
+      expectedDraftContent: null,
+      timeoutMs: 7000
+    })
+
+    const writeV3 = await writeProjectFileViaTerminal(cleanRoot, stableStatusFile, v3Content, 'GDS-44-v3')
+    const refreshResult = await window.__onwardGitDiffDebug?.refreshChanges?.() === true
+    const thirdReady = await waitForSelectedContentAndModel('GDS-44-v3-model-ready-after-manual-refresh', v3Content, {
+      expectedDraftContent: null,
+      timeoutMs: 7000
+    })
+
+    record('GDS-44-external-stable-status-edits-refresh-diff', Boolean(
+      writeV1.success &&
+      writeV2.success &&
+      writeV3.success &&
+      firstReady &&
+      secondReady &&
+      refreshResult &&
+      thirdReady
+    ), {
+      stableStatusFile,
+      writeV1,
+      writeV2,
+      writeV3,
+      firstReady,
+      secondReady,
+      refreshResult,
+      thirdReady,
+      finalState: getSelectedFileContentSnapshot(),
+      finalModel: getSelectedEditorModelSnapshot(),
+      expectedFinalContent: v3Content
+    })
+    window.dispatchEvent(new CustomEvent('git-diff:close', { detail: { terminalId } }))
+    await waitFor('GDS-44-final-close', () => !window.__onwardGitDiffDebug?.isOpen(), 4000)
+  }
+
+  // ─────────────── GDS-45: Project Editor save invalidates Git Diff synchronously ───────────────
+  // GDS-44 proves the Mirror eventually catches external shell writes. This
+  // case removes the debounce slack after the second save: Project Editor saves
+  // are app-owned mutations, so Git Diff caches should be invalidated before
+  // the save IPC resolves, not only after the watcher settles.
+  if (!cancelled()) {
+    await restoreBaseline()
+    const v1Content = '# Repeated edit target\n\nGDS-45 edit v1 warm\n'
+    const v2Content = '# Repeated edit target\n\nGDS-45 edit v2 immediate reopen\n'
+
+    const savedV1 = await window.electronAPI.project.saveFile(cleanRoot, stableStatusFile, v1Content)
+    await sleep(320)
+    window.dispatchEvent(new CustomEvent('git-diff:open', { detail: { terminalId } }))
+    await waitFor('GDS-45-first-open', () => Boolean(window.__onwardGitDiffDebug?.isOpen()), 6000)
+    await waitFor('GDS-45-first-list', () => Boolean(window.__onwardGitDiffDebug?.getFileList().some((f) => f.filename === stableStatusFile)), 6000)
+    if (window.__onwardGitDiffDebug?.getSelectedFile()?.filename !== stableStatusFile) {
+      window.__onwardGitDiffDebug?.selectFileByPath(stableStatusFile)
+    }
+    const firstReady = await waitForSelectedContentAndModel('GDS-45-v1-model-ready', v1Content, {
+      expectedDraftContent: null,
+      timeoutMs: 7000
+    })
+    window.dispatchEvent(new CustomEvent('git-diff:close', { detail: { terminalId } }))
+    await waitFor('GDS-45-close-before-immediate-save', () => !window.__onwardGitDiffDebug?.isOpen(), 4000)
+
+    const savedV2 = await window.electronAPI.project.saveFile(cleanRoot, stableStatusFile, v2Content)
+    window.dispatchEvent(new CustomEvent('git-diff:open', { detail: { terminalId } }))
+    await waitFor('GDS-45-second-open', () => Boolean(window.__onwardGitDiffDebug?.isOpen()), 6000)
+    await waitFor('GDS-45-second-list', () => Boolean(window.__onwardGitDiffDebug?.getFileList().some((f) => f.filename === stableStatusFile)), 6000)
+    if (window.__onwardGitDiffDebug?.getSelectedFile()?.filename !== stableStatusFile) {
+      window.__onwardGitDiffDebug?.selectFileByPath(stableStatusFile)
+    }
+    const secondReady = await waitForSelectedContentAndModel('GDS-45-v2-model-ready-after-immediate-save', v2Content, {
+      expectedDraftContent: null,
+      timeoutMs: 7000
+    })
+
+    record('GDS-45-project-save-immediately-reopens-fresh-diff', Boolean(
+      savedV1.success &&
+      savedV2.success &&
+      firstReady &&
+      secondReady
+    ), {
+      stableStatusFile,
+      savedV1,
+      savedV2,
+      firstReady,
+      secondReady,
+      finalState: getSelectedFileContentSnapshot(),
+      finalModel: getSelectedEditorModelSnapshot(),
+      expectedFinalContent: v2Content
+    })
+    window.dispatchEvent(new CustomEvent('git-diff:close', { detail: { terminalId } }))
+    await waitFor('GDS-45-final-close', () => !window.__onwardGitDiffDebug?.isOpen(), 4000)
+  }
+
+  // ─────────────── GDS-46: parent Git Diff tracks closed submodule edits ───────────────
+  // Parent `git status` can keep reporting the same submodule row while the
+  // file inside the submodule changes again, and the submodule directory's own
+  // stat token may not change on content-only edits. Once the parent Git Diff
+  // has shown a submodule repo section, it must keep that submodule Mirror
+  // subscribed while closed so the submodule content cache is invalidated too.
+  if (!cancelled()) {
+    await restoreBaseline()
+    const subRepoRoot = joinAbsolutePath(cleanRoot, subPath, platform)
+    const v1Content = '# Submodule\n\nGDS-46 submodule edit v1\n'
+    const v2Content = '# Submodule\n\nGDS-46 submodule edit v2 closed\n'
+
+    const writeV1 = await writeProjectFileViaTerminal(subRepoRoot, subEditableFile, v1Content, 'GDS-46-v1')
+    await sleep(500)
+    window.dispatchEvent(new CustomEvent('git-diff:open', { detail: { terminalId } }))
+    await waitFor('GDS-46-first-open', () => Boolean(window.__onwardGitDiffDebug?.isOpen()), 6000)
+    await waitFor('GDS-46-first-submodule-list', () => Boolean(
+      window.__onwardGitDiffDebug?.getFileList().some((f) =>
+        f.filename === subEditableFile &&
+        clampPath(f.repoRoot ?? '') === clampPath(subRepoRoot)
+      )
+    ), 8000)
+    if (window.__onwardGitDiffDebug?.getSelectedFile()?.filename !== subEditableFile) {
+      window.__onwardGitDiffDebug?.selectFileByPath(subEditableFile)
+    }
+    const firstReady = await waitForSelectedContentAndModel('GDS-46-v1-model-ready', v1Content, {
+      expectedDraftContent: null,
+      timeoutMs: 7000
+    })
+
+    window.dispatchEvent(new CustomEvent('git-diff:close', { detail: { terminalId } }))
+    await waitFor('GDS-46-close-before-submodule-edit', () => !window.__onwardGitDiffDebug?.isOpen(), 4000)
+
+    const writeV2 = await writeProjectFileViaTerminal(subRepoRoot, subEditableFile, v2Content, 'GDS-46-v2')
+    await sleep(600)
+    window.dispatchEvent(new CustomEvent('git-diff:open', { detail: { terminalId } }))
+    await waitFor('GDS-46-second-open', () => Boolean(window.__onwardGitDiffDebug?.isOpen()), 6000)
+    await waitFor('GDS-46-second-submodule-list', () => Boolean(
+      window.__onwardGitDiffDebug?.getFileList().some((f) =>
+        f.filename === subEditableFile &&
+        clampPath(f.repoRoot ?? '') === clampPath(subRepoRoot)
+      )
+    ), 8000)
+    if (window.__onwardGitDiffDebug?.getSelectedFile()?.filename !== subEditableFile) {
+      window.__onwardGitDiffDebug?.selectFileByPath(subEditableFile)
+    }
+    const secondReady = await waitForSelectedContentAndModel('GDS-46-v2-model-ready-after-closed-submodule-edit', v2Content, {
+      expectedDraftContent: null,
+      timeoutMs: 7000
+    })
+
+    record('GDS-46-closed-parent-view-submodule-edits-refresh-diff', Boolean(
+      writeV1.success &&
+      writeV2.success &&
+      firstReady &&
+      secondReady
+    ), {
+      subRepoRoot,
+      subEditableFile,
+      writeV1,
+      writeV2,
+      firstReady,
+      secondReady,
+      finalState: getSelectedFileContentSnapshot(),
+      finalModel: getSelectedEditorModelSnapshot(),
+      expectedFinalContent: v2Content
+    })
+    window.dispatchEvent(new CustomEvent('git-diff:close', { detail: { terminalId } }))
+    await waitFor('GDS-46-final-close', () => !window.__onwardGitDiffDebug?.isOpen(), 4000)
+  }
+
   // ─────────────── GDS-21/22: VS Code-style resource semantics ───────────────
   // VS Code's SCM resource model distinguishes index, working tree, and
   // untracked resources. Onward keeps its own UI, but the underlying file
@@ -1018,8 +1330,7 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     const hunkSwitchFile = 'README.md'
     const hunkSwitchContent = '# Clean parent\n\nGDS-29 hunk switch file\n'
 
-    await window.electronAPI.git.saveFileContent(cleanRoot, parentFile, indexContent)
-    const staged = await window.electronAPI.git.stageFile(cleanRoot, parentFile)
+    const indexed = await window.electronAPI.git.updateIndexContent(cleanRoot, parentFile, indexContent)
     await window.electronAPI.git.saveFileContent(cleanRoot, parentFile, worktreeContent)
     await window.electronAPI.git.saveFileContent(cleanRoot, hunkSwitchFile, hunkSwitchContent)
     const created = await window.electronAPI.project.createFile(cleanRoot, untrackedFile, 'GDS-21 untracked body\n')
@@ -1030,7 +1341,7 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     const unstagedEntry = diff.files.find((file) => file.filename === parentFile && file.changeType === 'unstaged')
     const untrackedEntry = diff.files.find((file) => file.filename === untrackedFile && file.changeType === 'untracked')
     record('GDS-21-vscode-resource-groups-and-refs', Boolean(
-      staged.success &&
+      indexed.success &&
       created.success &&
       stagedEntry?.resourceGroup === 'index' &&
       stagedEntry.originalRef === 'HEAD' &&
@@ -1042,7 +1353,8 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
       untrackedEntry.originalRef === 'empty' &&
       untrackedEntry.modifiedRef === 'workingTree'
     ), {
-      stagedSuccess: staged.success,
+      indexedSuccess: indexed.success,
+      indexedError: indexed.error,
       createdSuccess: created.success,
       stagedEntry,
       unstagedEntry,
@@ -1766,6 +2078,20 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
       enabled: traceInfo?.enabled ?? null,
       eventsToVerifyInRunner: [
         'renderer:git-diff.model-sync'
+      ]
+    })
+    record('GDS-44-trace-marker-stable-status-fingerprint-expected', Boolean(traceInfo?.logPath), {
+      tracePath: traceInfo?.logPath ?? null,
+      enabled: traceInfo?.enabled ?? null,
+      eventsToVerifyInRunner: [
+        'worker:git-state-mirror.change-fingerprint'
+      ]
+    })
+    record('GDS-46-trace-marker-auxiliary-mirror-subscription-expected', Boolean(traceInfo?.logPath), {
+      tracePath: traceInfo?.logPath ?? null,
+      enabled: traceInfo?.enabled ?? null,
+      eventsToVerifyInRunner: [
+        'renderer:git-diff.aux-mirror-subscription'
       ]
     })
   }

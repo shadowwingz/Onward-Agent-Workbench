@@ -36,6 +36,7 @@ import { GitEpubCompare, type GitEpubStatus } from '../GitEpubCompare/GitEpubCom
 import { inspectPdfCompareDom, inspectEpubCompareDom } from '../GitDiffViewer/GitDiffViewer'
 import { usePathCopy } from '../../hooks/usePathCopy'
 import { useCwdCopyHandler } from '../../hooks/useCwdCopyHandler'
+import { LargeFileConfirmDialog } from '../LargeFileConfirmDialog/LargeFileConfirmDialog'
 import {
   coerceGitHistoryDiffDisplayMode,
   resolveGitHistoryDiffDisplayMode,
@@ -63,6 +64,25 @@ const STORAGE_KEY_SUMMARY_HEIGHT = 'git-history-summary-height'
 const DEFAULT_SUMMARY_HEIGHT = 120
 const MIN_SUMMARY_HEIGHT = 48
 const MIN_DETAIL_BODY_HEIGHT = 120
+
+type LargeFileConfirmState = {
+  filename: string
+  sizeBytes: number
+  sizeLabel: string
+  resolve: (confirmed: boolean) => void
+}
+
+function formatLargeFileSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB']
+  let value = bytes
+  let index = 0
+  while (value >= 1024 && index < units.length - 1) {
+    value /= 1024
+    index += 1
+  }
+  return `${value >= 10 || index === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[index]}`
+}
 
 interface GitHistoryViewerProps {
   isOpen: boolean
@@ -274,6 +294,7 @@ export function GitHistoryViewer({
   const [diffLoading, setDiffLoading] = useState(false)
   const [diffError, setDiffError] = useState<string | null>(null)
   const [filesLoading, setFilesLoading] = useState(false)
+  const [largeFileConfirmState, setLargeFileConfirmState] = useState<LargeFileConfirmState | null>(null)
 
   const [hideWhitespace, setHideWhitespace] = useState(() => {
     const prefs = getUIPreferences()
@@ -351,6 +372,8 @@ export function GitHistoryViewer({
   const fileCacheRef = useRef(new Map<string, GitHistoryFile[]>())
   const patchCacheRef = useRef(new Map<string, string>())
   const fileContentCacheRef = useRef(new Map<string, GitHistoryFileContentResult>())
+  const largeFileConfirmRef = useRef<LargeFileConfirmState | null>(null)
+  const allowedLargeFileKeysRef = useRef<Set<string>>(new Set())
   const commitsRef = useRef<GitCommitInfo[]>([])
   const filesRef = useRef<GitHistoryFile[]>([])
   const selectedFileRef = useRef<GitHistoryFile | null>(null)
@@ -777,6 +800,87 @@ export function GitHistoryViewer({
     }
   }, [hideWhitespace, t])
 
+  const requestLargeFileConfirmation = useCallback((filename: string, sizeBytes: number) => {
+    return new Promise<boolean>((resolve) => {
+      const nextState: LargeFileConfirmState = {
+        filename,
+        sizeBytes,
+        sizeLabel: formatLargeFileSize(sizeBytes),
+        resolve
+      }
+      largeFileConfirmRef.current = nextState
+      setLargeFileConfirmState(nextState)
+    })
+  }, [])
+
+  const settleLargeFileConfirmation = useCallback((confirmed: boolean) => {
+    const current = largeFileConfirmRef.current
+    if (!current) return
+    largeFileConfirmRef.current = null
+    setLargeFileConfirmState(null)
+    current.resolve(confirmed)
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      settleLargeFileConfirmation(false)
+    }
+  }, [settleLargeFileConfirmation])
+
+  useEffect(() => {
+    if (!isOpen) {
+      settleLargeFileConfirmation(false)
+    }
+  }, [isOpen, settleLargeFileConfirmation])
+
+  useEffect(() => {
+    settleLargeFileConfirmation(false)
+  }, [activeCwd, settleLargeFileConfirmation])
+
+  const resolveLargeFileHistoryContent = useCallback(async (
+    cwdToUse: string,
+    base: string,
+    head: string,
+    file: GitHistoryFile,
+    cacheKey: string
+  ): Promise<GitHistoryFileContentResult> => {
+    let result: GitHistoryFileContentResult = await window.electronAPI.git.getHistoryFileContent(cwdToUse, {
+      base,
+      head,
+      file: {
+        filename: file.filename,
+        originalFilename: file.originalFilename,
+        status: file.status
+      },
+      allowLargeFile: allowedLargeFileKeysRef.current.has(cacheKey)
+    })
+    if (!result.requiresLargeFileConfirmation) return result
+
+    const sizeBytes = result.largeFileSizeBytes ?? result.largeFileThresholdBytes ?? 0
+    const confirmed = await requestLargeFileConfirmation(file.filename, sizeBytes)
+    if (!confirmed) {
+      allowedLargeFileKeysRef.current.delete(cacheKey)
+      return {
+        ...result,
+        success: false,
+        error: t('gitDiff.largeFile.cancelled', { size: formatLargeFileSize(sizeBytes) })
+      }
+    }
+
+    allowedLargeFileKeysRef.current.add(cacheKey)
+    result = await window.electronAPI.git.getHistoryFileContent(cwdToUse, {
+      base,
+      head,
+      file: {
+        filename: file.filename,
+        originalFilename: file.originalFilename,
+        status: file.status
+      },
+      allowLargeFile: true
+    })
+    return result
+  }, [requestLargeFileConfirmation, t])
+
   const loadPatchForFile = useCallback(async (base: string, head: string, file: GitHistoryFile) => {
     const cwdToUse = activeCwdRef.current
     if (!cwdToUse) return
@@ -789,6 +893,16 @@ export function GitHistoryViewer({
     setDiffLoading(true)
     setDiffError(null)
     try {
+      const contentKey = buildFileContentKey(base, head, file)
+      const guard = await resolveLargeFileHistoryContent(cwdToUse, base, head, file, contentKey)
+      if (token !== patchTokenRef.current) return
+      if (!guard.success) {
+        setDiffError(guard.error || t('gitHistory.error.loadDiff'))
+        setDiffPatch('')
+        return
+      }
+      fileContentCacheRef.current.set(contentKey, guard)
+
       const result: GitHistoryDiffResult = await window.electronAPI.git.getHistoryDiff(cwdToUse, {
         base,
         head,
@@ -809,7 +923,7 @@ export function GitHistoryViewer({
         setDiffLoading(false)
       }
     }
-  }, [hideWhitespace, t])
+  }, [hideWhitespace, resolveLargeFileHistoryContent, t])
 
   const loadFileContentForHistory = useCallback(async (base: string, head: string, file: GitHistoryFile) => {
     const cwdToUse = activeCwdRef.current
@@ -823,15 +937,7 @@ export function GitHistoryViewer({
     setDiffLoading(true)
     setDiffError(null)
     try {
-      const result = await window.electronAPI.git.getHistoryFileContent(cwdToUse, {
-        base,
-        head,
-        file: {
-          filename: file.filename,
-          originalFilename: file.originalFilename,
-          status: file.status
-        }
-      })
+      const result = await resolveLargeFileHistoryContent(cwdToUse, base, head, file, cacheKey)
       if (token !== fileContentTokenRef.current) return
       if (!result.success) {
         setDiffError(result.error || t('gitHistory.error.loadDiff'))
@@ -845,7 +951,7 @@ export function GitHistoryViewer({
         setDiffLoading(false)
       }
     }
-  }, [t])
+  }, [resolveLargeFileHistoryContent, t])
 
   // Try file content first (for MultiFileDiff with expand support),
   // silently fall back to patch-based diff for large or binary files
@@ -867,16 +973,14 @@ export function GitHistoryViewer({
     setDiffError(null)
     let loaded = false
     try {
-      const result: GitHistoryFileContentResult = await window.electronAPI.git.getHistoryFileContent(cwdToUse, {
-        base,
-        head,
-        file: {
-          filename: file.filename,
-          originalFilename: file.originalFilename,
-          status: file.status
-        }
-      })
+      const result = await resolveLargeFileHistoryContent(cwdToUse, base, head, file, cacheKey)
       if (token !== fileContentTokenRef.current) return
+      if (result.requiresLargeFileConfirmation || !result.success) {
+        setDiffError(result.error || t('gitHistory.error.loadDiff'))
+        setSelectedFileContent(null)
+        loaded = true
+        return
+      }
       if (result.success && !result.isBinary) {
         fileContentCacheRef.current.set(cacheKey, result)
         setSelectedFileContent(result)
@@ -895,9 +999,10 @@ export function GitHistoryViewer({
       setDiffLoading(false)
       void loadPatchForFile(base, head, file)
     }
-  }, [t, loadPatchForFile])
+  }, [t, loadPatchForFile, resolveLargeFileHistoryContent])
 
   const switchRepo = useCallback((repoRoot: string | null) => {
+    settleLargeFileConfirmation(false)
     isSwitchingRepoRef.current = true
     skipRepoReloadRef.current = true
     ++loadTokenRef.current
@@ -921,7 +1026,7 @@ export function GitHistoryViewer({
     selectedRepoRootRef.current = repoRoot
     setSelectedRepoRoot(repoRoot)
     void loadHistory(true)
-  }, [loadHistory])
+  }, [loadHistory, settleLargeFileConfirmation])
 
   const persistState = useCallback(() => {
     if (!historyStateKey) return
@@ -1228,6 +1333,7 @@ export function GitHistoryViewer({
           error: content.error ?? null
         }
       },
+      getDiffError: () => diffError,
       getImagePreviewState: () => {
         if (!selectedFile?.isImage) return null
         return {
@@ -1372,6 +1478,35 @@ export function GitHistoryViewer({
         localStorage.setItem(STORAGE_KEY_HIDE_WHITESPACE, String(value))
         updateUIPreferences({ gitHistoryHideWhitespace: value })
       },
+      reloadSelectedFileContent: () => {
+        const file = selectedFileRef.current
+        if (!file || !selectionInfo.isContiguous || !selectionInfo.head || !selectionInfo.base) return false
+        ++patchTokenRef.current
+        ++fileContentTokenRef.current
+        setDiffPatch('')
+        setSelectedFileContent(null)
+        if (file.isImage || file.isPdf || file.isEpub) {
+          void loadFileContentForHistory(selectionInfo.base, selectionInfo.head, file)
+        } else {
+          void loadTextFileDiffContent(selectionInfo.base, selectionInfo.head, file)
+        }
+        return true
+      },
+      getLargeFileConfirmState: () => {
+        const state = largeFileConfirmRef.current
+        return state ? {
+          visible: true,
+          filename: state.filename,
+          sizeBytes: state.sizeBytes,
+          sizeLabel: state.sizeLabel
+        } : { visible: false, filename: null, sizeBytes: null, sizeLabel: null }
+      },
+      confirmLargeFile: () => {
+        settleLargeFileConfirmation(true)
+      },
+      cancelLargeFile: () => {
+        settleLargeFileConfirmation(false)
+      },
       getPdfCompareState: () => inspectPdfCompareDom(),
       getEpubCompareState: () => inspectEpubCompareDom()
     }
@@ -1383,7 +1518,7 @@ export function GitHistoryViewer({
         delete (window as any).__onwardGitHistoryDebugTerminalId
       }
     }
-  }, [isOpen, commits, selectedShas, files, selectedFile, selectedFileContent, loading, filesLoading, diffLoading, diffStyle, diffDisplayMode, hideWhitespace, imageCompareMode, imageDisplayMode, svgViewMode, selectedRepoRoot, cachedParentCwd, repoSearch, cachedRepos, visibleRepoItems, setRepoExpanded, toggleImageCompareMode, toggleImageDisplayMode, switchRepo])
+  }, [isOpen, commits, selectedShas, files, selectedFile, selectedFileContent, loading, filesLoading, diffLoading, diffError, diffStyle, diffDisplayMode, hideWhitespace, imageCompareMode, imageDisplayMode, svgViewMode, selectedRepoRoot, cachedParentCwd, repoSearch, cachedRepos, visibleRepoItems, setRepoExpanded, selectionInfo.isContiguous, selectionInfo.base, selectionInfo.head, loadFileContentForHistory, loadTextFileDiffContent, settleLargeFileConfirmation, toggleImageCompareMode, toggleImageDisplayMode, switchRepo])
 
   useSubpageEscape({ isOpen, onEscape: onClose })
 
@@ -2381,6 +2516,16 @@ export function GitHistoryViewer({
             )}
             {historyBody}
           </>
+        )}
+        {largeFileConfirmState && (
+          <LargeFileConfirmDialog
+            title={t('gitDiff.largeFile.confirmTitle')}
+            message={t('gitDiff.largeFile.confirmMessage', { size: largeFileConfirmState.sizeLabel })}
+            confirmText={t('gitDiff.largeFile.continue')}
+            cancelText={t('common.cancel')}
+            onConfirm={() => settleLargeFileConfirmation(true)}
+            onCancel={() => settleLargeFileConfirmation(false)}
+          />
         )}
       </div>
     </div>

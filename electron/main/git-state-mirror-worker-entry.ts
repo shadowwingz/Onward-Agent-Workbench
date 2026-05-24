@@ -44,6 +44,7 @@ import {
   resolveMirrorWatcherRoot,
   type MirrorWorkerEntryCore
 } from './git-state-mirror-worker-core'
+import { buildMirrorChangeFingerprint } from './git-state-mirror-change-fingerprint'
 import { parseStatusPorcelainV2Z } from './git-porcelain-parse'
 import { performanceTrace } from './performance-trace'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
@@ -321,6 +322,7 @@ async function computeMirrorState(cwd: string): Promise<MirrorState> {
       status: null,
       files: [],
       capturedAt,
+      changeFingerprint: '',
       generation
     }
   }
@@ -343,6 +345,14 @@ async function computeMirrorState(cwd: string): Promise<MirrorState> {
       meta.repoRoot
     )
     const parsed = parseStatusPorcelainV2Z(stdout, meta.repoRoot)
+    const changeFingerprint = await buildMirrorChangeFingerprint(meta.repoRoot, stdout, parsed.files)
+    performanceTrace.record(PERF_TRACE_EVENT.WORKER_GIT_STATE_MIRROR_CHANGE_FINGERPRINT, {
+      repoRoot: meta.repoRoot,
+      fileCount: changeFingerprint.fileCount,
+      statCount: changeFingerprint.statCount,
+      missingCount: changeFingerprint.missingCount,
+      durationMs: changeFingerprint.durationMs
+    })
     return {
       cwd,
       repoRoot: meta.repoRoot,
@@ -351,6 +361,7 @@ async function computeMirrorState(cwd: string): Promise<MirrorState> {
       status: parsed.status,
       files: parsed.files,
       capturedAt,
+      changeFingerprint: changeFingerprint.fingerprint,
       generation
     }
   } catch (error) {
@@ -366,6 +377,7 @@ async function computeMirrorState(cwd: string): Promise<MirrorState> {
       status: 'unknown',
       files: [],
       capturedAt,
+      changeFingerprint: 'unknown',
       generation
     }
   }
@@ -1060,8 +1072,8 @@ async function readFileBody(cwd: string, fileKey: string, force: boolean): Promi
   const absPath = isAbsolute(filename) ? filename : join(repoRoot, filename)
   let statToken = '-'
   try {
-    const st = await fs.stat(absPath)
-    statToken = `${Math.floor(st.mtimeMs)}:${st.size}`
+    const st = await fs.stat(absPath, { bigint: true })
+    statToken = `${st.mtimeNs}:${st.ctimeNs}:${st.size}:${st.mode}`
   } catch {
     statToken = 'missing'
   }

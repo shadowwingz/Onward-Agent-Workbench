@@ -32,6 +32,7 @@ function snapshot(overrides: Partial<MirrorState> = {}): MirrorState {
     status: 'clean',
     files: [],
     capturedAt: 1_000,
+    changeFingerprint: 'clean',
     generation: 1,
     ...overrides
   }

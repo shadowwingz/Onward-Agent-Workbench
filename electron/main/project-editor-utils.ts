@@ -8,10 +8,17 @@ import { readdir, stat, readFile, writeFile, mkdir, rename, rm, unlink, access, 
 import { resolve, relative, dirname, sep, normalize, extname, join } from 'path'
 import { isHtmlPath } from '../../src/utils/html-file'
 import { isSupportedImageFile } from './image-utils'
+import {
+  classifyProjectTextRead,
+  PROJECT_FILE_CHUNK_SIZE,
+  PROJECT_TEXT_EAGER_LIMIT
+} from './project-editor-large-file-policy'
 
-export const PROJECT_TEXT_WARNING_SIZE = 3 * 1024 * 1024
-export const PROJECT_TEXT_EAGER_LIMIT = 30 * 1024 * 1024
-export const PROJECT_FILE_CHUNK_SIZE = 512 * 1024
+export {
+  PROJECT_TEXT_WARNING_SIZE,
+  PROJECT_TEXT_EAGER_LIMIT,
+  PROJECT_FILE_CHUNK_SIZE
+} from './project-editor-large-file-policy'
 const BINARY_SNIFF_BYTES = 64 * 1024
 const SQLITE_DEFAULT_LIMIT = 100
 const SQLITE_MAX_LIMIT = 500
@@ -33,7 +40,6 @@ export type ProjectFileChunkMode = 'text' | 'binary'
 
 export interface ProjectReadOptions {
   openMode?: ProjectFileOpenMode
-  confirmLargeText?: boolean
 }
 
 function baseProjectReadResult(root: string, path: string, sizeBytes = 0) {
@@ -625,18 +631,8 @@ export async function readProjectFile(root: string, path: string, options: Proje
       }
     }
 
-    if (fileStat.size > PROJECT_TEXT_WARNING_SIZE && !options.confirmLargeText) {
-      return {
-        success: false,
-        ...baseProjectReadResult(rootPath, path, fileStat.size),
-        requiresConfirmation: true,
-        readOnly: fileStat.size > PROJECT_TEXT_EAGER_LIMIT,
-        openMode: fileStat.size > PROJECT_TEXT_EAGER_LIMIT ? 'large-text' : 'text',
-        error: 'This file is large and may take longer to open.'
-      }
-    }
-
-    if (fileStat.size > PROJECT_TEXT_EAGER_LIMIT) {
+    const textReadPolicy = classifyProjectTextRead(fileStat.size)
+    if (!textReadPolicy.eagerRead) {
       return {
         success: true,
         root: rootPath,
@@ -646,8 +642,8 @@ export async function readProjectFile(root: string, path: string, options: Proje
         isImage: false,
         isSqlite: false,
         sizeBytes: fileStat.size,
-        openMode: 'large-text',
-        readOnly: true
+        openMode: textReadPolicy.openMode,
+        readOnly: textReadPolicy.readOnly
       }
     }
 

@@ -241,10 +241,11 @@ export const EpubReader = forwardRef<EpubReaderHandle, EpubReaderProps>(function
         reportLocation: () => unknown
       }
 
-      // Patch 1: queue.tick — replace rAF with setTimeout(0) and force-call
-      // run() once to swap out any rAF the constructor already enqueued.
+      // Patch 1: queue.tick — replace rAF with setTimeout(0). Do not force-run
+      // the queue here: renderTo() already scheduled epub.js's first queue tick,
+      // and a second tick can dequeue start() before book.opened has populated
+      // book.package.
       renditionAny.q.tick = (cb: () => void) => window.setTimeout(cb, 0)
-      renditionAny.q.run()
 
       // Patch 2: reportLocation — re-implement without the inline rAF so
       // `relocated` / `locationChanged` fire even if rAF stalls.
@@ -409,6 +410,7 @@ export const EpubReader = forwardRef<EpubReaderHandle, EpubReaderProps>(function
         if (disposed) return
         applyTheme()
         bookReadyRef.current = true
+        renditionAny.q.run()
         startDisplay()
         for (const delay of retryIntervals) {
           window.setTimeout(() => {

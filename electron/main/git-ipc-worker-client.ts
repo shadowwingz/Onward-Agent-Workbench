@@ -6,6 +6,13 @@
 import { join, resolve } from 'path'
 import { Worker } from 'worker_threads'
 import { gitRuntimeManager, type GitTaskPriority } from './git-runtime-manager'
+import {
+  buildGitDiffWorkerDedupeKey,
+  buildGitFileContentWorkerDedupeKey,
+  repoKeyForWorker as repoKeyFor,
+  stableStringifyForWorkerKey as stableStringify,
+  type GitFileContentWorkerRequestOptions
+} from './git-ipc-worker-client-helpers'
 import type { GitDiffRequestCacheStats } from './git-diff-request-cache'
 import type {
   GitDiffLoadOptions,
@@ -77,17 +84,6 @@ type PendingRequest = {
 
 const WORKER_REQUEST_TIMEOUT_MS = 90000
 
-function stableStringify(value: unknown): string {
-  if (value === null || typeof value !== 'object') return JSON.stringify(value)
-  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`
-  const record = value as Record<string, unknown>
-  return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${stableStringify(record[key])}`).join(',')}}`
-}
-
-function repoKeyFor(cwd: string, repoRoot?: string | null): string {
-  return resolve(repoRoot || cwd)
-}
-
 class GitIpcWorkerClient {
   private worker: Worker | null = null
   private nextRequestId = 1
@@ -117,7 +113,7 @@ class GitIpcWorkerClient {
       priority: 'high',
       repoKey: cwd,
       repoConcurrencyLimit: 1,
-      dedupeKey: `git-ipc:diff:${resolve(cwd)}:${stableStringify(options ?? {})}`,
+      dedupeKey: buildGitDiffWorkerDedupeKey(cwd, options),
       label: 'worker git diff'
     })
   }
@@ -155,13 +151,14 @@ class GitIpcWorkerClient {
   getFileContent(
     cwd: string,
     file: Pick<GitFileStatus, 'filename' | 'status' | 'originalFilename' | 'changeType' | 'isSubmoduleEntry'>,
-    repoRoot?: string
+    repoRoot?: string,
+    options?: GitFileContentWorkerRequestOptions
   ): Promise<GitFileContentResult> {
-    return this.enqueueWorkerTask<GitFileContentResult>('getFileContent', { cwd, file, repoRoot }, {
+    return this.enqueueWorkerTask<GitFileContentResult>('getFileContent', { cwd, file, repoRoot, options }, {
       priority: 'high',
       repoKey: repoKeyFor(cwd, repoRoot),
       repoConcurrencyLimit: 1,
-      dedupeKey: `git-ipc:file-content:${repoKeyFor(cwd, repoRoot)}:${stableStringify(file)}`,
+      dedupeKey: buildGitFileContentWorkerDedupeKey(cwd, file, repoRoot, options),
       label: 'worker git file content'
     })
   }

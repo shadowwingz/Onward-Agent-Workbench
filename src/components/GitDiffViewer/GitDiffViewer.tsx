@@ -64,6 +64,7 @@ import {
   type DiffViewMemoryEntry
 } from './diffViewMemory'
 import { GitDiffDebugPanel } from './GitDiffDebugPanel'
+import { LargeFileConfirmDialog } from '../LargeFileConfirmDialog/LargeFileConfirmDialog'
 import { createThemedSetiFileIconResolver, sanitizeSetiSvgOnce } from '../ProjectEditor/setiFileIconTheme'
 import { perfTrace } from '../../utils/perf-trace'
 import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
@@ -151,6 +152,18 @@ const HUNK_ACTION_ICON_SVG: Record<'stage' | 'unstage' | 'revert', string> = {
   stage: `<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">${STAGE_ICON_PATHS}</svg>`,
   unstage: `<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">${UNSTAGE_ICON_PATHS}</svg>`,
   revert: `<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">${REVERT_ICON_PATHS}</svg>`
+}
+
+function formatLargeFileSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB']
+  let value = bytes
+  let index = 0
+  while (value >= 1024 && index < units.length - 1) {
+    value /= 1024
+    index += 1
+  }
+  return `${value >= 10 || index === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[index]}`
 }
 
 function escapeHtmlText(value: string): string {
@@ -443,6 +456,13 @@ interface FileContentState {
   error?: string
 }
 
+type LargeFileConfirmState = {
+  filename: string
+  sizeBytes: number
+  sizeLabel: string
+  resolve: (confirmed: boolean) => void
+}
+
 function retainDirtyDrafts(contents: Record<string, FileContentState>): Record<string, FileContentState> {
   const retained: Record<string, FileContentState> = {}
   for (const [key, state] of Object.entries(contents)) {
@@ -690,6 +710,14 @@ type GitDiffDebugApi = {
     error: string | null
   } | null
   getPrefetchState: () => BodyPrefetchSnapshot
+  getLargeFileConfirmState: () => {
+    visible: boolean
+    filename: string | null
+    sizeBytes: number | null
+    sizeLabel: string | null
+  }
+  confirmLargeFile: () => void
+  cancelLargeFile: () => void
   getLastFileContentLoad: () => LastFileContentLoadInfo | null
   getLastClickLatency: () => ClickLatencyMeasurement | null
   getLastClickLatencyForFile: (fileKey: string) => ClickLatencyMeasurement | null
@@ -1162,8 +1190,11 @@ export function GitDiffViewer({
   const [diffResult, setDiffResult] = useState<GitDiffResult | null>(null)
   const [selectedFile, setSelectedFile] = useState<GitFileStatus | null>(null)
   const [fileContents, setFileContents] = useState<Record<string, FileContentState>>({})
+  const [largeFileConfirmState, setLargeFileConfirmState] = useState<LargeFileConfirmState | null>(null)
   const diffResultRef = useRef<GitDiffResult | null>(null)
   const fileContentsRef = useRef<Record<string, FileContentState>>({})
+  const largeFileConfirmRef = useRef<LargeFileConfirmState | null>(null)
+  const allowedLargeFileKeysRef = useRef<Set<string>>(new Set())
   const staleFileContentKeysRef = useRef<Set<string>>(new Set())
   const pendingNavigationSelectRef = useRef<DiffNavigationSelectionTarget | null>(null)
   const [pendingNavigationSelectNonce, setPendingNavigationSelectNonce] = useState(0)
@@ -1314,6 +1345,7 @@ export function GitDiffViewer({
   const lastOpenScopeRef = useRef<string | null | undefined>(undefined)
   const resetDiffOnNextLoadRef = useRef(true)
   const suppressSelectionRestoreOnNextLoadRef = useRef(false)
+  const suppressMemorySelectionRestoreUntilSelectionRef = useRef(false)
   const [diffRevealPhase, setDiffRevealPhase] = useState<DiffRevealPhase>('idle')
   const diffRevealPhaseRef = useRef<DiffRevealPhase>('idle')
   const diffRevealTimeoutRef = useRef<number | null>(null)
@@ -1325,6 +1357,7 @@ export function GitDiffViewer({
   const tokenizeSettleRunIdRef = useRef(0)
   const [repoFilter, setRepoFilter] = useState<string | null>(null)
   const repoFilterRef = useRef<string | null>(null)
+  const auxiliaryMirrorRootsRef = useRef<Map<string, string>>(new Map())
   const [expandedRepoRoots, setExpandedRepoRoots] = useState<Set<string>>(() => new Set())
   const activeCwd = useMemo(() => diffResult?.cwd || cwd, [diffResult?.cwd, cwd])
   // Keep the Mirror subscription alive for the last diff cwd even while the
@@ -1334,6 +1367,56 @@ export function GitDiffViewer({
   const getFileKey = useCallback((file: GitFileStatus, repoRoot = activeCwd || '') => {
     return buildGitDiffFileKey(file.repoRoot || repoRoot, file)
   }, [activeCwd])
+
+  useEffect(() => {
+    const current = auxiliaryMirrorRootsRef.current
+    const next = new Map<string, string>()
+    const activeKey = activeCwd ? normalizeInvalidationPath(activeCwd) : ''
+    const addRoot = (root: string | null | undefined) => {
+      if (!root) return
+      const key = normalizeInvalidationPath(root)
+      if (!key || key === activeKey) return
+      next.set(key, root)
+    }
+
+    if (activeCwd && diffResult?.success) {
+      for (const repo of diffResult.repos ?? []) addRoot(repo.root)
+      for (const file of diffResult.files) addRoot(file.repoRoot)
+    }
+
+    for (const [key, root] of current) {
+      if (next.has(key)) continue
+      window.electronAPI.git.unsubscribeMirror(root)
+      perfTrace(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_AUX_MIRROR_SUBSCRIPTION, {
+        cwd: activeCwd,
+        terminalId,
+        repoRoot: root,
+        action: 'unsubscribe'
+      })
+    }
+
+    for (const [key, root] of next) {
+      if (current.has(key)) continue
+      void window.electronAPI.git.subscribeMirror(root)
+      perfTrace(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_AUX_MIRROR_SUBSCRIPTION, {
+        cwd: activeCwd,
+        terminalId,
+        repoRoot: root,
+        action: 'subscribe'
+      })
+    }
+
+    auxiliaryMirrorRootsRef.current = next
+  }, [activeCwd, diffResult, terminalId])
+
+  useEffect(() => {
+    return () => {
+      for (const root of auxiliaryMirrorRootsRef.current.values()) {
+        window.electronAPI.git.unsubscribeMirror(root)
+      }
+      auxiliaryMirrorRootsRef.current.clear()
+    }
+  }, [])
 
   // Whenever a click measurement seals, emit one perf-trace span per phase
   // (plus a total span) so a Perfetto capture carries the same JadeTree
@@ -2555,8 +2638,13 @@ export function GitDiffViewer({
 
     const suppressSelectionRestore = suppressSelectionRestoreOnNextLoadRef.current
     suppressSelectionRestoreOnNextLoadRef.current = false
+    const suppressMemorySelectionRestore =
+      suppressMemorySelectionRestoreUntilSelectionRef.current &&
+      !selectedFileRef.current &&
+      !previousSelection
     const nextFile = result.success
       && !suppressSelectionRestore
+      && !suppressMemorySelectionRestore
       ? resolveGitDiffRestoredSelection(
           result.files,
           repoRoot,
@@ -2894,6 +2982,7 @@ export function GitDiffViewer({
       resetDiffOnNextLoadRef.current = shouldReset
       if (openingFromClosed) {
         suppressSelectionRestoreOnNextLoadRef.current = true
+        suppressMemorySelectionRestoreUntilSelectionRef.current = true
       }
       timingRef.current = {
         openRequestedAt,
@@ -2995,6 +3084,11 @@ export function GitDiffViewer({
         const retainedDrafts = retainDirtyDrafts(currentContents)
         setFileContents(retainedDrafts)
         fileContentsRef.current = retainedDrafts
+        setDiffResult(null)
+        diffResultRef.current = null
+        selectedFileRef.current = null
+        lastSelectedFileRef.current = null
+        setSelectedFile(null)
         staleFileContentKeysRef.current.clear()
       }
       lastDiffRef.current = null
@@ -3266,6 +3360,43 @@ export function GitDiffViewer({
     }
   }, [activeCwd, getFileKey, scheduleDiffHunkActionWidgetInstall, terminalId])
 
+  const requestLargeFileConfirmation = useCallback((filename: string, sizeBytes: number) => {
+    return new Promise<boolean>((resolve) => {
+      const nextState: LargeFileConfirmState = {
+        filename,
+        sizeBytes,
+        sizeLabel: formatLargeFileSize(sizeBytes),
+        resolve
+      }
+      largeFileConfirmRef.current = nextState
+      setLargeFileConfirmState(nextState)
+    })
+  }, [])
+
+  const settleLargeFileConfirmation = useCallback((confirmed: boolean) => {
+    const current = largeFileConfirmRef.current
+    if (!current) return
+    largeFileConfirmRef.current = null
+    setLargeFileConfirmState(null)
+    current.resolve(confirmed)
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      settleLargeFileConfirmation(false)
+    }
+  }, [settleLargeFileConfirmation])
+
+  useEffect(() => {
+    if (!isOpen) {
+      settleLargeFileConfirmation(false)
+    }
+  }, [isOpen, settleLargeFileConfirmation])
+
+  useEffect(() => {
+    settleLargeFileConfirmation(false)
+  }, [activeCwd, settleLargeFileConfirmation])
+
   const ensureFileContent = useCallback(async (
     file: GitFileStatus,
     force = false,
@@ -3352,16 +3483,83 @@ export function GitDiffViewer({
     const task = (async () => {
       try {
         clickLatencyTrackerRef.current.markIpcStart(fileKey)
-        const result: GitFileContentResult = await window.electronAPI.git.getFileContent(activeCwd, {
+        const requestFile = {
           filename: file.filename,
           status: file.status,
           originalFilename: file.originalFilename,
           changeType: file.changeType,
           isSubmoduleEntry: file.isSubmoduleEntry
-        }, file.repoRoot, {
+        }
+        const requestOptions = {
           force,
-          missReason: cacheMissReasonForLoad(force, reason)
-        })
+          missReason: cacheMissReasonForLoad(force, reason),
+          allowLargeFile: allowedLargeFileKeysRef.current.has(fileKey)
+        }
+        let result: GitFileContentResult = await window.electronAPI.git.getFileContent(activeCwd, requestFile, file.repoRoot, requestOptions)
+        if (result.requiresLargeFileConfirmation) {
+          const sizeBytes = result.largeFileSizeBytes ?? result.largeFileThresholdBytes ?? 0
+          if (reason === 'prefetch') {
+            const nextContents = { ...fileContentsRef.current }
+            delete nextContents[fileKey]
+            fileContentsRef.current = nextContents
+            setFileContents(nextContents)
+            return
+          }
+          const confirmed = await requestLargeFileConfirmation(file.filename, sizeBytes)
+          if (!confirmed) {
+            allowedLargeFileKeysRef.current.delete(fileKey)
+            const cacheInfo = result.cacheInfo
+            clickLatencyTrackerRef.current.markIpcEnd(fileKey, cacheInfo?.state ?? 'miss', {
+              source: cacheInfo?.source ?? null,
+              missReason: cacheInfo?.missReason ?? null
+            })
+            lastFileContentLoadRef.current = {
+              fileKey,
+              filename: file.filename,
+              reason,
+              force,
+              result: 'error',
+              cacheInfo: cacheInfo ?? null,
+              durationMs: +(performance.now() - loadStartedAt).toFixed(1)
+            }
+            const errorText = t('gitDiff.largeFile.cancelled', { size: formatLargeFileSize(sizeBytes) })
+            setFileContents((prev) => ({
+              ...prev,
+              [fileKey]: {
+                ...(prev[fileKey] || {
+                  originalContent: '',
+                  modifiedContent: '',
+                  isBinary: false
+                }),
+                loading: false,
+                refreshing: false,
+                error: errorText,
+                originalContent: '',
+                modifiedContent: '',
+                draftContent: prev[fileKey]?.draftContent,
+                isBinary: false,
+                isImage: false,
+                isSvg: false,
+                isPdf: false,
+                isEpub: false,
+                originalImageUrl: undefined,
+                modifiedImageUrl: undefined,
+                originalImageSize: undefined,
+                modifiedImageSize: undefined,
+                originalPreviewData: undefined,
+                modifiedPreviewData: undefined,
+                originalPreviewSize: undefined,
+                modifiedPreviewSize: undefined
+              }
+            }))
+            return
+          }
+          allowedLargeFileKeysRef.current.add(fileKey)
+          result = await window.electronAPI.git.getFileContent(activeCwd, requestFile, file.repoRoot, {
+            ...requestOptions,
+            allowLargeFile: true
+          })
+        }
         const cacheInfo = result.cacheInfo
         clickLatencyTrackerRef.current.markIpcEnd(fileKey, cacheInfo?.state ?? 'miss', {
           source: cacheInfo?.source ?? null,
@@ -3554,7 +3752,7 @@ export function GitDiffViewer({
       delete inFlightRef.current[fileKey]
       delete inFlightForceRef.current[fileKey]
     }
-  }, [activeCwd, getFileKey, startTokenizeSettleTracking, syncCurrentDiffEditorModels, t, terminalId])
+  }, [activeCwd, getFileKey, requestLargeFileConfirmation, startTokenizeSettleTracking, syncCurrentDiffEditorModels, t, terminalId])
 
   // Bridge ensureFileContent into the watcher-invalidation listener
   // (registered above, before this callback is defined). The listener
@@ -3757,6 +3955,7 @@ export function GitDiffViewer({
   })
 
   const handleFileSelect = useCallback((file: GitFileStatus) => {
+    suppressMemorySelectionRestoreUntilSelectionRef.current = false
     const nextKey = getFileKey(file)
     // Begin a click→render measurement. Even if the user re-clicks the
     // already-selected file (a no-op below) the tracker resets the chain so
@@ -5415,6 +5614,21 @@ export function GitDiffViewer({
       dragSplitViewRatio: async (ratio: number) => dragDiffSplitRatio(ratio),
       navigateDiffChange: (direction: 'previous' | 'next') => navigateDiffChange(direction),
       refreshChanges: async () => refreshChanges(),
+      getLargeFileConfirmState: () => {
+        const state = largeFileConfirmRef.current
+        return state ? {
+          visible: true,
+          filename: state.filename,
+          sizeBytes: state.sizeBytes,
+          sizeLabel: state.sizeLabel
+        } : { visible: false, filename: null, sizeBytes: null, sizeLabel: null }
+      },
+      confirmLargeFile: () => {
+        settleLargeFileConfirmation(true)
+      },
+      cancelLargeFile: () => {
+        settleLargeFileConfirmation(false)
+      },
       getTermsPopoverOpen: () => termsPopoverOpen,
       toggleTermsPopover: () => {
         setTermsPopoverOpen((prev) => !prev)
@@ -5613,6 +5827,7 @@ export function GitDiffViewer({
     setVisibleDiffHunkActionWidget,
     setFileListViewMode,
     setRepoExpanded,
+    settleLargeFileConfirmation,
     selectedFile,
     selectedFileKey,
     selectedFileState,
@@ -6863,6 +7078,17 @@ export function GitDiffViewer({
           </>
           )
         })()}
+
+        {largeFileConfirmState && (
+          <LargeFileConfirmDialog
+            title={t('gitDiff.largeFile.confirmTitle')}
+            message={t('gitDiff.largeFile.confirmMessage', { size: largeFileConfirmState.sizeLabel })}
+            confirmText={t('gitDiff.largeFile.continue')}
+            cancelText={t('common.cancel')}
+            onConfirm={() => settleLargeFileConfirmation(true)}
+            onCancel={() => settleLargeFileConfirmation(false)}
+          />
+        )}
 
         {/* right click menu */}
         {contextMenu && (

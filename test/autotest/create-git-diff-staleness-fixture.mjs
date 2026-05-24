@@ -97,7 +97,8 @@ init(subSource, {
 const cleanRoot = join(reposRoot, 'clean', 'root')
 init(cleanRoot, {
   'README.md': '# Clean parent\n\nbaseline parent content\n',
-  'src/main.txt': 'parent source line\n'
+  'src/main.txt': 'parent source line\n',
+  'nested/repeated-edit-target.md': '# Repeated edit target\n\nbaseline body\n'
 }, 'parent baseline')
 addSubmodule(cleanRoot, subSource, 'modules/sub')
 commit(cleanRoot, 'add submodule')
@@ -182,6 +183,7 @@ const manifest = {
   uninitializedRoot,
   submoduleRelPath: 'modules/sub',
   parentEditableFile: 'src/main.txt',
+  stableStatusEditableFile: 'nested/repeated-edit-target.md',
   submoduleEditableFile: 'README.md',
   submoduleUntrackedRelPath: 'modules/sub/lib/new-untracked.txt'
 }

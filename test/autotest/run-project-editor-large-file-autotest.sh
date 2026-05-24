@@ -35,7 +35,7 @@ ONWARD_AUTOTEST_CWD="$ROOT_DIR" \
 ONWARD_AUTOTEST_EXIT=1 \
 "$APP_BIN" > "$LOG_FILE" 2>&1 || true
 
-if grep -q "\[AutoTest\] FAIL" "$LOG_FILE"; then
+if grep -Eq "\[AutoTest\] FAIL|totalFailed: [1-9][0-9]*|FAIL AT-RT-no-runtime-errors" "$LOG_FILE"; then
   echo "ProjectEditor large-file autotest failed. Log: $LOG_FILE" >&2
   tail -n 200 "$LOG_FILE" >&2
   exit 1

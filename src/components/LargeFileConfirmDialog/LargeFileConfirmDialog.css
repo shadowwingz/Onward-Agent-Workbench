@@ -1,0 +1,72 @@
+/*
+ * SPDX-FileCopyrightText: 2026 OPPO
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+.large-file-confirm-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.54);
+}
+
+.large-file-confirm-dialog {
+  width: min(420px, 100%);
+  padding: 20px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-1);
+  color: var(--text-1);
+}
+
+.large-file-confirm-title {
+  margin: 0 0 10px;
+  font-size: var(--font-lg);
+  font-weight: 600;
+  color: var(--text-1);
+}
+
+.large-file-confirm-message {
+  margin: 0 0 18px;
+  font-size: var(--font-md);
+  line-height: 1.5;
+  color: var(--text-2);
+}
+
+.large-file-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.large-file-confirm-button {
+  padding: 7px 14px;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-size: var(--font-md);
+  cursor: pointer;
+  transition: background-color 0.12s ease, opacity 0.12s ease;
+}
+
+.large-file-confirm-button.cancel {
+  background: var(--bg-2);
+  color: var(--text-1);
+}
+
+.large-file-confirm-button.cancel:hover {
+  background: var(--border-strong);
+}
+
+.large-file-confirm-button.confirm {
+  background: var(--accent);
+  color: var(--text-1);
+}
+
+.large-file-confirm-button.confirm:hover {
+  background: var(--accent-strong);
+}

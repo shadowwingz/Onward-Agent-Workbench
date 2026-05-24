@@ -486,6 +486,7 @@ export interface GitHistoryFileContentOptions {
   base: string
   head: string
   file: Pick<GitHistoryFile, 'filename' | 'originalFilename' | 'status'>
+  allowLargeFile?: boolean
 }
 
 export type TerminalGitStatus = 'clean' | 'modified' | 'added' | 'unknown'
@@ -529,6 +530,7 @@ export interface GitDiffContentCacheInfo {
 export interface GitFileContentRequestOptions {
   force?: boolean
   missReason?: GitDiffContentCacheMissReason
+  allowLargeFile?: boolean
 }
 
 export interface GitFileContentResult {
@@ -544,6 +546,9 @@ export interface GitFileContentResult {
   modifiedImageUrl?: string
   originalImageSize?: number
   modifiedImageSize?: number
+  requiresLargeFileConfirmation?: boolean
+  largeFileSizeBytes?: number
+  largeFileThresholdBytes?: number
   cacheInfo?: GitDiffContentCacheInfo
   error?: string
 }
@@ -587,7 +592,6 @@ export type ProjectFileChunkMode = 'text' | 'binary'
 
 export interface ProjectReadOptions {
   openMode?: ProjectFileOpenMode
-  confirmLargeText?: boolean
 }
 
 export interface ProjectReadResult {
@@ -1807,7 +1811,7 @@ const projectAPI: ProjectAPI = {
   readFile: (root: string, path: string, options?: ProjectReadOptions) => {
     return traceIpc(
       PERF_TRACE_EVENT.RENDERER_IPC_PROJECT_READ_FILE,
-      { pathLen: path.length, openMode: options?.openMode ?? 'auto', confirmed: Boolean(options?.confirmLargeText) },
+      { pathLen: path.length, openMode: options?.openMode ?? 'auto' },
       () => ipcRenderer.invoke(IPC.PROJECT_READ_FILE, root, path, options)
     )
   },

@@ -34,6 +34,7 @@ import { testGitDiffRecursiveSubmodules } from './test-git-diff-recursive-submod
 import { testGitDiffStalenessAndSubmodule } from './test-git-diff-staleness-and-submodule'
 import { testGitDiffClickLatency } from './test-git-diff-click-latency'
 import { testGitDiffIdenticalBlob } from './test-git-diff-identical-blob'
+import { testGitLargeFileConfirmation } from './test-git-large-file-confirmation'
 import { testGitStateMirrorLatency } from './test-git-state-mirror-latency'
 import { testGitNestedSubmodules } from './test-git-nested-submodules'
 import { testGitCrossPlatform } from './test-git-cross-platform'
@@ -606,6 +607,16 @@ export async function runAllTests(ctx: AutotestContext): Promise<void> {
       const results = await testGitDiffIdenticalBlob(ctx)
       collectSuiteResults('GitDiffIdenticalBlob', results)
       await ctx.reopenProjectEditor('phase5.494-cleanup')
+      await sleep(500)
+    }
+
+    if (!ctx.cancelled() && shouldRun('git-large-file-confirmation')) {
+      log('phase5.4945:begin')
+      await ctx.reopenProjectEditor('phase5.4945-setup')
+      await sleep(300)
+      const results = await testGitLargeFileConfirmation(ctx)
+      collectSuiteResults('GitLargeFileConfirmation', results)
+      void ctx.reopenProjectEditor('phase5.4945-cleanup')
       await sleep(500)
     }
 

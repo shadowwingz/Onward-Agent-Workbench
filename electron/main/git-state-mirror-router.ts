@@ -313,7 +313,9 @@ class GitStateMirrorRouter {
         // GitDiffViewer refetch chain that re-runs `git status`,
         // because the worker's `computeDelta` step short-circuits when
         // git status produces the same answer twice in a row.
-        gitDiffCacheInvalidator.invalidate(msg.cwd, 'mirror')
+        for (const invalidateCwd of new Set([msg.cwd, msg.state.repoRoot].filter(Boolean) as string[])) {
+          gitDiffCacheInvalidator.invalidate(invalidateCwd, 'mirror')
+        }
         return
       case 'file-body-update': {
         const pending = this.pendingBodies.get(msg.replyId)

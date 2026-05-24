@@ -134,10 +134,11 @@ function buildDefaultDeps(): FetchFileContentDeps<GitFileContentResult> {
     // generic factory stays free of git-utils types. The IPC client's signature
     // pins status to `GitStatusCode`; we cast at this single boundary because
     // the runtime values are GitStatusCode-shaped (they originate from getDiff).
-    fetchFromWorker: (cwd, file, repoRoot) => gitIpcWorkerClient.getFileContent(
+    fetchFromWorker: (cwd, file, repoRoot, options) => gitIpcWorkerClient.getFileContent(
       cwd,
       file as Pick<GitFileStatus, 'filename' | 'status' | 'originalFilename' | 'changeType' | 'isSubmoduleEntry'>,
-      repoRoot
+      repoRoot,
+      options
     ),
     schedulerPendingProjects: () => gitDiffPrecomputeScheduler.inspectStats().pendingProjects,
     schedulerInFlightProjects: () => gitDiffPrecomputeScheduler.inspectStats().inFlightProjects,
@@ -167,6 +168,13 @@ function buildDefaultDeps(): FetchFileContentDeps<GitFileContentResult> {
         filename,
         bytes,
         reason: 'single-file-cap'
+      })
+    },
+    recordSkipStaleGeneration: ({ project, filename, changeType }) => {
+      performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_DIFF_CONTENT_CACHE_SKIP_STALE_GENERATION, {
+        project,
+        filename,
+        changeType
       })
     }
   }

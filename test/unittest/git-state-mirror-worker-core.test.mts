@@ -49,6 +49,7 @@ function snapshot(cwd: string, status: MirrorState['status'], capturedAt: number
           modifiedRef: 'workingTree'
         }],
     capturedAt,
+    changeFingerprint: status === 'clean' ? 'clean' : 'modified-v1',
     generation: 1
   }
 }
@@ -125,6 +126,7 @@ test('watcher root is only armed for resolved git repositories', () => {
     status: null,
     files: [],
     capturedAt: 100,
+    changeFingerprint: '',
     generation: 1
   }
   const subdirRepo: MirrorState = {
@@ -135,6 +137,7 @@ test('watcher root is only armed for resolved git repositories', () => {
     status: 'clean',
     files: [],
     capturedAt: 100,
+    changeFingerprint: 'clean',
     generation: 1
   }
 
@@ -254,6 +257,7 @@ function stateWithGen(cwd: string, status: MirrorState['status'], generation: nu
     status,
     files: [],
     capturedAt: Date.now(),
+    changeFingerprint: 'same',
     generation
   }
 }
@@ -296,5 +300,18 @@ test('computeMirrorDelta surfaces a pure-generation bump even when content is by
   // Other fields are unchanged and should NOT bloat the delta.
   assert.equal(delta.status, undefined)
   assert.equal(delta.repoRoot, undefined)
+  assert.equal(delta.files, undefined)
+})
+
+test('computeMirrorDelta surfaces a changed-resource fingerprint when status shape is unchanged', () => {
+  const prev = snapshot('/repo', 'modified', 100)
+  const next = {
+    ...snapshot('/repo', 'modified', 200),
+    changeFingerprint: 'modified-v2'
+  }
+
+  const delta = computeMirrorDelta(prev, next)
+  assert.equal(delta.changeFingerprint, 'modified-v2')
+  assert.equal(delta.status, undefined)
   assert.equal(delta.files, undefined)
 })

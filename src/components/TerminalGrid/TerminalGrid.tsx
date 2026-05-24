@@ -569,6 +569,7 @@ export const TerminalGrid = memo(function TerminalGrid({
           status: null,
           files: [],
           capturedAt: 0,
+          changeFingerprint: '',
           generation: 0
         }
         return {

@@ -105,6 +105,14 @@ export interface GitDiffDebugApi {
     lastReason: string
     lastDurationMs: number | null
   }
+  getLargeFileConfirmState?: () => {
+    visible: boolean
+    filename: string | null
+    sizeBytes: number | null
+    sizeLabel: string | null
+  }
+  confirmLargeFile?: () => void
+  cancelLargeFile?: () => void
   getLastFileContentLoad?: () => {
     fileKey: string
     filename: string
@@ -270,6 +278,7 @@ export interface GitHistoryDebugApi {
     loading: boolean
     error: string | null
   } | null
+  getDiffError?: () => string | null
   getImagePreviewState?: () => {
     isImage: boolean
     isSvg: boolean
@@ -334,6 +343,15 @@ export interface GitHistoryDebugApi {
   setDiffDisplayMode?: (mode: 'side-by-side' | 'inline') => void
   getHideWhitespace: () => boolean
   setHideWhitespace: (value: boolean) => void
+  reloadSelectedFileContent?: () => boolean
+  getLargeFileConfirmState?: () => {
+    visible: boolean
+    filename: string | null
+    sizeBytes: number | null
+    sizeLabel: string | null
+  }
+  confirmLargeFile?: () => void
+  cancelLargeFile?: () => void
 }
 
 export interface ScheduleDebugInfo {
