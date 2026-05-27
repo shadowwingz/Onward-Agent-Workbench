@@ -1428,8 +1428,30 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
       actionState
     })
 
+    const getActiveSplitModeButton = () => (
+      document
+        .querySelector<HTMLButtonElement>('[data-testid="git-diff-split-mode-toggle"] .git-diff-split-mode-button.active')
+        ?.getAttribute('data-mode') ?? null
+    )
+    const defaultSplitMode = window.__onwardGitDiffDebug?.getSplitViewMode?.() ?? null
+    const defaultActiveSplitButton = getActiveSplitModeButton()
+    record('GDS-24a-diff-display-mode-default-inline', Boolean(
+      defaultSplitMode === 'inline' &&
+      defaultActiveSplitButton === 'inline'
+    ), {
+      defaultSplitMode,
+      defaultActiveSplitButton
+    })
+
+    const autoModeSet = window.__onwardGitDiffDebug?.setSplitViewMode?.('auto') === true
+    const autoModeReady = await waitFor('GDS-24-auto-mode-ready', () => (
+      window.__onwardGitDiffDebug?.getSplitViewMode?.() === 'auto' &&
+      getActiveSplitModeButton() === 'auto'
+    ), 3000, 50)
     const responsiveState = window.__onwardGitDiffDebug?.getResponsiveLayoutState?.() ?? null
     record('GDS-24-vscode-responsive-diff-options', Boolean(
+      autoModeSet &&
+      autoModeReady &&
       responsiveState?.useInlineViewWhenSpaceIsLimited === true &&
       responsiveState.inlineBreakpoint === 900 &&
       (
@@ -1438,6 +1460,8 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
         responsiveState.mode === 'inline'
       )
     ), {
+      autoModeSet,
+      autoModeReady,
       responsiveState
     })
 
@@ -1448,6 +1472,7 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
       window.__onwardGitDiffDebug?.setFileListWidth
     ) {
       window.__onwardGitDiffDebug.setFileListWidth(150)
+      window.__onwardGitDiffDebug.setSplitViewRatio?.(0.5)
       widenedForSplitDrag = await waitFor('GDS-25-side-by-side-ready', () => {
         const responsive = window.__onwardGitDiffDebug?.getResponsiveLayoutState?.() ?? null
         const split = window.__onwardGitDiffDebug?.getSplitViewState?.() ?? null
@@ -1464,7 +1489,9 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
     const splitGeometryUsable = Boolean(
       splitStateBeforeDrag?.mode === 'side-by-side' &&
       splitStateBeforeDrag.ratio !== null &&
-      splitWidthBeforeDrag >= 500
+      splitWidthBeforeDrag >= 500 &&
+      (splitStateBeforeDrag.originalWidth ?? 0) >= 160 &&
+      (splitStateBeforeDrag.modifiedWidth ?? 0) >= 160
     )
     const usableSplitState = splitGeometryUsable ? splitStateBeforeDrag : null
     if (usableSplitState && window.__onwardGitDiffDebug?.dragSplitViewRatio) {
@@ -1497,6 +1524,19 @@ export async function testGitDiffStalenessAndSubmodule(ctx: AutotestContext): Pr
         widenedForSplitDrag
       })
     }
+    const inlineModeRestored = window.__onwardGitDiffDebug?.setSplitViewMode?.('inline') === true
+    const inlineModeReady = await waitFor('GDS-25-inline-mode-restored', () => (
+      window.__onwardGitDiffDebug?.getSplitViewMode?.() === 'inline' &&
+      getActiveSplitModeButton() === 'inline'
+    ), 3000, 50)
+    record('GDS-25b-diff-display-mode-restored-inline', Boolean(
+      inlineModeRestored &&
+      inlineModeReady
+    ), {
+      inlineModeRestored,
+      inlineModeReady,
+      activeSplitModeButton: getActiveSplitModeButton()
+    })
 
     const navigationBefore = window.__onwardGitDiffDebug?.getDiffNavigationState?.() ?? null
     const navigatedNext = window.__onwardGitDiffDebug?.navigateDiffChange?.('next') === true

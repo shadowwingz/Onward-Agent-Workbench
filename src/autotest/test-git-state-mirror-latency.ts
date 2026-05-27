@@ -34,6 +34,9 @@ interface ExpectedHeaderState {
   cwd: string
 }
 
+const REPO_A_MAIN_BASELINE = 'export const REPO = "A"\n'
+const TWO_TASK_REPETITIONS = 5
+
 function summarizeMirror(snapshot: unknown | null): Record<string, unknown> | null {
   if (!snapshot || typeof snapshot !== 'object') return null
   const typed = snapshot as Partial<GitStateMirrorSnapshot>
@@ -53,8 +56,60 @@ function normalizePathForAssert(value: string | null): string | null {
   if (!value) return value
   let normalized = value.replace(/\\/g, '/').replace(/\/{2,}/g, '/')
   if (normalized.startsWith('/private/')) normalized = normalized.slice('/private'.length)
+  const driveMatch = normalized.match(/^([A-Za-z]:)(\/?)(.*)$/)
+  const prefix = driveMatch ? driveMatch[1].toLowerCase() : ''
+  const absolute = driveMatch ? driveMatch[2] === '/' : normalized.startsWith('/')
+  const body = driveMatch ? driveMatch[3] : normalized.replace(/^\//, '')
+  const segments: string[] = []
+  for (const part of body.split('/')) {
+    if (!part || part === '.') continue
+    if (part === '..') {
+      if (segments.length > 0) segments.pop()
+      continue
+    }
+    segments.push(part)
+  }
+  normalized = `${prefix}${absolute ? '/' : ''}${segments.join('/')}`
+  if (!normalized && absolute) normalized = '/'
+  if (!normalized && prefix) normalized = `${prefix}${absolute ? '/' : ''}`
   if (normalized.length > 1 && normalized.endsWith('/')) normalized = normalized.slice(0, -1)
   return normalized
+}
+
+function joinPath(base: string, child: string): string {
+  const separator = base.includes('\\') ? '\\' : '/'
+  return `${base.replace(/[\\/]+$/, '')}${separator}${child}`
+}
+
+function makeEquivalentCwdAlias(cwd: string): string {
+  return joinPath(cwd, '.')
+}
+
+function quotePosix(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`
+}
+
+function quotePowerShell(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`
+}
+
+function quoteCmd(value: string): string {
+  return `"${value.replace(/"/g, '""')}"`
+}
+
+function buildPorcelainCommand(
+  platform: string,
+  shellKind: string | undefined,
+  repoAbs: string,
+  outputAbs: string
+): string {
+  if (platform === 'win32') {
+    if (shellKind === 'cmd') {
+      return `git -C ${quoteCmd(repoAbs)} status --porcelain=v1 > ${quoteCmd(outputAbs)}\r`
+    }
+    return `git -C ${quotePowerShell(repoAbs)} status --porcelain=v1 | Set-Content -LiteralPath ${quotePowerShell(outputAbs)} -NoNewline -Encoding UTF8\r`
+  }
+  return `git -C ${quotePosix(repoAbs)} status --porcelain=v1 > ${quotePosix(outputAbs)}\r`
 }
 
 function summarizeWatcherStatus(status: GitStateMirrorWatcherStatus): Record<string, unknown> {
@@ -79,11 +134,13 @@ export async function testGitStateMirrorLatency(ctx: AutotestContext): Promise<T
     results.push({ name, ok, detail })
   }
 
-  const observedHeader = () => ({
-    branch: captureBranchText(terminalId),
-    colour: captureColorClass(terminalId),
-    cwd: captureCwdTitle(terminalId)
+  const observedHeaderFor = (id: string) => ({
+    branch: captureBranchText(id),
+    colour: captureColorClass(id),
+    cwd: captureCwdTitle(id)
   })
+
+  const observedHeader = () => observedHeaderFor(terminalId)
 
   const waitForHeaderState = async (
     id: string,
@@ -113,6 +170,59 @@ export async function testGitStateMirrorLatency(ctx: AutotestContext): Promise<T
       observed: observedHeader(),
       mirror: summarizeMirror(mirror),
       perf: { elapsedMs, hardTimeoutMs: 5000 }
+    })
+    return ok
+  }
+
+  const waitForTwoTaskHeaderState = async (
+    assertionId: string,
+    terminalA: string,
+    terminalB: string,
+    cwdA: string,
+    cwdB: string,
+    expectedStatus: MirrorColour,
+    description: string
+  ): Promise<boolean> => {
+    const start = performance.now()
+    await pushOscCwd(terminalA, cwdA)
+    await pushOscCwd(terminalB, cwdB)
+    const ok = await waitFor(`${assertionId}-headers`, () => {
+      const headerA = observedHeaderFor(terminalA)
+      const headerB = observedHeaderFor(terminalB)
+      const cwdAOk = normalizePathForAssert(headerA.cwd) === normalizePathForAssert(cwdA)
+      const cwdBOk = normalizePathForAssert(headerB.cwd) === normalizePathForAssert(cwdB)
+      const branchAOk = headerA.branch === repoA!.entry.branch
+      const branchBOk = headerB.branch === repoA!.entry.branch
+      const colourAOk = headerA.colour === expectedStatus
+      const colourBOk = headerB.colour === expectedStatus
+      return cwdAOk && cwdBOk && branchAOk && branchBOk && colourAOk && colourBOk
+    }, 7000, 20)
+    const [mirrorA, mirrorB] = await Promise.all([
+      getMirror(cwdA).catch(() => null),
+      getMirror(cwdB).catch(() => null)
+    ])
+    const terminalDebug = window.__onwardTerminalDebug
+    record(assertionId, ok, {
+      description,
+      expected: {
+        branch: repoA!.entry.branch,
+        colour: expectedStatus,
+        cwdA,
+        cwdB
+      },
+      observed: {
+        taskA: observedHeaderFor(terminalA),
+        taskB: observedHeaderFor(terminalB)
+      },
+      terminalInfo: {
+        taskA: terminalDebug?.getTerminalGitInfo?.(terminalA) ?? null,
+        taskB: terminalDebug?.getTerminalGitInfo?.(terminalB) ?? null
+      },
+      mirror: {
+        taskA: summarizeMirror(mirrorA),
+        taskB: summarizeMirror(mirrorB)
+      },
+      perf: { elapsedMs: Math.round(performance.now() - start), hardTimeoutMs: 7000 }
     })
     return ok
   }
@@ -178,6 +288,31 @@ export async function testGitStateMirrorLatency(ctx: AutotestContext): Promise<T
     ].filter(Boolean)
   })
   if (!allResolved) return results
+
+  const readPorcelainViaTerminal = async (
+    label: string,
+    commandTerminalId: string,
+    repoAbs: string
+  ): Promise<{ content: string | null; outputRel: string; outputAbs: string; command: string }> => {
+    const outputRel = `${label.replace(/[^A-Za-z0-9_-]/g, '-')}-porcelain.txt`
+    const outputAbs = joinPath(manifest.tempRoot, outputRel)
+    await window.electronAPI.project.deletePath(manifest.tempRoot, outputRel).catch(() => ({ success: false }))
+    const shellKind = await window.electronAPI.terminal.getInputCapabilities(commandTerminalId)
+      .then((caps) => caps.shellKind)
+      .catch(() => undefined)
+    const command = buildPorcelainCommand(window.electronAPI.platform, shellKind, repoAbs, outputAbs)
+    await window.electronAPI.terminal.write(commandTerminalId, command)
+    const startedAt = performance.now()
+    while (performance.now() - startedAt < 5000) {
+      if (cancelled()) break
+      const result = await window.electronAPI.project.readFile(manifest.tempRoot, outputRel).catch(() => null)
+      if (result?.success && typeof result.content === 'string') {
+        return { content: result.content, outputRel, outputAbs, command }
+      }
+      await sleep(50)
+    }
+    return { content: null, outputRel, outputAbs, command }
+  }
 
   const watcherErrors: Array<{ cwd: string; message: string; at: number }> = []
   const disposeWatcherError = window.electronAPI.git.onMirrorWatcherError?.((cwd, message) => {
@@ -435,6 +570,130 @@ export async function testGitStateMirrorLatency(ctx: AutotestContext): Promise<T
       before: summarizeMirror(before),
       after: summarizeMirror(after)
     })
+  }
+
+  if (!cancelled()) {
+    const layoutButton = document.querySelector<HTMLButtonElement>('button[title="Two terminals"]')
+    layoutButton?.click()
+    const twoTaskLayoutReady = await waitFor(
+      'GSM-17-layout-two-terminals',
+      () => (window.__onwardTerminalDebug?.getVisibleTerminalIds?.().length ?? 0) >= 2,
+      10000,
+      50
+    )
+    const visibleTerminalIds = window.__onwardTerminalDebug?.getVisibleTerminalIds?.() ?? []
+    const terminalA = visibleTerminalIds[0] ?? null
+    const terminalB = visibleTerminalIds[1] ?? null
+    const terminalPairReady = Boolean(twoTaskLayoutReady && terminalA && terminalB && terminalA !== terminalB)
+    record('GSM-17a-two-task-layout-ready', terminalPairReady, {
+      description: 'Two visible Tasks are required to reproduce same-repo status divergence',
+      visibleTerminalIds,
+      terminalA,
+      terminalB
+    })
+
+    if (terminalPairReady && terminalA && terminalB && !cancelled()) {
+      const repoAlias = makeEquivalentCwdAlias(repoA.abs)
+      const perTrialEvidence: Array<Record<string, unknown>> = []
+
+      const captureStep = async (
+        trial: number,
+        phase: string,
+        expectedStatus: MirrorColour,
+        porcelainLabel: string
+      ): Promise<boolean> => {
+        const ok = await waitForTwoTaskHeaderState(
+          `GSM-17-${trial}-${phase}`,
+          terminalA,
+          terminalB,
+          repoA.abs,
+          repoAlias,
+          expectedStatus,
+          `Both Tasks must render ${expectedStatus} for the same repo/worktree during ${phase}`
+        )
+        const porcelain = await readPorcelainViaTerminal(
+          `gsm-17-${trial}-${porcelainLabel}`,
+          terminalA,
+          repoA.abs
+        )
+        perTrialEvidence.push({
+          trial,
+          phase,
+          expectedStatus,
+          ok,
+          porcelain: porcelain.content,
+          porcelainOutput: porcelain.outputRel,
+          taskA: observedHeaderFor(terminalA),
+          taskB: observedHeaderFor(terminalB),
+          mirrorA: summarizeMirror(await getMirror(repoA.abs).catch(() => null)),
+          mirrorB: summarizeMirror(await getMirror(repoAlias).catch(() => null))
+        })
+        return ok && porcelain.content !== null
+      }
+
+      let aggregateOk = true
+      try {
+        await mutate.modifyFile(repoA.abs, 'src/main.ts', REPO_A_MAIN_BASELINE)
+        for (let trial = 0; trial < TWO_TASK_REPETITIONS && !cancelled(); trial += 1) {
+          aggregateOk = (await captureStep(trial, 'clean-start', 'clean', 'clean-start')) && aggregateOk
+
+          await mutate.modifyFile(repoA.abs, 'src/main.ts', `export const REPO = "A-modified-${trial}"\n`)
+          aggregateOk = (await captureStep(trial, 'tracked-modified', 'modified', 'tracked-modified')) && aggregateOk
+
+          const stageResult = await window.electronAPI.git.stageFile(repoA.abs, 'src/main.ts').catch((error) => ({
+            success: false,
+            error: error instanceof Error ? error.message : String(error)
+          }))
+          await window.electronAPI.git.forceRefresh(repoA.abs).catch(() => false)
+          aggregateOk = (await captureStep(trial, 'tracked-staged', 'modified', 'tracked-staged')) && Boolean(stageResult.success) && aggregateOk
+
+          const unstageResult = await window.electronAPI.git.unstageFile(repoA.abs, 'src/main.ts').catch((error) => ({
+            success: false,
+            error: error instanceof Error ? error.message : String(error)
+          }))
+          await window.electronAPI.git.forceRefresh(repoA.abs).catch(() => false)
+          aggregateOk = (await captureStep(trial, 'tracked-unstaged', 'modified', 'tracked-unstaged')) && Boolean(unstageResult.success) && aggregateOk
+
+          await mutate.modifyFile(repoA.abs, 'src/main.ts', REPO_A_MAIN_BASELINE)
+          await window.electronAPI.git.forceRefresh(repoA.abs).catch(() => false)
+          aggregateOk = (await captureStep(trial, 'clean-after-tracked-restore', 'clean', 'clean-after-tracked-restore')) && aggregateOk
+
+          const untrackedFile = `gsm-17-untracked-${trial}.txt`
+          await mutate.createUntrackedFile(repoA.abs, untrackedFile, `created by GSM-17 trial ${trial}\n`)
+          aggregateOk = (await captureStep(trial, 'untracked-added', 'added', 'untracked-added')) && aggregateOk
+
+          await mutate.deleteFile(repoA.abs, untrackedFile).catch(() => undefined)
+          await window.electronAPI.git.forceRefresh(repoA.abs).catch(() => false)
+          aggregateOk = (await captureStep(trial, 'clean-after-untracked-delete', 'clean', 'clean-after-untracked-delete')) && aggregateOk
+        }
+      } finally {
+        await window.electronAPI.git.unstageFile(repoA.abs, 'src/main.ts').catch(() => ({ success: false }))
+        await mutate.modifyFile(repoA.abs, 'src/main.ts', REPO_A_MAIN_BASELINE).catch(() => undefined)
+        for (let trial = 0; trial < TWO_TASK_REPETITIONS; trial += 1) {
+          await mutate.deleteFile(repoA.abs, `gsm-17-untracked-${trial}.txt`).catch(() => undefined)
+        }
+        await window.electronAPI.git.forceRefresh(repoA.abs).catch(() => false)
+        await pushOscCwd(terminalA, repoA.abs).catch(() => undefined)
+        await pushOscCwd(terminalB, repoAlias).catch(() => undefined)
+      }
+
+      const restoredClean = await waitForTwoTaskHeaderState(
+        'GSM-17z-final-clean-restored',
+        terminalA,
+        terminalB,
+        repoA.abs,
+        repoAlias,
+        'clean',
+        'Cleanup returns both same-repo Tasks to the clean colour'
+      )
+      record('GSM-17-two-tasks-same-repo-consistent-status-cycles', aggregateOk && restoredClean, {
+        description: 'Two Tasks pointing at the same repo/worktree must render identical Git colour state across repeated clean/dirty cycles',
+        repetitionCount: TWO_TASK_REPETITIONS,
+        repoRoot: repoA.abs,
+        equivalentCwdAlias: repoAlias,
+        evidence: perTrialEvidence
+      })
+    }
   }
 
   if (!cancelled()) {

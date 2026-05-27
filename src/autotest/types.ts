@@ -170,6 +170,8 @@ export interface GitDiffDebugApi {
     originalWidth: number
     modifiedWidth: number
   } | null
+  getSplitViewMode?: () => 'auto' | 'split' | 'inline'
+  setSplitViewMode?: (mode: 'auto' | 'split' | 'inline') => boolean
   getDiffNavigationState?: () => { changeCount: number; currentIndex: number }
   getResponsiveLayoutState?: () => {
     mode: 'side-by-side' | 'inline' | null
@@ -813,6 +815,7 @@ export interface TerminalDebugApi {
     repoName: string | null
     cwd: string | null
     repoRoot: string | null
+    status: 'clean' | 'modified' | 'added' | 'unknown' | null
   } | null
   openTitleMenu: (terminalId?: string) => boolean
   closeTitleMenu: () => boolean

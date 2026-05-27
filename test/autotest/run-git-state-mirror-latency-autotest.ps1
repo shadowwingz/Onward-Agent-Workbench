@@ -129,6 +129,12 @@ try {
     exit 1
   }
 
+  if (-not (Select-String -Path $LogFile -Pattern 'GSM-17-two-tasks-same-repo-consistent-status-cycles' -Quiet)) {
+    Write-Host 'Missing GSM-17 marker; the two-Task same-repo status consistency test did not run to completion'
+    Get-Content $LogFile -Tail 40 | Out-Host
+    exit 1
+  }
+
   if (-not (Select-String -Path $LogFile -Pattern 'GSM-15-watcher-subscribe-failure-recovers' -Quiet)) {
     Write-Host 'Missing GSM-15 marker; the subscribe failure recovery test did not run to completion'
     Get-Content $LogFile -Tail 40 | Out-Host
