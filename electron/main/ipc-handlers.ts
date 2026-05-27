@@ -5,7 +5,7 @@
 
 import { app, ipcMain, BrowserWindow, Menu, dialog, shell, clipboard } from 'electron'
 import { dirname, join, resolve, sep } from 'path'
-import { readFileSync, statSync, writeFileSync } from 'fs'
+import { readFileSync, writeFileSync } from 'fs'
 import { ptyManager, PtyOptions } from './pty-manager'
 import { TerminalGitInfoBridge } from './terminal-git-info-bridge'
 import { getPromptStorage, Prompt } from './prompt-storage'
@@ -18,7 +18,12 @@ import { readCurrentChangelog } from './changelog'
 import { getTelemetryService } from './telemetry/telemetry-service'
 import { getTelemetryConsent, setTelemetryConsent } from './telemetry/telemetry-consent'
 import { applyTerminalUserEnvVars, buildColorCapableTerminalEnv } from './terminal-env'
-import { getTerminalCwd, getTerminalGitInfo } from './git-utils'
+import {
+  getTerminalCwd,
+  getTerminalGitInfo,
+  setTerminalCwdAuthorityResolver,
+  setTerminalCwdDetectedHandler
+} from './git-utils'
 import type {
   GitFileContentRequestOptions,
   GitFileStatus,
@@ -43,6 +48,7 @@ import { getSettingsStorage, SettingsState, ShortcutConfig } from './settings-st
 import { getShortcutManager } from './shortcut-manager'
 import { getAppInfo } from './app-info'
 import { createDiagnosticBundle } from './diagnostic-bundle'
+import { isUsableTerminalCwd } from './terminal-cwd-validation'
 import { getFeedbackStorage } from './feedback-storage'
 import { gitRuntimeManager } from './git-runtime-manager'
 import { mainWorkScheduler } from './main-work-scheduler'
@@ -495,6 +501,8 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   // Must initialise BEFORE TerminalGitInfoBridge because the bridge
   // registers main-process listeners on the router at construction time.
   gitStateMirrorRouter.init(mainWindow)
+  setTerminalCwdAuthorityResolver((terminalId) => gitStateMirrorRouter.getTerminalCwd(terminalId))
+  setTerminalCwdDetectedHandler((terminalId, cwd) => gitStateMirrorRouter.pushTerminalCwd(terminalId, cwd))
 
   // Bridge replaces the polling GitWatchManager. It subscribes each
   // terminal to the Authority Worker for its current cwd and emits
@@ -761,14 +769,6 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   // when the agent exits and the renderer calls terminal:create
   // to restart, we can restore the original working directory.
   const agentRestartCwdMap = new Map<string, string>()
-
-  const isUsableTerminalCwd = (cwd: string): boolean => {
-    try {
-      return statSync(cwd).isDirectory()
-    } catch {
-      return false
-    }
-  }
 
   const createTerminalProcess = (id: string, options?: PtyOptions) => {
     try {
@@ -2231,6 +2231,8 @@ export async function cleanupIpcHandlers(): Promise<void> {
   // Tear down the GitStateMirror worker thread and parcel-watchers before
   // Electron starts tearing down Node worker isolates. Native watcher cleanup
   // can still resolve async N-API promises, so shutdown must be awaited.
+  setTerminalCwdAuthorityResolver(null)
+  setTerminalCwdDetectedHandler(null)
   await gitStateMirrorRouter.dispose()
   ipcMain.removeHandler(IPC.GIT_STATE_MIRROR_SUBSCRIBE)
   ipcMain.removeAllListeners(IPC.GIT_STATE_MIRROR_UNSUBSCRIBE)

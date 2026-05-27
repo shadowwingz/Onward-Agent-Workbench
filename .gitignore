@@ -24,6 +24,8 @@ test/results/
 # dumps. Never committed; the directory itself is kept via traces/.gitkeep.
 traces/*
 !traces/.gitkeep
+logs/
+.DS_Store
 # Local scheduled-task lock and other .claude/*.lock files produced by skill runtimes.
 .claude/*.lock
 # Per-developer Claude Code permission overrides. These vary by machine and

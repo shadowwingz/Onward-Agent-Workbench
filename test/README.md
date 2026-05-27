@@ -118,7 +118,7 @@ point at files under `test/unittest/`.
 | Bug fix: 3-second request cache invalidated by FS watcher | `run-git-diff-staleness-and-submodule` (GDS-06..10, GDS-12, GDS-15) |
 | Bug fix: GitStateMirror parcel-watcher shutdown exits cleanly after an active subscription | `run-git-state-mirror-quit` (GSMQ-*) |
 | GitStateMirror watcher supervisor recovery, degraded polling, and failure injection | `run-git-state-mirror-latency` (GSM-15, GSM-16) |
-| Bug fix: two Tasks pointing at the same repo/worktree render the same Git status colour across clean/dirty cycles | `run-git-state-mirror-latency` (GSM-17) + `test/unittest/terminal-grid-git-status-identity.test.mts` |
+| Bug fix: two Tasks pointing at the same repo/worktree render the same Git status colour across clean/dirty cycles, including real commit-to-clean and post-commit dirty transitions | `run-git-state-mirror-latency` (GSM-17) + `test/unittest/terminal-grid-git-status-identity.test.mts` + `test/unittest/git-state-mirror-worker-core.test.mts` |
 | Snapshot service caches submodule meta (cache-hit / capture / invalidate) | `run-git-diff-staleness-and-submodule` (GDS-11, GDS-16) |
 | Trace markers emitted on watcher / freshness / snapshot paths | `run-git-diff-staleness-and-submodule` (GDS-12, GDS-16) |
 | Files over 3 MB prompt in Git Diff, cancel shows a clear message, continue displays content | `run-git-large-file-confirmation` (GLF-01..06) + `test/unittest/git-large-file-policy.test.mts` |

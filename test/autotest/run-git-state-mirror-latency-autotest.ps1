@@ -135,6 +135,12 @@ try {
     exit 1
   }
 
+  if (-not (Select-String -Path $LogFile -Pattern 'GSM-17-0-clean-after-real-commit' -Quiet)) {
+    Write-Host 'Missing GSM-17 commit-clean marker; the real commit transition coverage did not run to completion'
+    Get-Content $LogFile -Tail 40 | Out-Host
+    exit 1
+  }
+
   if (-not (Select-String -Path $LogFile -Pattern 'GSM-15-watcher-subscribe-failure-recovers' -Quiet)) {
     Write-Host 'Missing GSM-15 marker; the subscribe failure recovery test did not run to completion'
     Get-Content $LogFile -Tail 40 | Out-Host

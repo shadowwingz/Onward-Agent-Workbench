@@ -26,52 +26,9 @@
 import type { Terminal as XTerm } from '@xterm/xterm'
 import { perfTrace } from '../../utils/perf-trace'
 import { PERF_TRACE_EVENT } from '../../utils/perf-trace-names'
+import { parseTerminalCwdOsc, type TerminalCwdOscDialect } from '../../utils/terminal-cwd-osc'
 
 type Disposable = { dispose: () => void }
-
-function parseOsc7(data: string): string | null {
-  // file://hostname/path  → /path  (urldecode)
-  //
-  // Windows note: a Windows path arrives URI-encoded as
-  //   file://<host>/C:/Users/me/repo
-  // The slice below produces `/C:/Users/me/repo`, but the real Windows path
-  // is `C:/Users/me/repo` (no leading slash). Without stripping the slash,
-  // the consumer's `path.resolve('/C:/Users/me/repo')` yields garbage
-  // (`C:\C:\Users\me\repo` on Win32). Detect the `/<letter>:` shape and
-  // drop the leading slash.
-  if (!data.startsWith('file://')) return null
-  const rest = data.slice('file://'.length)
-  const slash = rest.indexOf('/')
-  let path = slash >= 0 ? rest.slice(slash) : rest
-  if (/^\/[A-Za-z]:/.test(path)) {
-    path = path.slice(1)
-  }
-  try {
-    return decodeURIComponent(path)
-  } catch {
-    return path
-  }
-}
-
-function parseOsc633(data: string): string | null {
-  // 633 has many sub-commands. We only care about "P;Cwd=<path>".
-  if (!data.startsWith('P;Cwd=')) return null
-  return data.slice('P;Cwd='.length)
-}
-
-function parseOsc1337(data: string): string | null {
-  // iTerm2 emits many sub-commands. Match "CurrentDir=<path>".
-  if (!data.startsWith('CurrentDir=')) return null
-  return data.slice('CurrentDir='.length)
-}
-
-function parseOsc9(data: string): string | null {
-  // OSC 9 ; 9 ; <path>  — note the leading "9;" is consumed by the OSC
-  // identifier, so the parser callback's data is "9;<path>" or just "<path>"
-  // depending on the emitter. Accept both.
-  if (data.startsWith('9;')) return data.slice('9;'.length) || null
-  return data || null
-}
 
 export interface OscCwdAddonOptions {
   terminalId: string
@@ -86,9 +43,8 @@ export interface OscCwdAddonOptions {
 export function installOscCwdAddon(terminal: XTerm, opts: OscCwdAddonOptions): Disposable {
   const disposers: Disposable[] = []
 
-  const handle = (dialect: 'osc7' | 'osc633' | 'osc1337' | 'osc9', cwd: string | null): boolean => {
-    if (!cwd) return false
-    const trimmed = cwd.trim()
+  const handle = (dialect: TerminalCwdOscDialect, data: string): boolean => {
+    const trimmed = parseTerminalCwdOsc(dialect, data)
     if (!trimmed) return false
     perfTrace(PERF_TRACE_EVENT.RENDERER_TERMINAL_OSC_CWD_DETECTED, {
       terminalId: opts.terminalId,
@@ -107,10 +63,10 @@ export function installOscCwdAddon(terminal: XTerm, opts: OscCwdAddonOptions): D
     return { dispose: () => { /* no-op */ } }
   }
 
-  disposers.push(parser.registerOscHandler(633,  (data) => handle('osc633',  parseOsc633(data))))
-  disposers.push(parser.registerOscHandler(7,    (data) => handle('osc7',   parseOsc7(data))))
-  disposers.push(parser.registerOscHandler(1337, (data) => handle('osc1337', parseOsc1337(data))))
-  disposers.push(parser.registerOscHandler(9,    (data) => handle('osc9',   parseOsc9(data))))
+  disposers.push(parser.registerOscHandler(633,  (data) => handle('osc633', data)))
+  disposers.push(parser.registerOscHandler(7,    (data) => handle('osc7', data)))
+  disposers.push(parser.registerOscHandler(1337, (data) => handle('osc1337', data)))
+  disposers.push(parser.registerOscHandler(9,    (data) => handle('osc9', data)))
 
   return {
     dispose: () => {

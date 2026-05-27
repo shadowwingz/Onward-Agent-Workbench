@@ -364,6 +364,8 @@ export const PERF_TRACE_EVENT = {
   //
   //   1. cwd switch:
   //        renderer:terminal.osc-cwd-detected   (xterm.js parses OSC)
+  //          → main:git-state-mirror.cwd-ignored   (malformed/non-directory cwd)
+  //          OR
   //          → main:git-state-mirror.cwd-switched   (router routes to worker)
   //          → worker:git-state-mirror.recompute-status-done   (git status)
   //          → main:git-state-mirror.fanout   (delta to subscribers)
@@ -380,6 +382,7 @@ export const PERF_TRACE_EVENT = {
   // assert the .git whitelist is doing its job.
   RENDERER_TERMINAL_OSC_CWD_DETECTED: 'renderer:terminal.osc-cwd-detected',
   MAIN_GIT_STATE_MIRROR_CWD_SWITCHED: 'main:git-state-mirror.cwd-switched',
+  MAIN_GIT_STATE_MIRROR_CWD_IGNORED: 'main:git-state-mirror.cwd-ignored',
   WORKER_GIT_STATE_MIRROR_WATCHER_FIRE: 'worker:git-state-mirror.watcher-fire',
   WORKER_GIT_STATE_MIRROR_WATCHER_FILTERED: 'worker:git-state-mirror.watcher-filtered',
   WORKER_GIT_STATE_MIRROR_WATCHER_SKIPPED: 'worker:git-state-mirror.watcher-skipped',

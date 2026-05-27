@@ -134,12 +134,13 @@ export class TerminalGitInfoBridge {
   // ---------------------------------------------------------------------
 
   private attachMirror(entry: TerminalEntry, cwd: string): void {
-    const snapshot = gitStateMirrorRouter.internalSubscribe(cwd)
-    entry.subscribedCwd = cwd
+    const subscribedCwd = gitStateMirrorRouter.canonicaliseCwd(cwd)
+    const snapshot = gitStateMirrorRouter.internalSubscribe(subscribedCwd)
+    entry.subscribedCwd = subscribedCwd
     // Emit immediately if router already had the latest snapshot for this
     // cwd (e.g. another terminal at the same cwd is already subscribed).
     if (snapshot) {
-      this.tryEmit(entry, stateToInfo(snapshot, cwd))
+      this.tryEmit(entry, stateToInfo(snapshot, entry.cwd ?? cwd))
     } else {
       // No snapshot yet — emit minimal placeholder so the renderer's
       // subscription resolves rather than hanging on "loading".
@@ -158,7 +159,7 @@ export class TerminalGitInfoBridge {
     if (this.disposed) return
     for (const entry of this.entries.values()) {
       if (entry.subscribedCwd === cwd) {
-        this.tryEmit(entry, stateToInfo(state, cwd))
+        this.tryEmit(entry, stateToInfo(state, entry.cwd ?? cwd))
       }
     }
   }
@@ -169,8 +170,14 @@ export class TerminalGitInfoBridge {
     if (!entry) return
 
     // Same cwd? Nothing to do — mirror subscription is unchanged.
-    if (entry.subscribedCwd === nextCwd) {
+    const nextSubscribedCwd = nextCwd ? gitStateMirrorRouter.canonicaliseCwd(nextCwd) : null
+    if (entry.subscribedCwd === nextSubscribedCwd) {
+      const previousCwd = entry.cwd
       entry.cwd = nextCwd
+      if (nextCwd && previousCwd !== nextCwd) {
+        const latest = gitStateMirrorRouter.getLatest(nextCwd)
+        this.tryEmit(entry, latest ? stateToInfo(latest, nextCwd) : emptyInfo(nextCwd))
+      }
       return
     }
 

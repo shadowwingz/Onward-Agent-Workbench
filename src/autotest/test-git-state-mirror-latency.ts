@@ -112,6 +112,33 @@ function buildPorcelainCommand(
   return `git -C ${quotePosix(repoAbs)} status --porcelain=v1 > ${quotePosix(outputAbs)}\r`
 }
 
+function buildCommitAllAndPorcelainCommand(
+  platform: string,
+  shellKind: string | undefined,
+  repoAbs: string,
+  outputAbs: string,
+  message: string
+): string {
+  if (platform === 'win32') {
+    if (shellKind === 'cmd') {
+      const add = `git -C ${quoteCmd(repoAbs)} add -A`
+      const commit = `git -C ${quoteCmd(repoAbs)} -c ${quoteCmd('user.name=Onward AutoTest')} -c ${quoteCmd('user.email=autotest@example.com')} -c ${quoteCmd('commit.gpgsign=false')} commit -m ${quoteCmd(message)} > NUL 2>&1`
+      const status = `git -C ${quoteCmd(repoAbs)} status --porcelain=v1 > ${quoteCmd(outputAbs)}`
+      return `${add} && ${commit} & ${status}\r`
+    }
+    return [
+      `git -C ${quotePowerShell(repoAbs)} add -A`,
+      `git -C ${quotePowerShell(repoAbs)} -c ${quotePowerShell('user.name=Onward AutoTest')} -c ${quotePowerShell('user.email=autotest@example.com')} -c ${quotePowerShell('commit.gpgsign=false')} commit -m ${quotePowerShell(message)} | Out-Null`,
+      `git -C ${quotePowerShell(repoAbs)} status --porcelain=v1 | Set-Content -LiteralPath ${quotePowerShell(outputAbs)} -NoNewline -Encoding UTF8`
+    ].join('; ') + '\r'
+  }
+  return [
+    `git -C ${quotePosix(repoAbs)} add -A`,
+    `git -C ${quotePosix(repoAbs)} -c user.name=${quotePosix('Onward AutoTest')} -c user.email=${quotePosix('autotest@example.com')} -c commit.gpgsign=false commit -m ${quotePosix(message)} >/dev/null 2>&1`,
+    `git -C ${quotePosix(repoAbs)} status --porcelain=v1 > ${quotePosix(outputAbs)}`
+  ].join(' && ') + '\r'
+}
+
 function summarizeWatcherStatus(status: GitStateMirrorWatcherStatus): Record<string, unknown> {
   return {
     cwd: status.cwd,
@@ -304,6 +331,32 @@ export async function testGitStateMirrorLatency(ctx: AutotestContext): Promise<T
     await window.electronAPI.terminal.write(commandTerminalId, command)
     const startedAt = performance.now()
     while (performance.now() - startedAt < 5000) {
+      if (cancelled()) break
+      const result = await window.electronAPI.project.readFile(manifest.tempRoot, outputRel).catch(() => null)
+      if (result?.success && typeof result.content === 'string') {
+        return { content: result.content, outputRel, outputAbs, command }
+      }
+      await sleep(50)
+    }
+    return { content: null, outputRel, outputAbs, command }
+  }
+
+  const commitAllAndReadPorcelainViaTerminal = async (
+    label: string,
+    commandTerminalId: string,
+    repoAbs: string,
+    message: string
+  ): Promise<{ content: string | null; outputRel: string; outputAbs: string; command: string }> => {
+    const outputRel = `${label.replace(/[^A-Za-z0-9_-]/g, '-')}-commit-porcelain.txt`
+    const outputAbs = joinPath(manifest.tempRoot, outputRel)
+    await window.electronAPI.project.deletePath(manifest.tempRoot, outputRel).catch(() => ({ success: false }))
+    const shellKind = await window.electronAPI.terminal.getInputCapabilities(commandTerminalId)
+      .then((caps) => caps.shellKind)
+      .catch(() => undefined)
+    const command = buildCommitAllAndPorcelainCommand(window.electronAPI.platform, shellKind, repoAbs, outputAbs, message)
+    await window.electronAPI.terminal.write(commandTerminalId, command)
+    const startedAt = performance.now()
+    while (performance.now() - startedAt < 8000) {
       if (cancelled()) break
       const result = await window.electronAPI.project.readFile(manifest.tempRoot, outputRel).catch(() => null)
       if (result?.success && typeof result.content === 'string') {
@@ -632,29 +685,32 @@ export async function testGitStateMirrorLatency(ctx: AutotestContext): Promise<T
       }
 
       let aggregateOk = true
+      let lastCleanContent = REPO_A_MAIN_BASELINE
       try {
-        await mutate.modifyFile(repoA.abs, 'src/main.ts', REPO_A_MAIN_BASELINE)
+        await mutate.modifyFile(repoA.abs, 'src/main.ts', lastCleanContent)
         for (let trial = 0; trial < TWO_TASK_REPETITIONS && !cancelled(); trial += 1) {
           aggregateOk = (await captureStep(trial, 'clean-start', 'clean', 'clean-start')) && aggregateOk
 
           await mutate.modifyFile(repoA.abs, 'src/main.ts', `export const REPO = "A-modified-${trial}"\n`)
           aggregateOk = (await captureStep(trial, 'tracked-modified', 'modified', 'tracked-modified')) && aggregateOk
 
-          const stageResult = await window.electronAPI.git.stageFile(repoA.abs, 'src/main.ts').catch((error) => ({
-            success: false,
-            error: error instanceof Error ? error.message : String(error)
-          }))
-          await window.electronAPI.git.forceRefresh(repoA.abs).catch(() => false)
-          aggregateOk = (await captureStep(trial, 'tracked-staged', 'modified', 'tracked-staged')) && Boolean(stageResult.success) && aggregateOk
+          if (trial === 0) {
+            const stageResult = await window.electronAPI.git.stageFile(repoA.abs, 'src/main.ts').catch((error) => ({
+              success: false,
+              error: error instanceof Error ? error.message : String(error)
+            }))
+            await window.electronAPI.git.forceRefresh(repoA.abs).catch(() => false)
+            aggregateOk = (await captureStep(trial, 'tracked-staged', 'modified', 'tracked-staged')) && Boolean(stageResult.success) && aggregateOk
 
-          const unstageResult = await window.electronAPI.git.unstageFile(repoA.abs, 'src/main.ts').catch((error) => ({
-            success: false,
-            error: error instanceof Error ? error.message : String(error)
-          }))
-          await window.electronAPI.git.forceRefresh(repoA.abs).catch(() => false)
-          aggregateOk = (await captureStep(trial, 'tracked-unstaged', 'modified', 'tracked-unstaged')) && Boolean(unstageResult.success) && aggregateOk
+            const unstageResult = await window.electronAPI.git.unstageFile(repoA.abs, 'src/main.ts').catch((error) => ({
+              success: false,
+              error: error instanceof Error ? error.message : String(error)
+            }))
+            await window.electronAPI.git.forceRefresh(repoA.abs).catch(() => false)
+            aggregateOk = (await captureStep(trial, 'tracked-unstaged', 'modified', 'tracked-unstaged')) && Boolean(unstageResult.success) && aggregateOk
+          }
 
-          await mutate.modifyFile(repoA.abs, 'src/main.ts', REPO_A_MAIN_BASELINE)
+          await mutate.modifyFile(repoA.abs, 'src/main.ts', lastCleanContent)
           await window.electronAPI.git.forceRefresh(repoA.abs).catch(() => false)
           aggregateOk = (await captureStep(trial, 'clean-after-tracked-restore', 'clean', 'clean-after-tracked-restore')) && aggregateOk
 
@@ -665,10 +721,51 @@ export async function testGitStateMirrorLatency(ctx: AutotestContext): Promise<T
           await mutate.deleteFile(repoA.abs, untrackedFile).catch(() => undefined)
           await window.electronAPI.git.forceRefresh(repoA.abs).catch(() => false)
           aggregateOk = (await captureStep(trial, 'clean-after-untracked-delete', 'clean', 'clean-after-untracked-delete')) && aggregateOk
+
+          const committedContent = `export const REPO = "A-committed-${trial}"\n`
+          await mutate.modifyFile(repoA.abs, 'src/main.ts', committedContent)
+          aggregateOk = (await captureStep(trial, 'tracked-modified-before-real-commit', 'modified', 'tracked-modified-before-real-commit')) && aggregateOk
+
+          const commitPorcelain = await commitAllAndReadPorcelainViaTerminal(
+            `gsm-17-${trial}-commit-clean`,
+            terminalA,
+            repoA.abs,
+            `GSM-17 commit clean transition ${trial}`
+          )
+          const commitCleanOk = await waitForTwoTaskHeaderState(
+            `GSM-17-${trial}-clean-after-real-commit`,
+            terminalA,
+            terminalB,
+            repoA.abs,
+            repoAlias,
+            'clean',
+            'Both Tasks must render clean after a real git commit completes'
+          )
+          lastCleanContent = commitPorcelain.content === '' ? committedContent : lastCleanContent
+          perTrialEvidence.push({
+            trial,
+            phase: 'clean-after-real-commit',
+            expectedStatus: 'clean',
+            ok: commitCleanOk,
+            porcelain: commitPorcelain.content,
+            porcelainOutput: commitPorcelain.outputRel,
+            taskA: observedHeaderFor(terminalA),
+            taskB: observedHeaderFor(terminalB),
+            mirrorA: summarizeMirror(await getMirror(repoA.abs).catch(() => null)),
+            mirrorB: summarizeMirror(await getMirror(repoAlias).catch(() => null))
+          })
+          aggregateOk = commitCleanOk && commitPorcelain.content === '' && aggregateOk
+
+          await mutate.modifyFile(repoA.abs, 'src/main.ts', `export const REPO = "A-dirty-after-commit-${trial}"\n`)
+          aggregateOk = (await captureStep(trial, 'dirty-after-real-commit-edit', 'modified', 'dirty-after-real-commit-edit')) && aggregateOk
+
+          await mutate.modifyFile(repoA.abs, 'src/main.ts', lastCleanContent)
+          await window.electronAPI.git.forceRefresh(repoA.abs).catch(() => false)
+          aggregateOk = (await captureStep(trial, 'clean-after-real-commit-edit-restore', 'clean', 'clean-after-real-commit-edit-restore')) && aggregateOk
         }
       } finally {
         await window.electronAPI.git.unstageFile(repoA.abs, 'src/main.ts').catch(() => ({ success: false }))
-        await mutate.modifyFile(repoA.abs, 'src/main.ts', REPO_A_MAIN_BASELINE).catch(() => undefined)
+        await mutate.modifyFile(repoA.abs, 'src/main.ts', lastCleanContent).catch(() => undefined)
         for (let trial = 0; trial < TWO_TASK_REPETITIONS; trial += 1) {
           await mutate.deleteFile(repoA.abs, `gsm-17-untracked-${trial}.txt`).catch(() => undefined)
         }

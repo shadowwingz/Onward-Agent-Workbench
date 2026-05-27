@@ -11,6 +11,7 @@ import { normalizeProjectCwd as normalizeProjectCwdImpl } from '../utils/pathNor
 import { perfTrace } from '../utils/perf-trace'
 import { migrateLayoutMode, DEFAULT_LAYOUT_MODE } from '../utils/layout-mode'
 import { isValidCustomLayoutCells } from '../utils/custom-layout-validator'
+import { normalizeTerminalCwdCandidate } from '../utils/terminal-cwd-osc'
 
 export const normalizeProjectCwd = normalizeProjectCwdImpl
 
@@ -222,9 +223,7 @@ function normalizePromptEditorHeight(value: number | null | undefined): number {
 }
 
 function normalizePersistedTerminalCwd(value: string | null | undefined): string | null {
-  if (typeof value !== 'string') return null
-  const trimmed = value.trim()
-  return trimmed || null
+  return normalizeTerminalCwdCandidate(value)
 }
 
 function normalizePromptInputMode(value: unknown): 'canvas' | 'line' {
@@ -656,13 +655,13 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
   }, [])
 
   // Debounced state save
-  const saveState = useCallback((newState: AppState, previousState?: AppState | null) => {
+  const saveState = useCallback((newState: AppState) => {
     if (saveTimeoutRef.current) {
       clearTimeout(saveTimeoutRef.current)
     }
     saveTimeoutRef.current = setTimeout(() => {
       saveTimeoutRef.current = null
-      persistState(newState, previousState)
+      persistState(newState)
     }, 500)
   }, [persistState])
 
@@ -677,7 +676,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
         updatedAt: Date.now()
       }
       stateRef.current = newState
-      saveState(newState, prev)
+      saveState(newState)
       return newState
     })
   }, [saveState])
@@ -785,7 +784,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
         updatedAt: Date.now()
       }
       stateRef.current = newState
-      saveState(newState, prev)
+      saveState(newState)
       return newState
     })
     return canClose

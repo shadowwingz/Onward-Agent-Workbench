@@ -13,6 +13,7 @@ import { getApiPort } from './api-server'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 import { performanceTrace } from './performance-trace'
 import { buildColorCapableTerminalEnv, resolveUserZdotdirForShellIntegration } from './terminal-env'
+import { resolveExistingTerminalCwd } from './terminal-cwd-validation'
 
 export interface PtyOptions {
   cols?: number
@@ -439,7 +440,16 @@ export class PtyManager {
   detectCwd(id: string, data: string): void {
     const match = PtyManager.OSC_CWD_RE.exec(data)
     if (match) {
-      this.cwdMap.set(id, match[1])
+      const cwd = resolveExistingTerminalCwd(match[1])
+      if (cwd) {
+        this.cwdMap.set(id, cwd)
+      } else {
+        performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_STATE_MIRROR_CWD_IGNORED, {
+          terminalId: id,
+          reason: 'invalid-pty-osc9-cwd',
+          rawCwd: match[1].slice(0, 512)
+        })
+      }
     }
   }
 
