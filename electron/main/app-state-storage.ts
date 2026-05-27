@@ -9,6 +9,7 @@ import { readFileSync, existsSync, renameSync } from 'fs'
 import { appStateWorkerClient } from './app-state-worker-client'
 import { performanceTrace } from './performance-trace'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
+import { resolveExistingTerminalCwd } from './terminal-cwd-validation'
 
 /**
  * Prompt data structure
@@ -718,9 +719,7 @@ class AppStateStorage {
 
     return rawTerminals.map((t: { id?: string; title?: string; customName?: string | null; lastCwd?: string | null }) => {
       const id = t.id ?? ''
-      const lastCwd = typeof t.lastCwd === 'string' && t.lastCwd.trim()
-        ? t.lastCwd
-        : null
+      const lastCwd = resolveExistingTerminalCwd(t.lastCwd)
 
       // If there is already a customName field, use it directly
       if ('customName' in t && t.customName !== undefined) {
@@ -983,9 +982,7 @@ class AppStateStorage {
     const normalizedUpdates = new Map<string, string | null>()
     updates.forEach(({ terminalId, cwd }) => {
       if (!terminalId) return
-      const normalizedCwd = typeof cwd === 'string' && cwd.trim()
-        ? cwd
-        : null
+      const normalizedCwd = resolveExistingTerminalCwd(cwd)
       normalizedUpdates.set(terminalId, normalizedCwd)
     })
 

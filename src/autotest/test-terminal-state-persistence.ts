@@ -190,6 +190,20 @@ export async function testTerminalStatePersistence(ctx: AutotestContext): Promis
     terminalB: persistedTerminalB
   })
 
+  const invalidCwdNotification = '/Claude is waiting for your input'
+  window.electronAPI.git.pushCwd(terminalA, invalidCwdNotification)
+  const cwdAfterInvalidPush = await window.electronAPI.git.getTerminalCwd(terminalA)
+  const appStateAfterInvalidPush = await window.electronAPI.appState.load()
+  const activeTabAfterInvalidPush = getActiveTabState(appStateAfterInvalidPush)
+  const terminalsAfterInvalidPush = activeTabAfterInvalidPush?.terminals ?? []
+  const terminalAAfterInvalidPush = terminalsAfterInvalidPush.find((terminal) => terminal.id === terminalA) ?? null
+  const invalidCwdPersisted = terminalsAfterInvalidPush.some((terminal) => terminal.lastCwd === invalidCwdNotification)
+  _assert('TSP-04b-invalid-osc-cwd-ignored', !invalidCwdPersisted && terminalAAfterInvalidPush?.lastCwd === cwdA && cwdAfterInvalidPush === cwdA, {
+    terminalA: terminalAAfterInvalidPush,
+    cwdAfterInvalidPush,
+    invalidCwdNotification
+  })
+
   const initialHeight = getPromptDebug()?.getPersistedEditorHeight() ?? null
   const dragApplied = dragPromptEditorHeight(120)
   _assert('TSP-05-editor-height-drag-applied', dragApplied, {

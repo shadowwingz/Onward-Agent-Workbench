@@ -33,6 +33,7 @@ import {
 } from './performance-trace'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 import { gitDiffCacheInvalidator } from './git-diff-cache-invalidator'
+import { resolveExistingTerminalCwd } from './terminal-cwd-validation'
 import type {
   MainToMirrorMessage,
   MirrorToMainMessage,
@@ -64,7 +65,7 @@ import type {
  * forms; we accept that tiny edge case (it was already broken with the
  * pure-`path.resolve` baseline in a different way).
  */
-function canonicalise(rawCwd: string): string {
+export function canonicaliseMirrorCwd(rawCwd: string): string {
   const expanded = rawCwd === '~'
     ? homedir()
     : rawCwd.startsWith('~/') || rawCwd.startsWith('~\\')
@@ -75,6 +76,10 @@ function canonicalise(rawCwd: string): string {
   } catch {
     return resolvePath(expanded)
   }
+}
+
+function canonicalise(rawCwd: string): string {
+  return canonicaliseMirrorCwd(rawCwd)
 }
 
 interface FileBodyPending {
@@ -425,24 +430,7 @@ class GitStateMirrorRouter {
     })
 
     ipcMain.on(IPC.GIT_STATE_PUSH_CWD, (_event, terminalId: string, rawCwd: string | null) => {
-      const newCwd = rawCwd ? canonicalise(rawCwd) : null
-      const prevCwd = this.terminalCwds.get(terminalId) ?? null
-      this.terminalCwds.set(terminalId, newCwd)
-      performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_STATE_MIRROR_CWD_SWITCHED, {
-        terminalId,
-        prevCwd,
-        nextCwd: newCwd
-      })
-      this.postToWorker({ kind: 'switch-cwd', terminalId, newCwd })
-      // Notify main-process listeners after worker is informed so the
-      // bridge can swap its mirror subscription onto the new cwd.
-      for (const listener of this.cwdChangeListeners) {
-        try {
-          listener(terminalId, prevCwd, newCwd)
-        } catch (error) {
-          console.warn('[GitStateMirrorRouter] cwd-change listener threw:', error)
-        }
-      }
+      this.pushTerminalCwd(terminalId, rawCwd)
     })
 
     ipcMain.handle(IPC.GIT_STATE_MIRROR_REQUEST_FILE_BODY, (_event, rawCwd: string, fileKey: string, force: boolean) => {
@@ -600,6 +588,40 @@ class GitStateMirrorRouter {
   /** Read-only access to the last-pushed cwd for a terminal (for bridge cold-start). */
   getTerminalCwd(terminalId: string): string | null {
     return this.terminalCwds.get(terminalId) ?? null
+  }
+
+  canonicaliseCwd(rawCwd: string): string {
+    return canonicalise(rawCwd)
+  }
+
+  pushTerminalCwd(terminalId: string, rawCwd: string | null): void {
+    if (typeof terminalId !== 'string' || !terminalId) return
+    const newCwd = rawCwd ? resolveExistingTerminalCwd(rawCwd) : null
+    if (rawCwd && !newCwd) {
+      performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_STATE_MIRROR_CWD_IGNORED, {
+        terminalId,
+        reason: 'invalid-cwd',
+        rawCwd: rawCwd.slice(0, 512)
+      })
+      return
+    }
+    const prevCwd = this.terminalCwds.get(terminalId) ?? null
+    this.terminalCwds.set(terminalId, newCwd)
+    performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_STATE_MIRROR_CWD_SWITCHED, {
+      terminalId,
+      prevCwd,
+      nextCwd: newCwd
+    })
+    this.postToWorker({ kind: 'switch-cwd', terminalId, newCwd })
+    // Notify main-process listeners after worker is informed so the
+    // bridge can swap its mirror subscription onto the new cwd.
+    for (const listener of this.cwdChangeListeners) {
+      try {
+        listener(terminalId, prevCwd, newCwd)
+      } catch (error) {
+        console.warn('[GitStateMirrorRouter] cwd-change listener threw:', error)
+      }
+    }
   }
 
   /** Read-only access to the last-known snapshot for a cwd. */

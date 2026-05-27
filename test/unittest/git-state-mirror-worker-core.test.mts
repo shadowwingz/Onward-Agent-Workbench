@@ -86,9 +86,25 @@ test('git watcher allowlist still permits durable git state files', () => {
     drop: false,
     reason: 'allowed'
   })
+  assert.deepEqual(classifyEventPath('/repo/.git/logs/HEAD', '/repo'), {
+    drop: false,
+    reason: 'allowed'
+  })
+  assert.deepEqual(classifyEventPath('/repo/.git/logs/refs/heads/main', '/repo'), {
+    drop: false,
+    reason: 'allowed'
+  })
+  assert.deepEqual(classifyEventPath('C:\\repo\\.git\\logs\\refs\\heads\\main', 'C:\\repo'), {
+    drop: false,
+    reason: 'allowed'
+  })
   assert.deepEqual(classifyEventPath('/repo/.git/objects/ab/cdef', '/repo'), {
     drop: true,
     reason: 'gitObjects'
+  })
+  assert.deepEqual(classifyEventPath('/repo/.git/logs/HEAD.lock', '/repo'), {
+    drop: true,
+    reason: 'lockfile'
   })
 })
 

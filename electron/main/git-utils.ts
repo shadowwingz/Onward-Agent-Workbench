@@ -37,6 +37,7 @@ import {
   gitRepositorySnapshotService,
   snapshotToLegacySubmoduleInfos
 } from './git-repository-snapshot-service'
+import { resolveExistingTerminalCwd } from './terminal-cwd-validation'
 
 const PDF_EXT = '.pdf'
 const EPUB_EXT = '.epub'
@@ -67,6 +68,27 @@ type GitTaskMeta = {
 type PtyManagerModule = typeof import('./pty-manager')
 
 let ptyManagerModulePromise: Promise<PtyManagerModule> | null = null
+let terminalCwdAuthorityResolver: ((terminalId: string) => string | null) | null = null
+let terminalCwdDetectedHandler: ((terminalId: string, cwd: string) => void) | null = null
+
+export function setTerminalCwdAuthorityResolver(resolver: ((terminalId: string) => string | null) | null): void {
+  terminalCwdAuthorityResolver = resolver
+}
+
+export function setTerminalCwdDetectedHandler(handler: ((terminalId: string, cwd: string) => void) | null): void {
+  terminalCwdDetectedHandler = handler
+}
+
+function publishDetectedTerminalCwd(terminalId: string, cwd: string | null): string | null {
+  if (cwd) {
+    try {
+      terminalCwdDetectedHandler?.(terminalId, cwd)
+    } catch {
+      // Detection is still useful even if the optional authority bridge is gone.
+    }
+  }
+  return cwd
+}
 
 async function getPtyManager(): Promise<PtyManagerModule['ptyManager']> {
   if (!ptyManagerModulePromise) {
@@ -691,6 +713,11 @@ export async function getTerminalCwd(terminalId: string): Promise<string | null>
   if (cached && now - cached.at < TERMINAL_CWD_CACHE_TTL) {
     return cached.value
   }
+  const pushedCwd = resolveExistingTerminalCwd(terminalCwdAuthorityResolver?.(terminalId) ?? null)
+  if (pushedCwd) {
+    terminalCwdCache.set(terminalId, { value: pushedCwd, at: now })
+    return pushedCwd
+  }
   const inflight = terminalCwdInFlight.get(terminalId)
   if (inflight) {
     return inflight
@@ -726,26 +753,26 @@ export async function getTerminalCwd(terminalId: string): Promise<string | null>
         const output = typeof stdout === 'string' ? stdout : stdout.toString('utf-8')
         const cwdLine = output.split('\n').find((line) => line.startsWith('n')) || ''
         const cwd = cwdLine.slice(1).trim()
-        const value = cwd || ptyManager.getCwd(terminalId)
+        const value = resolveExistingTerminalCwd(cwd) || resolveExistingTerminalCwd(ptyManager.getCwd(terminalId))
         terminalCwdCache.set(terminalId, { value, at: Date.now() })
-        return value
+        return publishDetectedTerminalCwd(terminalId, value)
       } else if (os === 'win32') {
         // Windows: use CWD tracked via shell integration (OSC 9;9 escape
         // sequence emitted by the injected PowerShell prompt / cmd PROMPT).
         // The old approach — (Get-Process -Id $pid).Path | Split-Path —
         // returned the *executable* path, not the working directory.
-        const trackedCwd = ptyManager.getCwd(terminalId)
+        const trackedCwd = resolveExistingTerminalCwd(ptyManager.getCwd(terminalId))
         terminalCwdCache.set(terminalId, { value: trackedCwd, at: Date.now() })
-        return trackedCwd
+        return publishDetectedTerminalCwd(terminalId, trackedCwd)
       }
 
       terminalCwdCache.set(terminalId, { value: null, at: Date.now() })
       return null
     } catch (error) {
       console.error('Failed to get terminal cwd:', error)
-      const fallbackCwd = ptyManager.getCwd(terminalId)
+      const fallbackCwd = resolveExistingTerminalCwd(ptyManager.getCwd(terminalId))
       terminalCwdCache.set(terminalId, { value: fallbackCwd, at: Date.now() })
-      return fallbackCwd
+      return publishDetectedTerminalCwd(terminalId, fallbackCwd)
     } finally {
       gitRuntimeManager.recordCwdProbeLatency(Date.now() - probeStartedAt)
     }

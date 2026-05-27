@@ -549,25 +549,39 @@ export const TerminalGrid = memo(function TerminalGrid({
   // OSC-detected cwd listener — fires synchronously when the session
   // manager's xterm OSC handler parses a cwd-bearing escape. Updates the
   // local terminalId→cwd map; render then prefers it over the legacy
-  // poll-driven `terminalInfos[id].cwd`. Also drives a subscribe to the
-  // mirror for the new cwd so the chip is ready before the watcher fans
-  // out.
+  // poll-driven `terminalInfos[id].cwd`. It also persists cwd immediately
+  // so a terminal can restore its project even before the slower git-info
+  // bridge has emitted branch/status metadata.
   useEffect(() => {
     const onOscCwd = (e: Event) => {
       const detail = (e as CustomEvent<{ terminalId?: string; cwd?: string }>).detail
       if (!detail || !detail.terminalId || !detail.cwd) return
+      const terminalId = detail.terminalId
+      const cwd = detail.cwd
       const previousCwd = oscDetectedCwdsRef.current[detail.terminalId]
       setOscDetectedCwds((prev) => {
-        if (prev[detail.terminalId!] === detail.cwd) return prev
-        return { ...prev, [detail.terminalId!]: detail.cwd! }
+        if (prev[terminalId] === cwd) return prev
+        return { ...prev, [terminalId]: cwd }
       })
-      if (previousCwd !== detail.cwd) {
-        setMirrorSnapshotAliases((prev) => removeMirrorAlias(prev, detail.cwd))
+      if (terminalIdsRef.current.includes(terminalId)) {
+        onPersistTerminalCwd(terminalId, cwd)
+      }
+      if (previousCwd !== cwd) {
+        setMirrorSnapshotAliases((prev) => removeMirrorAlias(prev, cwd))
       }
     }
     window.addEventListener('onward:terminal-cwd-detected', onOscCwd)
     return () => window.removeEventListener('onward:terminal-cwd-detected', onOscCwd)
-  }, [])
+  }, [onPersistTerminalCwd])
+
+  useEffect(() => {
+    const validIds = new Set(terminals.map(term => term.id))
+    for (const [terminalId, cwd] of Object.entries(oscDetectedCwds)) {
+      if (validIds.has(terminalId) && cwd) {
+        onPersistTerminalCwd(terminalId, cwd)
+      }
+    }
+  }, [oscDetectedCwds, terminals, onPersistTerminalCwd])
 
   // GitStateMirror update listener — global, single subscription. Merges
   // every incoming delta into mirrorSnapshots keyed by cwd. Subsequent

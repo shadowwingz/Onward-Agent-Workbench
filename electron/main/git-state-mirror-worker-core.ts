@@ -127,6 +127,8 @@ export function classifyEventPath(eventPath: string, watchedRoot: string): {
       rel === '.git/packed-refs' ||
       rel === '.git/config' ||
       rel.startsWith('.git/refs/') ||
+      rel === '.git/logs/HEAD' ||
+      rel.startsWith('.git/logs/refs/') ||
       rel.startsWith('.git/rebase-')
     ) {
       return { drop: false, reason: 'allowed' }
