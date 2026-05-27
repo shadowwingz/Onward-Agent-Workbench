@@ -117,6 +117,7 @@ point at files under `test/unittest/`.
 | Bug fix: 3-second request cache invalidated by FS watcher | `run-git-diff-staleness-and-submodule` (GDS-06..10, GDS-12, GDS-15) |
 | Bug fix: GitStateMirror parcel-watcher shutdown exits cleanly after an active subscription | `run-git-state-mirror-quit` (GSMQ-*) |
 | GitStateMirror watcher supervisor recovery, degraded polling, and failure injection | `run-git-state-mirror-latency` (GSM-15, GSM-16) |
+| Bug fix: two Tasks pointing at the same repo/worktree render the same Git status colour across clean/dirty cycles | `run-git-state-mirror-latency` (GSM-17) + `test/unittest/terminal-grid-git-status-identity.test.mts` |
 | Snapshot service caches submodule meta (cache-hit / capture / invalidate) | `run-git-diff-staleness-and-submodule` (GDS-11, GDS-16) |
 | Trace markers emitted on watcher / freshness / snapshot paths | `run-git-diff-staleness-and-submodule` (GDS-12, GDS-16) |
 | Files over 3 MB prompt in Git Diff, cancel shows a clear message, continue displays content | `run-git-large-file-confirmation` (GLF-01..06) + `test/unittest/git-large-file-policy.test.mts` |
@@ -130,7 +131,7 @@ point at files under `test/unittest/`.
 | Feature / Bug | Tests |
 |---|---|
 | Commit list, selection, file diff load | `run-git-history` (GH-*) |
-| Diff options display mode labels, default inline, legacy preference migration | `run-git-history-multi-terminal-scope` (GHMS-13) + `test/unittest/git-history-diff-display-mode.test.mts` |
+| Diff options display mode labels, default inline, legacy preference migration | `run-git-history-multi-terminal-scope` (GHMS-13) + `run-git-diff-staleness-and-submodule` (GDS-24a, GDS-25b) + `test/unittest/git-history-diff-display-mode.test.mts` + `test/unittest/git-diff-split-view-mode.test.mts` |
 | Files over 3 MB prompt in Git History, cancel shows a clear message, continue displays content | `run-git-large-file-confirmation` (GLF-07..13) + `test/unittest/git-large-file-policy.test.mts` |
 | Per-terminal scope: history reflects active terminal cwd | `run-git-history-multi-terminal-scope` (GHMS-*) |
 | Nested submodule history view | `run-git-nested-submodules` (GNS-*) |

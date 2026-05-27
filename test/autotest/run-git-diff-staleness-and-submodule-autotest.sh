@@ -117,6 +117,12 @@ if ! grep -q "GDS-26-trace-marker-diff-file-load-expected" "$LOG_FILE"; then
   exit 1
 fi
 
+if ! grep -q "GDS-24a-diff-display-mode-default-inline" "$LOG_FILE"; then
+  echo "Missing GDS-24a marker; the Git Diff default display mode test did not run" >&2
+  tail -n 40 "$LOG_FILE" >&2
+  exit 1
+fi
+
 if ! grep -q "GDS-30-trace-marker-diff-ux-actions-expected" "$LOG_FILE"; then
   echo "Missing GDS-30 marker; the diff UX action trace test did not run" >&2
   tail -n 40 "$LOG_FILE" >&2

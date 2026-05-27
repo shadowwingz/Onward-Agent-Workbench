@@ -140,6 +140,12 @@ if ! grep -q "GSM-14-force-refresh-bumps-generation" "$LOG_FILE"; then
   exit 1
 fi
 
+if ! grep -q "GSM-17-two-tasks-same-repo-consistent-status-cycles" "$LOG_FILE"; then
+  echo "Missing GSM-17 marker; the two-Task same-repo status consistency test did not run to completion" >&2
+  tail -n 40 "$LOG_FILE" >&2
+  exit 1
+fi
+
 if ! grep -q "GSM-15-watcher-subscribe-failure-recovers" "$LOG_FILE"; then
   echo "Missing GSM-15 marker; the subscribe failure recovery test did not run to completion" >&2
   tail -n 40 "$LOG_FILE" >&2

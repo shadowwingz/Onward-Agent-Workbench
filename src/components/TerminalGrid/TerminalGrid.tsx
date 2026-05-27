@@ -45,6 +45,13 @@ import {
   createSubpageStateMemory,
   type SubpageMemoryScope
 } from './subpageStateMemory'
+import {
+  mergeMirrorAlias,
+  mergeMirrorDeltaSnapshot,
+  mergeMirrorSnapshot,
+  removeMirrorAlias,
+  resolveTerminalGitDisplayState
+} from './gitStatusIdentity'
 import '@xterm/xterm/css/xterm.css'
 import './TerminalGrid.css'
 import '../../styles/path-copy-toast.css'
@@ -315,6 +322,8 @@ export const TerminalGrid = memo(function TerminalGrid({
   // still bringing the worker / OSC pipeline online — and so consumers
   // that haven't migrated yet (Project Editor, Quick Open) keep working.
   const [mirrorSnapshots, setMirrorSnapshots] = useState<Record<string, GitStateMirrorSnapshot>>({})
+  const [mirrorSnapshotAliases, setMirrorSnapshotAliases] = useState<Record<string, string>>({})
+  const oscDetectedCwdsRef = useRef<Record<string, string>>({})
   const lastRenderedGitSignalRef = useRef<Record<string, {
     cwd: string | null
     branch: string | null
@@ -332,6 +341,9 @@ export const TerminalGrid = memo(function TerminalGrid({
   // for that. We prefer this over `terminalInfos[id].cwd` because the legacy
   // poll path lags 0.4–1.5s while the OSC path is sub-frame.
   const [oscDetectedCwds, setOscDetectedCwds] = useState<Record<string, string>>({})
+  useEffect(() => {
+    oscDetectedCwdsRef.current = oscDetectedCwds
+  }, [oscDetectedCwds])
   const [copyNotice, setCopyNotice] = useState<{ terminalId: string; type: 'success' | 'error'; text: string } | null>(null)
   const copyNoticeTimerRef = useRef<number | null>(null)
   const lastShortcutTokenRef = useRef<number | null>(null)
@@ -544,10 +556,14 @@ export const TerminalGrid = memo(function TerminalGrid({
     const onOscCwd = (e: Event) => {
       const detail = (e as CustomEvent<{ terminalId?: string; cwd?: string }>).detail
       if (!detail || !detail.terminalId || !detail.cwd) return
+      const previousCwd = oscDetectedCwdsRef.current[detail.terminalId]
       setOscDetectedCwds((prev) => {
         if (prev[detail.terminalId!] === detail.cwd) return prev
         return { ...prev, [detail.terminalId!]: detail.cwd! }
       })
+      if (previousCwd !== detail.cwd) {
+        setMirrorSnapshotAliases((prev) => removeMirrorAlias(prev, detail.cwd))
+      }
     }
     window.addEventListener('onward:terminal-cwd-detected', onOscCwd)
     return () => window.removeEventListener('onward:terminal-cwd-detected', onOscCwd)
@@ -558,25 +574,8 @@ export const TerminalGrid = memo(function TerminalGrid({
   // useEffect manages per-cwd subscribe / unsubscribe lifecycle.
   useEffect(() => {
     const dispose = window.electronAPI?.git?.onMirrorUpdate?.((cwd, delta) => {
-      const normalized = normalizeCwd(cwd) ?? cwd
       const typedDelta = delta as GitStateMirrorDelta
-      setMirrorSnapshots((prev) => {
-        const base: GitStateMirrorSnapshot = prev[normalized] ?? {
-          cwd: normalized,
-          repoRoot: null,
-          repoName: null,
-          branch: null,
-          status: null,
-          files: [],
-          capturedAt: 0,
-          changeFingerprint: '',
-          generation: 0
-        }
-        return {
-          ...prev,
-          [normalized]: { ...base, ...typedDelta, cwd: normalized, capturedAt: typedDelta.capturedAt }
-        }
-      })
+      setMirrorSnapshots((prev) => mergeMirrorDeltaSnapshot(prev, cwd, typedDelta))
     })
     return () => { dispose?.() }
   }, [])
@@ -626,8 +625,8 @@ export const TerminalGrid = memo(function TerminalGrid({
       void window.electronAPI?.git?.subscribeMirror?.(cwd).then((initial) => {
         if (!initial) return
         const snapshot = initial as GitStateMirrorSnapshot
-        const normalized = normalizeCwd(snapshot.cwd) ?? snapshot.cwd
-        setMirrorSnapshots((prev) => ({ ...prev, [normalized]: { ...snapshot, cwd: normalized } }))
+        setMirrorSnapshots((prev) => mergeMirrorSnapshot(prev, snapshot))
+        setMirrorSnapshotAliases((prev) => mergeMirrorAlias(prev, cwd, snapshot.cwd))
       }).catch(() => { /* tolerate */ })
     }
     // No-longer-desired cwds: schedule a delayed unsubscribe rather than
@@ -638,6 +637,7 @@ export const TerminalGrid = memo(function TerminalGrid({
       const t = setTimeout(() => {
         pendingTimers.delete(cwd)
         subscribed.delete(cwd)
+        setMirrorSnapshotAliases((prev) => removeMirrorAlias(prev, cwd))
         try { window.electronAPI?.git?.unsubscribeMirror?.(cwd) } catch { /* ignore */ }
       }, SUBSCRIPTION_GRACE_MS)
       pendingTimers.set(cwd, t)
@@ -762,30 +762,6 @@ export const TerminalGrid = memo(function TerminalGrid({
     }
   }, [theme, fontSize, fontFamily, getTerminalStyle])
 
-  // Normalise cwd so every form a path can take in this app maps to the same
-  // key. The worker stores its mirror state keyed by `path.resolve(cwd)` and
-  // emits `mirror-update` with that resolved form. The renderer receives raw
-  // pushOscCwd / legacy cwd forms that may differ in three ways:
-  //   1. `/var/...` (symlink) vs `/private/var/...` (canonical) on macOS
-  //      tmpdir / Volumes — `path.resolve` does NOT follow this symlink, but
-  //      legacy syscalls (proc_pidinfo) sometimes return the `/private/` form,
-  //      so we strip the prefix to merge the two namespaces.
-  //   2. Embedded `//` from `$TMPDIR` ending with `/` plus a leading `/` in
-  //      the suffix (the GSM autotest's mktemp -d produces this exact shape:
-  //      `/var/folders/.../T//onward-gsm-fixture.X/repo-A`). `path.resolve`
-  //      collapses these, but a raw render-side lookup misses the snapshot
-  //      because the storage key was canonicalised by the worker.
-  //   3. Trailing `/` (except root) — `path.resolve` strips it.
-  // Together, items 2 and 3 reproduce `path.posix.normalize` for the
-  // already-absolute paths this code deals with.
-  const normalizeCwd = useCallback((cwd: string | null): string | null => {
-    if (!cwd) return cwd
-    let normalized = cwd.replace(/\/{2,}/g, '/')
-    if (normalized.startsWith('/private/')) normalized = normalized.slice('/private'.length)
-    if (normalized.length > 1 && normalized.endsWith('/')) normalized = normalized.slice(0, -1)
-    return normalized
-  }, [])
-
   useEffect(() => {
     if (hidden) return
     const nextSignals: typeof lastRenderedGitSignalRef.current = {}
@@ -793,17 +769,20 @@ export const TerminalGrid = memo(function TerminalGrid({
       const terminalInfo = terminalInfos[termInfo.id]
       const oscCwd = oscDetectedCwds[termInfo.id]
       const cwd = oscCwd || terminalInfo?.cwd || null
-      const normalizedCwd = normalizeCwd(cwd)
-      const mirror = normalizedCwd ? mirrorSnapshots[normalizedCwd] : null
-      const legacyMatchesCwd = terminalInfo?.cwd === cwd
-      const rawBranchSig = mirror?.branch ?? (legacyMatchesCwd ? terminalInfo?.branch : null) ?? null
-      const rawStatusSig = mirror?.status ?? (legacyMatchesCwd ? terminalInfo?.status : null) ?? null
+      const gitState = resolveTerminalGitDisplayState({
+        cwd,
+        terminalInfo,
+        mirrorSnapshots,
+        mirrorAliases: mirrorSnapshotAliases
+      })
+      const rawBranchSig = gitState.branch
+      const rawStatusSig = gitState.status
       // Apply autotest override on top of the mirror/legacy union — see
       // the parallel block in the render pass (~line 2380) for rationale.
       const sigOverride = terminalInfoOverridesRef.current.get(termInfo.id)
       const branch = sigOverride?.branch !== undefined ? sigOverride.branch : rawBranchSig
       const status = sigOverride?.status !== undefined ? sigOverride.status : rawStatusSig
-      const signal = { cwd: normalizedCwd ?? cwd, branch, status }
+      const signal = { cwd: gitState.normalizedCwd ?? cwd, branch, status }
       const previous = lastRenderedGitSignalRef.current[termInfo.id]
       if (!previous || previous.branch !== signal.branch) {
         perfTraceTask(PERF_TRACE_EVENT.RENDERER_TERMINAL_TITLE_BRANCH_RENDERED, {
@@ -822,7 +801,7 @@ export const TerminalGrid = memo(function TerminalGrid({
       nextSignals[termInfo.id] = signal
     }
     lastRenderedGitSignalRef.current = nextSignals
-  }, [hidden, visibleTerminals, terminalInfos, oscDetectedCwds, mirrorSnapshots, normalizeCwd])
+  }, [hidden, visibleTerminals, terminalInfos, oscDetectedCwds, mirrorSnapshots, mirrorSnapshotAliases])
 
   const formatCompactPath = useCallback((cwd: string): string => {
     const trimmed = cwd.trim()
@@ -1741,13 +1720,14 @@ export const TerminalGrid = memo(function TerminalGrid({
         if (!resolved) return null
         const info = terminalInfosRef.current[resolved]
         if (!info) {
-          return { branch: null, repoName: null, cwd: null, repoRoot: null }
+          return { branch: null, repoName: null, cwd: null, repoRoot: null, status: null }
         }
         return {
           branch: info.branch ?? null,
           repoName: info.repoName ?? null,
           cwd: info.cwd ?? null,
-          repoRoot: info.repoRoot ?? null
+          repoRoot: info.repoRoot ?? null,
+          status: info.status ?? null
         }
       },
       openTitleMenu: (terminalId) => {
@@ -2554,25 +2534,29 @@ export const TerminalGrid = memo(function TerminalGrid({
             //   2. Legacy poll-driven terminalInfo.cwd (0.4–1.5 s lag).
             const oscCwd = oscDetectedCwds[termInfo.id]
             const cwd = oscCwd || terminalInfo?.cwd || null
-            const normalizedCwd = normalizeCwd(cwd)
-            const mirror = normalizedCwd ? mirrorSnapshots[normalizedCwd] : null
             // Render rule: prefer mirror snapshot. Fall back to legacy
             // `terminalInfo` ONLY when its cwd matches the effective cwd
             // (otherwise we'd be showing the previous repo's branch on a
-            // brand-new cwd until the legacy poll catches up — exactly the
-            // bug the OSC path is meant to fix). When neither has fresh
-            // data we display blanks; the chip's colour reverts to the
-            // default green dot, which is at least not misleading.
+            // brand-new cwd until the legacy poll catches up). Raw OSC cwd
+            // can be a path-equivalent alias (`repo/.`, `/var` vs
+            // `/private/var`, symlink, Windows separator variant), so mirror
+            // lookup goes through the same canonical identity resolver used
+            // by the render trace effect above.
             //
             // Autotest override always takes precedence: `mirror` is the
             // raw Worker output and bypasses the legacy `applyTerminal-
             // InfoUpdate → mergeOverride` path. Re-applying the override
             // here keeps the autotest pin-state contract intact (TTM-06,
             // TTM-07) regardless of which source supplies the branch.
-            const legacyMatchesCwd = terminalInfo?.cwd === cwd
-            const rawBranch = mirror?.branch ?? (legacyMatchesCwd ? terminalInfo?.branch : null) ?? null
-            const rawRepoName = mirror?.repoName ?? (legacyMatchesCwd ? terminalInfo?.repoName : null) ?? null
-            const rawStatus = mirror?.status ?? (legacyMatchesCwd ? terminalInfo?.status : null) ?? null
+            const gitState = resolveTerminalGitDisplayState({
+              cwd,
+              terminalInfo,
+              mirrorSnapshots,
+              mirrorAliases: mirrorSnapshotAliases
+            })
+            const rawBranch = gitState.branch
+            const rawRepoName = gitState.repoName
+            const rawStatus = gitState.status
             const renderOverride = terminalInfoOverridesRef.current.get(termInfo.id)
             const branch = renderOverride?.branch !== undefined ? renderOverride.branch : rawBranch
             const repoName = renderOverride?.repoName !== undefined ? renderOverride.repoName : rawRepoName

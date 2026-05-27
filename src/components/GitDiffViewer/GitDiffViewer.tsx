@@ -63,6 +63,7 @@ import {
   type DiffViewMemory,
   type DiffViewMemoryEntry
 } from './diffViewMemory'
+import { resolveGitDiffSplitViewMode, type GitDiffSplitViewMode } from './diffSplitViewMode'
 import { GitDiffDebugPanel } from './GitDiffDebugPanel'
 import { LargeFileConfirmDialog } from '../LargeFileConfirmDialog/LargeFileConfirmDialog'
 import { createThemedSetiFileIconResolver, sanitizeSetiSvgOnce } from '../ProjectEditor/setiFileIconTheme'
@@ -350,7 +351,6 @@ type DiffHunkActionWidgetHandle = {
   buttons: HTMLButtonElement[]
 }
 type GitDiffFileListViewMode = 'tree' | 'flat'
-type GitDiffSplitViewMode = 'auto' | 'split' | 'inline'
 type GitDiffNavigationTarget = {
   filePath: string
   repoRoot?: string | null
@@ -754,6 +754,8 @@ type GitDiffDebugApi = {
     lastDiffAgeMs: number | null
   }
   getSplitViewState: () => DiffSplitState | null
+  getSplitViewMode: () => GitDiffSplitViewMode
+  setSplitViewMode: (mode: GitDiffSplitViewMode) => boolean
   getDiffNavigationState: () => { changeCount: number; currentIndex: number }
   getResponsiveLayoutState: () => {
     mode: DiffLayoutMode | null
@@ -839,9 +841,9 @@ function isGitDiffSplitViewMode(value: unknown): value is GitDiffSplitViewMode {
 function readStoredSplitViewMode(): GitDiffSplitViewMode {
   try {
     const saved = localStorage.getItem(STORAGE_KEY_DIFF_SPLIT_VIEW_MODE)
-    return isGitDiffSplitViewMode(saved) ? saved : 'auto'
+    return resolveGitDiffSplitViewMode(saved)
   } catch {
-    return 'auto'
+    return resolveGitDiffSplitViewMode()
   }
 }
 
@@ -5578,6 +5580,15 @@ export function GitDiffViewer({
         lastDiffAgeMs: lastDiffRef.current ? Date.now() - lastDiffRef.current.at : null
       }),
       getSplitViewState: () => measureDiffSplitState(),
+      getSplitViewMode: () => splitViewMode,
+      setSplitViewMode: (mode: GitDiffSplitViewMode) => {
+        if (!isGitDiffSplitViewMode(mode)) return false
+        setSplitViewMode(mode)
+        window.requestAnimationFrame(() => {
+          diffEditorRef.current?.layout()
+        })
+        return true
+      },
       getDiffNavigationState: () => ({
         changeCount: diffEditorRef.current?.getLineChanges()?.length ?? 0,
         currentIndex: diffNavigationIndexRef.current
@@ -5589,7 +5600,7 @@ export function GitDiffViewer({
           mode: editor ? getDiffLayoutMode(editor) : null,
           containerWidth: container ? Math.round(container.getBoundingClientRect().width) : null,
           inlineBreakpoint: DIFF_INLINE_BREAKPOINT,
-          useInlineViewWhenSpaceIsLimited: true
+          useInlineViewWhenSpaceIsLimited: splitViewMode === 'auto'
         }
       },
       setSplitViewRatio: (ratio: number) => {
@@ -5826,11 +5837,13 @@ export function GitDiffViewer({
     runLineAction,
     setVisibleDiffHunkActionWidget,
     setFileListViewMode,
+    setSplitViewMode,
     setRepoExpanded,
     settleLargeFileConfirmation,
     selectedFile,
     selectedFileKey,
     selectedFileState,
+    splitViewMode,
     terminalId,
     termsPopoverOpen,
     updateUIPreferences,
