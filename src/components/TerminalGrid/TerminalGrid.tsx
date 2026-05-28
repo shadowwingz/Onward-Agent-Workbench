@@ -49,6 +49,7 @@ import {
   mergeMirrorAlias,
   mergeMirrorDeltaSnapshot,
   mergeMirrorSnapshot,
+  normalizeTerminalGitPath,
   removeMirrorAlias,
   resolveTerminalGitDisplayState
 } from './gitStatusIdentity'
@@ -655,6 +656,21 @@ export const TerminalGrid = memo(function TerminalGrid({
   // We deliberately depend on the cwd identity set (not full terminalInfos)
   // so churn in branch/status doesn't churn subscriptions.
   //
+  // Subscriptions are keyed by NORMALIZED path (the same key
+  // `mirrorSnapshots` uses), not the raw cwd string. Reason: a single
+  // terminal often produces both raw forms simultaneously — the OSC
+  // parser emits `/var/...` while the legacy git-info poll emits
+  // `/private/var/...`. On macOS those are symlink-equivalent, so main's
+  // `canonicalise` step collapses them to one entry in `subs.get(wcId)`.
+  // Subscribing twice with two different raw forms used to produce ONE
+  // main-side entry; a single unsubscribe (triggered when one of the raw
+  // forms left `desired`) then deleted that entry — silently killing the
+  // other raw form's subscription. Worker fanout would then skip this
+  // renderer and the chip would stay stale even though the renderer
+  // still believed it was subscribed. Deduplicating at the normalized
+  // key keeps the renderer's subscription bookkeeping aligned with
+  // main's per-canonical accounting.
+  //
   // Unsubscribe uses a 30-second grace period rather than firing on the
   // same tick the cwd leaves `desired`. The motivation is concrete: the
   // worker's first watcher-attach + initial git-status pair for a cold
@@ -667,49 +683,59 @@ export const TerminalGrid = memo(function TerminalGrid({
   // a frame. After the window expires, the cwd is genuinely unsubscribed
   // (worker detaches its parcel-watcher) so per-session memory stays
   // bounded by the number of distinct repos visited per ~30 s.
-  const subscribedCwdsRef = useRef<Set<string>>(new Set())
+  const subscribedKeysRef = useRef<Map<string, string>>(new Map())
   const pendingUnsubTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
   const SUBSCRIPTION_GRACE_MS = 30_000
   useEffect(() => {
-    const desired = new Set<string>()
+    // Build desired { normalizedKey -> rawCwd } from terminalInfos + OSC.
+    // The first raw form to claim a key wins; subsequent raw forms with
+    // the same normalization are ignored at the IPC layer.
+    const desired = new Map<string, string>()
     for (const info of Object.values(terminalInfos)) {
-      if (info?.cwd) desired.add(info.cwd)
+      const raw = info?.cwd
+      if (!raw) continue
+      const key = normalizeTerminalGitPath(raw)
+      if (key && !desired.has(key)) desired.set(key, raw)
     }
-    for (const cwd of Object.values(oscDetectedCwds)) {
-      if (cwd) desired.add(cwd)
+    for (const raw of Object.values(oscDetectedCwds)) {
+      if (!raw) continue
+      const key = normalizeTerminalGitPath(raw)
+      if (key && !desired.has(key)) desired.set(key, raw)
     }
-    const subscribed = subscribedCwdsRef.current
+    const subscribed = subscribedKeysRef.current
     const pendingTimers = pendingUnsubTimersRef.current
-    // Newly-desired cwds: cancel any pending unsubscribe and (if not yet
+    // Newly-desired keys: cancel any pending unsubscribe and (if not yet
     // subscribed) issue a fresh subscribe. The IPC handler is idempotent
     // per webContents.id, so a redundant subscribe is a no-op.
-    for (const cwd of desired) {
-      const pending = pendingTimers.get(cwd)
+    for (const [key, rawCwd] of desired) {
+      const pending = pendingTimers.get(key)
       if (pending) {
         clearTimeout(pending)
-        pendingTimers.delete(cwd)
+        pendingTimers.delete(key)
       }
-      if (subscribed.has(cwd)) continue
-      subscribed.add(cwd)
-      void window.electronAPI?.git?.subscribeMirror?.(cwd).then((initial) => {
+      if (subscribed.has(key)) continue
+      subscribed.set(key, rawCwd)
+      void window.electronAPI?.git?.subscribeMirror?.(rawCwd).then((initial) => {
         if (!initial) return
         const snapshot = initial as GitStateMirrorSnapshot
         setMirrorSnapshots((prev) => mergeMirrorSnapshot(prev, snapshot))
-        setMirrorSnapshotAliases((prev) => mergeMirrorAlias(prev, cwd, snapshot.cwd))
+        setMirrorSnapshotAliases((prev) => mergeMirrorAlias(prev, rawCwd, snapshot.cwd))
       }).catch(() => { /* tolerate */ })
     }
-    // No-longer-desired cwds: schedule a delayed unsubscribe rather than
-    // tear down immediately (see grace-period rationale above).
-    for (const cwd of subscribed) {
-      if (desired.has(cwd)) continue
-      if (pendingTimers.has(cwd)) continue
+    // No-longer-desired keys: schedule a delayed unsubscribe rather than
+    // tear down immediately (see grace-period rationale above). We reuse
+    // the same raw form we subscribed with so main's `dropSubscription`
+    // canonicalizes back to the same key it stored under.
+    for (const [key, rawForUnsub] of subscribed) {
+      if (desired.has(key)) continue
+      if (pendingTimers.has(key)) continue
       const t = setTimeout(() => {
-        pendingTimers.delete(cwd)
-        subscribed.delete(cwd)
-        setMirrorSnapshotAliases((prev) => removeMirrorAlias(prev, cwd))
-        try { window.electronAPI?.git?.unsubscribeMirror?.(cwd) } catch { /* ignore */ }
+        pendingTimers.delete(key)
+        subscribed.delete(key)
+        setMirrorSnapshotAliases((prev) => removeMirrorAlias(prev, rawForUnsub))
+        try { window.electronAPI?.git?.unsubscribeMirror?.(rawForUnsub) } catch { /* ignore */ }
       }, SUBSCRIPTION_GRACE_MS)
-      pendingTimers.set(cwd, t)
+      pendingTimers.set(key, t)
     }
   }, [terminalInfos, oscDetectedCwds])
 
@@ -717,13 +743,13 @@ export const TerminalGrid = memo(function TerminalGrid({
   // had open. Without this the worker keeps watchers alive for 30 s after
   // the renderer goes away, leaking parcel-watcher fds.
   useEffect(() => {
-    const subscribed = subscribedCwdsRef.current
+    const subscribed = subscribedKeysRef.current
     const pendingTimers = pendingUnsubTimersRef.current
     return () => {
       for (const t of pendingTimers.values()) clearTimeout(t)
       pendingTimers.clear()
-      for (const cwd of subscribed) {
-        try { window.electronAPI?.git?.unsubscribeMirror?.(cwd) } catch { /* ignore */ }
+      for (const rawForUnsub of subscribed.values()) {
+        try { window.electronAPI?.git?.unsubscribeMirror?.(rawForUnsub) } catch { /* ignore */ }
       }
       subscribed.clear()
     }

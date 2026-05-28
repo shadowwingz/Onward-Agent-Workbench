@@ -106,8 +106,22 @@ class GitStateMirrorRouter {
   private workerShutdownTimedOut = new WeakSet<Worker>()
   private disposePromise: Promise<void> | null = null
 
-  /** webContents.id → set of subscribed cwds. */
-  private subs = new Map<number, Set<string>>()
+  /**
+   * webContents.id → (canonical cwd → per-renderer subscribe refCount).
+   *
+   * Same `wcId` can subscribe to the same canonical cwd more than once
+   * because the renderer commonly issues two `subscribeMirror` IPCs that
+   * collapse to the same canonical form here (e.g. `/var/...` from the
+   * OSC parser plus `/private/var/...` from the legacy git-info poll;
+   * `repo/.` plus `repo`; symlink + realpath; etc.). Storing a plain
+   * `Set<canonical>` lost this multiplicity — main saw a single entry
+   * even after two subscribe IPCs, so a single unsubscribe IPC silently
+   * killed the still-active second subscription. The refCount is the
+   * fix: increment on every subscribe (attach watcher only on 0→1 of
+   * the global `refCounts`), decrement on every unsubscribe (release
+   * the per-renderer entry only when its own count reaches 0).
+   */
+  private subs = new Map<number, Map<string, number>>()
   /** cwd → subscriber count (>0 iff worker has attached its watcher). */
   private refCounts = new Map<string, number>()
   /** cwd → latest known snapshot, served immediately on new subscription. */
@@ -404,14 +418,19 @@ class GitStateMirrorRouter {
       // same key. See `canonicalise()` for the full rationale.
       const cwd = canonicalise(rawCwd)
       const wcId = event.sender.id
-      let set = this.subs.get(wcId)
-      if (!set) {
-        set = new Set()
-        this.subs.set(wcId, set)
+      let perRenderer = this.subs.get(wcId)
+      if (!perRenderer) {
+        perRenderer = new Map()
+        this.subs.set(wcId, perRenderer)
       }
-      const wasNew = !set.has(cwd)
-      set.add(cwd)
-      if (wasNew) {
+      const prevPerRendererCount = perRenderer.get(cwd) ?? 0
+      perRenderer.set(cwd, prevPerRendererCount + 1)
+      // First subscribe for this canonical FROM THIS RENDERER bumps the
+      // global refCount so a single renderer that legitimately holds N
+      // raw-form subscriptions only counts once toward the worker's
+      // attach-watch decision. Subsequent same-canonical subscribes from
+      // the same renderer are no-ops at the worker level.
+      if (prevPerRendererCount === 0) {
         const next = (this.refCounts.get(cwd) ?? 0) + 1
         this.refCounts.set(cwd, next)
         if (next === 1) this.postToWorker({ kind: 'attach-watch', cwd })
@@ -463,10 +482,20 @@ class GitStateMirrorRouter {
   }
 
   private dropSubscription(wcId: number, cwd: string): void {
-    const set = this.subs.get(wcId)
-    if (!set || !set.has(cwd)) return
-    set.delete(cwd)
-    if (set.size === 0) this.subs.delete(wcId)
+    const perRenderer = this.subs.get(wcId)
+    if (!perRenderer) return
+    const prevPerRendererCount = perRenderer.get(cwd) ?? 0
+    if (prevPerRendererCount <= 0) return
+    if (prevPerRendererCount > 1) {
+      // Renderer still holds another raw-form subscription for the same
+      // canonical (e.g. raw `/var/...` got dropped but the parallel raw
+      // `/private/var/...` is still in `desired`). Decrement only —
+      // don't touch the global refCount or detach the watcher.
+      perRenderer.set(cwd, prevPerRendererCount - 1)
+      return
+    }
+    perRenderer.delete(cwd)
+    if (perRenderer.size === 0) this.subs.delete(wcId)
     const next = (this.refCounts.get(cwd) ?? 1) - 1
     if (next <= 0) {
       this.refCounts.delete(cwd)
@@ -484,8 +513,8 @@ class GitStateMirrorRouter {
   }
 
   private fanout(cwd: string, delta: MirrorDelta): void {
-    for (const [wcId, cwdSet] of this.subs) {
-      if (!cwdSet.has(cwd)) continue
+    for (const [wcId, perRenderer] of this.subs) {
+      if (!perRenderer.has(cwd)) continue
       const wc = webContents.fromId(wcId)
       if (!wc || wc.isDestroyed()) continue
       try {
@@ -497,8 +526,8 @@ class GitStateMirrorRouter {
   }
 
   private fanoutWatcherStatus(status: MirrorWatcherStatus): void {
-    for (const [wcId, cwdSet] of this.subs) {
-      if (!cwdSet.has(status.cwd)) continue
+    for (const [wcId, perRenderer] of this.subs) {
+      if (!perRenderer.has(status.cwd)) continue
       const wc = webContents.fromId(wcId)
       if (!wc || wc.isDestroyed()) continue
       try {
@@ -557,10 +586,14 @@ class GitStateMirrorRouter {
   private registerWebContentsCleanup(): void {
     const handle = (wc: Electron.WebContents) => {
       wc.on('destroyed', () => {
-        const set = this.subs.get(wc.id)
-        if (!set) return
-        for (const cwd of Array.from(set)) {
-          this.dropSubscription(wc.id, cwd)
+        const perRenderer = this.subs.get(wc.id)
+        if (!perRenderer) return
+        // Iterate a snapshot of (cwd, count) so we can fully drain each
+        // canonical's per-renderer refCount in one pass — renderer
+        // destruction must release the watcher even if the renderer
+        // held N raw-form subscriptions for the same canonical.
+        for (const [cwd, count] of Array.from(perRenderer)) {
+          for (let i = 0; i < count; i += 1) this.dropSubscription(wc.id, cwd)
         }
       })
     }
@@ -572,9 +605,13 @@ class GitStateMirrorRouter {
 
   /** Test hook for autotest — read-only. */
   inspect(): { workerReady: boolean; subscribers: number; cwds: string[]; watcherStatuses: MirrorWatcherStatus[] } {
+    let subscribers = 0
+    for (const perRenderer of this.subs.values()) {
+      for (const count of perRenderer.values()) subscribers += count
+    }
     return {
       workerReady: this.workerReady,
-      subscribers: Array.from(this.subs.values()).reduce((acc, s) => acc + s.size, 0),
+      subscribers,
       cwds: Array.from(this.refCounts.keys()),
       watcherStatuses: Array.from(this.watcherStatuses.values())
     }
