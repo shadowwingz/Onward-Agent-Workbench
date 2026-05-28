@@ -105,6 +105,7 @@ point at files under `test/unittest/`.
 | Cursor / scroll position restored across subpage switches | `run-subpage-viewstate-restore` (SVR-01..15) |
 | Auto-updater UI state machine (idle / checking / downloading / restart) | `run-settings-update` (SU-01..10) |
 | Bug fix: error-code falls back to localized detail string | `run-settings-update` (SU-06b) |
+| Full auto-update install + relaunch lifecycle (check → download → manifest switch → recovery → install → relaunch verify, S1..S12) — **opt-in, never part of the default regression on any platform** | `run-auto-update-windows-e2e` (opt in via `python3 test/autotest/run-full-regression.py --include-update-e2e`; symmetric macOS counterpart will register the same way under `UPDATE_E2E_SCRIPTS`) |
 
 ### 2.3 Git Diff
 

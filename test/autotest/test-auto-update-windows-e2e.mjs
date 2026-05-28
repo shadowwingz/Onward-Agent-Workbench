@@ -223,7 +223,13 @@ async function main() {
 
   console.log('=== Windows Auto-Update E2E Test ===\n')
 
-  const testRoot = join(PROJECT_ROOT, 'test', 'e2e-update-test')
+  // Runner-internal scratch root. Lives under `test/autotest/results/<suite>/`
+  // per CLAUDE.md's autotest layout rule — that prefix is gitignored, so the
+  // ~1.3 GB build cache (3 packaged app versions + installers) never shows up
+  // in `git status`. The per-run subtrees (`run/`, `update-root/`) are wiped
+  // each invocation; the `fixtures/` cache is preserved across runs so a
+  // repeat invocation finishes in ~3-5 min instead of rebuilding from source.
+  const testRoot = join(PROJECT_ROOT, 'test', 'autotest', 'results', 'auto-update-windows-e2e')
   const fixturesRoot = join(testRoot, 'fixtures')
   const runRoot = join(testRoot, 'run')
   const updateRoot = join(testRoot, 'update-root')
@@ -233,6 +239,11 @@ async function main() {
   const userDataDir = join(runRoot, 'user-data')
   const installLogPath = join(userDataDir, 'updates', 'install.log')
   const pendingMarkerPath = join(userDataDir, 'updates', 'pending-update.json')
+
+  // Ensure the scratch root exists before per-run wipes (rmSync on a missing
+  // path is a no-op, but the subsequent mkdirSync for fixturesRoot only
+  // creates testRoot transitively, so making it explicit keeps the intent clear).
+  mkdirSync(testRoot, { recursive: true })
 
   // Clean per-run state; preserve fixture cache
   rmSync(runRoot, { recursive: true, force: true })

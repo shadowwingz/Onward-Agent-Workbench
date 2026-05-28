@@ -129,7 +129,21 @@ SCRIPTS: List[str] = [
     "test/autotest/run-working-directory-copy-autotest.sh",
 ]
 
-WINDOWS_ONLY_SKIP = "test/autotest/run-auto-update-windows-e2e.sh"
+# Update-channel end-to-end suites. These build multiple full release packages
+# (300+ MB each), spin up a local HTTP server, exercise the real installer /
+# relaunch path, and take 10-30 minutes on a cache miss. They are intentionally
+# excluded from the default regression run on every platform — opt in
+# explicitly with --include-update-e2e.
+#
+# Each entry is (script_path, required platform.system() value). On the wrong
+# platform the entry is still SKIP'd even when --include-update-e2e is passed
+# (a Windows installer test cannot run on macOS). The design is symmetric: a
+# macOS counterpart drops in by adding e.g.
+#     ("test/autotest/run-auto-update-macos-e2e.sh", "Darwin"),
+# below — no other code changes needed.
+UPDATE_E2E_SCRIPTS: List["tuple[str, str]"] = [
+    ("test/autotest/run-auto-update-windows-e2e.sh", "Windows"),
+]
 
 PER_SCRIPT_TIMEOUT_SEC = 180
 # Per-script timeout overrides for runners whose end-to-end flow legitimately
@@ -522,6 +536,17 @@ def main() -> int:
         help="Print the planned script list (post-filter) and exit.",
     )
     parser.add_argument(
+        "--include-update-e2e", action="store_true",
+        help=(
+            "Include the update-channel E2E suites (UPDATE_E2E_SCRIPTS) in the "
+            "run list. Default: every entry is SKIP'd. Each entry only runs on "
+            "its required platform; on the wrong platform it still SKIPs with "
+            "reason '<platform>-only'. Designed symmetric across macOS and "
+            "Windows — add a Darwin entry to UPDATE_E2E_SCRIPTS to enable the "
+            "same opt-in path for macOS."
+        ),
+    )
+    parser.add_argument(
         "--repeat", type=int, default=1, metavar="N",
         help=(
             "Run the (filtered) regression set N times back-to-back. "
@@ -559,8 +584,23 @@ def main() -> int:
         )
         return 2
 
-    # Apply --only / --skip filters.
-    scripts = list(SCRIPTS)
+    # Classify update-e2e entries: opt-in (default SKIP), or platform-matched
+    # when --include-update-e2e is set. Non-matching entries SKIP with a
+    # "<plat>-only" reason so the summary still records their existence.
+    host_plat = platform.system()
+    update_e2e_to_run: List[str] = []
+    update_e2e_skipped: List["tuple[str, str]"] = []  # (script, reason)
+    for script, required_plat in UPDATE_E2E_SCRIPTS:
+        if not args.include_update_e2e:
+            update_e2e_skipped.append((script, "opt-in via --include-update-e2e"))
+        elif required_plat != host_plat:
+            update_e2e_skipped.append((script, f"{required_plat}-only"))
+        else:
+            update_e2e_to_run.append(script)
+
+    # Apply --only / --skip filters across SCRIPTS + opted-in update-e2e
+    # entries so power users can do e.g. `--include-update-e2e --only auto-update`.
+    scripts = list(SCRIPTS) + update_e2e_to_run
     if args.only:
         scripts = [s for s in scripts if any(o in s for o in args.only)]
     if args.skip:
@@ -570,7 +610,10 @@ def main() -> int:
         print(f"Planned runners ({len(scripts)}):")
         for s in scripts:
             print(f"  {s}")
-        print(f"Skipped (Windows-only): {WINDOWS_ONLY_SKIP}")
+        if update_e2e_skipped:
+            print("Skipped update-e2e:")
+            for s, reason in update_e2e_skipped:
+                print(f"  {s} ({reason})")
         return 0
 
     # Output dir sits under test/ next to the runners it drives. It's
@@ -612,13 +655,15 @@ def main() -> int:
 
     results: List[RunResult] = []
 
-    # Mirror bash: log the Windows-only skip up front.
-    emit(f"SKIP {WINDOWS_ONLY_SKIP} (Windows-only)")
-    results.append(RunResult(
-        script=WINDOWS_ONLY_SKIP, status="SKIP", exit_code=None,
-        elapsed_sec=0.0, log_file="",
-        note="Windows-only follow-up; intentionally skipped on every platform's full pass.",
-    ))
+    # Record update-e2e SKIPs up front so summary.json always reflects their
+    # existence — whether opted out (default) or platform-mismatched.
+    for script, reason in update_e2e_skipped:
+        emit(f"SKIP {script} ({reason})")
+        results.append(RunResult(
+            script=script, status="SKIP", exit_code=None,
+            elapsed_sec=0.0, log_file="",
+            note=reason,
+        ))
 
     user_data_temp_dirs: List[str] = []
     interrupted = False

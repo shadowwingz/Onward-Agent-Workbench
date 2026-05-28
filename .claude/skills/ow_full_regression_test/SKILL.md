@@ -55,12 +55,25 @@ python3 test/autotest/run-full-regression.py --build
 
 Common scopes the user might want (each keeps `--build`):
 
-| User intent                                  | Invocation                                                                |
-|----------------------------------------------|---------------------------------------------------------------------------|
-| Full pass                                    | `python3 test/autotest/run-full-regression.py --build`                    |
-| Re-run a specific suite                      | `python3 test/autotest/run-full-regression.py --build --only run-<suite>` |
-| Skip a known-broken runner this round        | `python3 test/autotest/run-full-regression.py --build --skip run-<suite>` |
-| List planned scripts only (no build, no run) | `python3 test/autotest/run-full-regression.py --list`                     |
+| User intent                                  | Invocation                                                                                  |
+|----------------------------------------------|---------------------------------------------------------------------------------------------|
+| Full pass                                    | `python3 test/autotest/run-full-regression.py --build`                                      |
+| Re-run a specific suite                      | `python3 test/autotest/run-full-regression.py --build --only run-<suite>`                   |
+| Skip a known-broken runner this round        | `python3 test/autotest/run-full-regression.py --build --skip run-<suite>`                   |
+| List planned scripts only (no build, no run) | `python3 test/autotest/run-full-regression.py --list`                                       |
+| Include the update-channel E2E suites        | `python3 test/autotest/run-full-regression.py --build --include-update-e2e`                 |
+
+The update-channel E2E suites (`UPDATE_E2E_SCRIPTS` in the orchestrator —
+currently the Windows installer + relaunch test, with the macOS counterpart
+slotting in via the same list when authored) are **excluded from every
+default regression pass on every platform**. They each build multiple full
+release packages and exercise the real installer / relaunch path, so they
+take 10–30 minutes on a cache miss and never belong in a routine `--build`
+run. Pass `--include-update-e2e` only when the user explicitly asked to run
+the update tests; on the wrong host platform those entries still SKIP with
+reason `<platform>-only`. The design is symmetric — never invoke the
+Windows suite by hand to "simulate" the flag, and never silently include
+the macOS suite either.
 
 A full pass typically takes 25–70 minutes (≈ 5–10 min build + 20–60
 min runners). Run it in the background when feasible so the rest of
