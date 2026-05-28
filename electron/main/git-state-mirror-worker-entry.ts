@@ -33,6 +33,7 @@ import {
   computeMirrorWatcherBackoffMs,
   createMirrorWorkerEntry,
   finishMirrorRecomputeIfCurrent,
+  hardenReadonlyGitEnv,
   isMirrorWatcherPathMissingError,
   MIRROR_WATCHER_DEGRADED_POLLING_INTERVAL_MS,
   MIRROR_WATCHER_IGNORE,
@@ -206,7 +207,9 @@ function getExecEnv(): NodeJS.ProcessEnv {
   env[pathKey] = Array.from(
     new Set([...currentPath.split(delimiter).filter(Boolean), ...extraPaths])
   ).join(delimiter)
-  return env
+  // Mirror git calls are read-only; disable git's opportunistic index-refresh
+  // lock so `git status` never rewrites .git/index and re-triggers the watcher.
+  return hardenReadonlyGitEnv(env)
 }
 
 async function isExecutable(filePath: string): Promise<boolean> {

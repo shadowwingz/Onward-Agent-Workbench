@@ -139,6 +139,29 @@ export function classifyEventPath(eventPath: string, watchedRoot: string): {
   return { drop: false, reason: 'allowed' }
 }
 
+/**
+ * Harden the environment for the mirror's read-only git invocations.
+ *
+ * Every mirror git call (status / rev-parse / show) is strictly read-only, but
+ * by default `git status` performs an opportunistic index refresh: it takes
+ * `.git/index.lock` and rewrites `.git/index` to update the stat cache. The
+ * mirror watcher observes that `.git/index` write as a change event and
+ * schedules another recompute, which runs `git status` again, which rewrites
+ * `.git/index` again — a self-perpetuating recompute storm that can stall the
+ * mirror on a stale snapshot after a commit.
+ *
+ * Setting `GIT_OPTIONAL_LOCKS=0` makes git skip that side-effecting refresh
+ * while still computing correct status output. This is the maintainer-blessed
+ * fix (git commit 27344d6, git >= 2.15) and mirrors VS Code's
+ * `extensions/git` `getStatus` (which scopes the same env var to its read
+ * path). It is cross-platform (no `process.platform` branch needed) and safe:
+ * the only trade-off is that stat-drifted files are re-hashed until a
+ * foreground git command refreshes the index — never a correctness issue.
+ */
+export function hardenReadonlyGitEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return { ...env, GIT_OPTIONAL_LOCKS: '0' }
+}
+
 export function cleanupMirrorWorkerEntry(entry: MirrorWorkerEntryCore): void {
   if (entry.debounceTimer) {
     clearTimeout(entry.debounceTimer)

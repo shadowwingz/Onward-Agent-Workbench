@@ -19,6 +19,7 @@ import {
   createMirrorWorkerEntry,
   finishMirrorPoll,
   finishMirrorRecomputeIfCurrent,
+  hardenReadonlyGitEnv,
   isMirrorWatcherPathMissingError,
   MIRROR_WATCHER_IGNORE,
   requestMirrorAttach,
@@ -116,6 +117,19 @@ test('Parcel ignore list keeps durable git state files visible', () => {
   assert.equal(ignored.has('.git/HEAD'), false)
   assert.equal(ignored.has('.git/refs/**'), false)
   assert.equal(ignored.has('.git/packed-refs'), false)
+})
+
+test('hardenReadonlyGitEnv disables git optional locks without mutating the input', () => {
+  const base: NodeJS.ProcessEnv = { PATH: '/usr/bin:/bin', HOME: '/home/me' }
+  const hardened = hardenReadonlyGitEnv(base)
+  // GIT_OPTIONAL_LOCKS=0 stops `git status` from refreshing/rewriting .git/index,
+  // which would otherwise re-trigger the mirror watcher (self-recompute storm).
+  assert.equal(hardened.GIT_OPTIONAL_LOCKS, '0')
+  // Upstream PATH augmentation and other env keys must survive untouched.
+  assert.equal(hardened.PATH, '/usr/bin:/bin')
+  assert.equal(hardened.HOME, '/home/me')
+  // Pure function: the caller's env object is not mutated.
+  assert.equal(base.GIT_OPTIONAL_LOCKS, undefined)
 })
 
 test('watcher backoff uses 800/1600/3200/5000 cap', () => {

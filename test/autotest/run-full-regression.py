@@ -153,6 +153,9 @@ PER_SCRIPT_TIMEOUT_OVERRIDES_SEC = {
     # GitDiff staleness + submodule walks through 46 distinct GDS-* cases;
     # ~270s end-to-end after the GitStateMirror Worker bring-up overhead.
     "test/autotest/run-git-diff-staleness-and-submodule-autotest.sh": 360,
+    # GitStateMirror latency launches the app 3x (baseline + 2 watcher-failure
+    # injections) and runs 5-trial same-repo commit/clean cycles; exceeds 180s.
+    "test/autotest/run-git-state-mirror-latency-autotest.sh": 300,
     # GitDiff click-latency suite measures multi-trial first-click vs
     # cache-warm latencies; needs more headroom than 180s allows.
     "test/autotest/run-git-diff-click-latency-autotest.sh": 300,
