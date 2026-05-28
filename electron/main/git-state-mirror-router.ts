@@ -510,6 +510,46 @@ class GitStateMirrorRouter {
   }
 
   /**
+   * Notify every live renderer that a `pushTerminalCwd` raw value was
+   * rejected by the main-side `resolveExistingTerminalCwd` filesystem
+   * check. Renderers listen on `GIT_STATE_MIRROR_CWD_REJECTED` and roll
+   * back the speculative `oscDetectedCwds` entry the renderer-side OSC
+   * handler dispatched synchronously.
+   *
+   * Unlike `fanout`, this signal is per-terminal, not per-cwd: a rejected
+   * cwd never enters `this.refCounts`, so we don't have a subscriber set
+   * to address. Broadcast to every webContents instead — the renderer
+   * filters by terminalId locally. The cost is one IPC message per live
+   * window per rejection, which is bounded by how often inner programs
+   * inject invalid OSC cwds (rare).
+   */
+  private broadcastCwdRejected(terminalId: string, rawCwd: string): void {
+    let recipientCount = 0
+    let sendFailures = 0
+    for (const wc of webContents.getAllWebContents()) {
+      if (wc.isDestroyed()) continue
+      try {
+        wc.send(IPC.GIT_STATE_MIRROR_CWD_REJECTED, terminalId, rawCwd)
+        recipientCount += 1
+      } catch (error) {
+        sendFailures += 1
+        console.warn('[GitStateMirrorRouter] cwd-rejected send failed:', error)
+      }
+    }
+    // Diagnostic breadcrumb (Bug A reject channel). Pair with the renderer
+    // counterpart `renderer:terminal.osc-cwd-rolled-back` to verify a future
+    // "phantom cwd is back" report — if recipientCount is 0 the broadcast
+    // never reached a live window; if recipient > 0 but the renderer event
+    // is missing, the renderer listener regressed.
+    performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_STATE_MIRROR_CWD_REJECTED_BROADCAST, {
+      terminalId,
+      rawCwd: rawCwd.slice(0, 512),
+      recipientCount,
+      sendFailures
+    })
+  }
+
+  /**
    * Drop subscriptions belonging to a webContents that has been destroyed
    * (renderer reload, window close, terminal-tab close). Without this every
    * crash-and-reload would leak a watcher in the worker.
@@ -603,6 +643,15 @@ class GitStateMirrorRouter {
         reason: 'invalid-cwd',
         rawCwd: rawCwd.slice(0, 512)
       })
+      // Broadcast the rejection back to every renderer that has a
+      // GitStateMirror subscription. Renderers use this to roll back any
+      // speculative `oscDetectedCwds` entry they committed when they
+      // parsed the OSC + dispatched `onward:terminal-cwd-detected`
+      // synchronously, before the main-side `resolveExistingTerminalCwd`
+      // filesystem check could run. Without this signal the renderer
+      // would otherwise show a phantom cwd indefinitely (TTM-32 bug:
+      // OSC 7 ; file:///<free-text> leaks into the task header).
+      this.broadcastCwdRejected(terminalId, rawCwd)
       return
     }
     const prevCwd = this.terminalCwds.get(terminalId) ?? null

@@ -152,6 +152,12 @@ if ! grep -q "GSM-17-0-clean-after-real-commit" "$LOG_FILE"; then
   exit 1
 fi
 
+if ! grep -q "GSM-18-cross-tab-two-tabs-commit-to-clean" "$LOG_FILE"; then
+  echo "Missing GSM-18 marker; the cross-tab two-tabs commit-to-clean coverage did not run to completion" >&2
+  tail -n 40 "$LOG_FILE" >&2
+  exit 1
+fi
+
 if ! grep -q "GSM-15-watcher-subscribe-failure-recovers" "$LOG_FILE"; then
   echo "Missing GSM-15 marker; the subscribe failure recovery test did not run to completion" >&2
   tail -n 40 "$LOG_FILE" >&2

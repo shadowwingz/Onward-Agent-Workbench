@@ -15,6 +15,18 @@ import type { ShortcutAction } from '../types/settings.d.ts'
 
 export interface AppDebugApi {
   triggerShortcutAction: (action: ShortcutAction) => boolean
+  /** Autotest-only: read the current tab id list (order matches the tab bar). */
+  getTabIds: () => string[]
+  /** Autotest-only: read the active tab id. */
+  getActiveTabId: () => string | null
+  /**
+   * Autotest-only: create a new tab. Returns `'pending'` when the request
+   * was accepted (the new tab id appears in `getTabIds()` on the next
+   * React tick) or `null` when the tab limit has been reached.
+   */
+  createTab: () => 'pending' | null
+  /** Autotest-only: switch to an existing tab by id. Returns false if unknown. */
+  switchToTabById: (tabId: string) => boolean
 }
 
 // Mirror of clickLatencyTracker.ClickLatencyMeasurement, kept inline so this
@@ -838,6 +850,15 @@ export interface TerminalDebugApi {
   getTerminalManualNameRepoRoot: (terminalId?: string) => string | null
   simulateTitleSingleClick: (terminalId?: string) => boolean
   simulateTitleDoubleClick: (terminalId?: string) => boolean
+  /**
+   * Inject raw PTY-output bytes into the terminal's xterm instance so tests
+   * can reproduce OSC injection from inner programs (Claude CLI, shells with
+   * exotic shell integration, etc.) without spawning a real subprocess that
+   * echoes the bytes. The data is written via the same `xterm.write(data)`
+   * path that real PTY output takes, so xterm's OSC parser sees identical
+   * bytes to a live session.
+   */
+  injectPtyData: (data: string, terminalId?: string) => boolean
   finishInlineRename: (value?: string) => boolean
   cancelInlineRename: () => boolean
   getInlineRenameState: () => { editingId: string | null; editingTitle: string }

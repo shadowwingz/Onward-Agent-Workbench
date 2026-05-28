@@ -153,9 +153,6 @@ PER_SCRIPT_TIMEOUT_OVERRIDES_SEC = {
     # GitDiff staleness + submodule walks through 46 distinct GDS-* cases;
     # ~270s end-to-end after the GitStateMirror Worker bring-up overhead.
     "test/autotest/run-git-diff-staleness-and-submodule-autotest.sh": 360,
-    # GitStateMirror latency launches the app 3x (baseline + 2 watcher-failure
-    # injections) and runs 5-trial same-repo commit/clean cycles; exceeds 180s.
-    "test/autotest/run-git-state-mirror-latency-autotest.sh": 300,
     # GitDiff click-latency suite measures multi-trial first-click vs
     # cache-warm latencies; needs more headroom than 180s allows.
     "test/autotest/run-git-diff-click-latency-autotest.sh": 300,
@@ -164,6 +161,13 @@ PER_SCRIPT_TIMEOUT_OVERRIDES_SEC = {
     "test/autotest/run-preview-search-autotest.sh": 300,
     # CPU gate samples preview idle, post-scroll recovery, split mode, and editor-only idle windows.
     "test/autotest/run-markdown-preview-cpu-autotest.sh": 300,
+    # GitStateMirror latency suite runs 3 passes (baseline + 2 watcher-
+    # failure injections), with the baseline pass alone doing 5 trials of
+    # GSM-17 (same-tab two-task commit-to-clean) + 5 trials of GSM-18
+    # (cross-tab two-task commit-to-clean). At ~6-12 minutes baseline +
+    # ~10-20s per failure-injection pass, 180s is far below the bottom of
+    # the distribution.
+    "test/autotest/run-git-state-mirror-latency-autotest.sh": 1500,
 }
 INTER_SCRIPT_SLEEP_SEC = 2
 

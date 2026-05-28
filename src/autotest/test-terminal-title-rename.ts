@@ -714,6 +714,164 @@ export async function testTerminalTitleRename(ctx: AutotestContext): Promise<Tes
   api.closeTitleMenu()
   api.setTerminalGitInfoOverride(terminalId, null)
 
+  // ================= TTM-29..32: OSC 0/1/2 title + OSC 7 phantom cwd
+  //                                injection must NOT mutate the visible
+  //                                Onward-managed task label =================
+  // Peer-product context: VS Code 1.117 allowAgentCliTitle, Alacritty's
+  // dynamic_title=false, WezTerm's format-tab-title — the host owns the
+  // task label; OSC sequences from inner programs (Claude CLI, shells with
+  // misbehaving prompt integration, etc.) must not silently replace the
+  // visible Onward path / branch / customName / auto-follow output.
+  //
+  // Reproduction strategy: inject raw OSC bytes via the new debug-API
+  // `injectPtyData` hook (which calls `xterm.write` on the same code path
+  // PTY output flows through) and assert task title + customName +
+  // adaptive-cwd value are byte-identical before / after the injection.
+  // Each variant runs N=TTM_OSC_TRIALS trials and the assertion FAILS
+  // unless ALL trials preserve the label (boolean aggregate per the
+  // CLAUDE.md "Timing-sensitive autotest authoring" rule for boolean
+  // correctness).
+  const TTM_OSC_TRIALS = 5
+  const OSC_INJECTION_PROBE_TEXT = 'Claude is waiting for your input'
+
+  const adaptiveCwdLabel = (id: string): string | null => {
+    const cell = document.querySelector(`.terminal-grid-cell[data-terminal-id="${id}"]`)
+    if (!cell) return null
+    const cwdEl = cell.querySelector('.terminal-grid-adaptive-cwd') as HTMLElement | null
+    return cwdEl?.getAttribute('title') ?? null
+  }
+
+  type OscVariant = {
+    id: 'TTM-29' | 'TTM-30' | 'TTM-31' | 'TTM-32'
+    label: string
+    bytes: string
+    /** When set, also assert the adaptive-cwd label stays unchanged. */
+    checkCwd: boolean
+  }
+
+  // OSC 0/1/2 use BEL terminator (\x07) — the most common in the wild
+  // (Claude CLI per issue #15082, bash's default `printf '\033]0;...\007'`).
+  // OSC 7 uses ST terminator (`ESC \\`) per the original xterm spec; some
+  // emitters use BEL — we cover both via separate variants below if needed,
+  // but the renderer's OSC handler is dialect-agnostic so one form suffices.
+  const oscVariants: OscVariant[] = [
+    {
+      id: 'TTM-29',
+      label: 'osc0-window-and-icon-title',
+      bytes: `\x1b]0;${OSC_INJECTION_PROBE_TEXT}\x07`,
+      checkCwd: true
+    },
+    {
+      id: 'TTM-30',
+      label: 'osc1-icon-title',
+      bytes: `\x1b]1;${OSC_INJECTION_PROBE_TEXT}\x07`,
+      checkCwd: true
+    },
+    {
+      id: 'TTM-31',
+      label: 'osc2-window-title',
+      bytes: `\x1b]2;${OSC_INJECTION_PROBE_TEXT}\x07`,
+      checkCwd: true
+    },
+    {
+      // Defensive coverage of the same bug class on the renderer's OSC-cwd
+      // surface. A malformed inner program emitting `OSC 7 ; file:///<text>`
+      // (or shell integration that puts status text in the cwd channel)
+      // would otherwise poison the task header's adaptive-cwd label with
+      // free text that starts with `/`. The renderer must not commit that
+      // path to its speculative OSC-detected cwd map unless main validates
+      // it.
+      id: 'TTM-32',
+      label: 'osc7-phantom-file-uri-path',
+      bytes: `\x1b]7;file:///${OSC_INJECTION_PROBE_TEXT}\x1b\\`,
+      checkCwd: true
+    }
+  ]
+
+  for (const variant of oscVariants) {
+    await resetState()
+    // Pin a known customName so the assertion has an unambiguous reference
+    // — without this, the default `Task N` label has no chance of being
+    // visibly clobbered (the bug is about overwriting, not adopting). The
+    // pinned name doubles as the regression sentinel: if a future change
+    // ever pipes OSC bytes through onTerminalAutoRename / customName, the
+    // sentinel would flip and the assertion would catch it.
+    const sentinelCustomName = `ttm-sentinel-${variant.id.toLowerCase()}`
+    api.setAutoFollowGitBranchForTaskName(false)
+    await sleep(40)
+    api.openTitleMenu(terminalId)
+    await sleep(20)
+    api.clickTitleMenuItem('rename', terminalId)
+    await sleep(20)
+    api.finishInlineRename(sentinelCustomName)
+    await sleep(60)
+
+    const baselineTitle = api.getTerminalTitle(terminalId)
+    const baselineCustomName = api.getTerminalCustomName(terminalId)
+    const baselineCwd = adaptiveCwdLabel(terminalId)
+    const baselineManualRepoRoot = api.getTerminalManualNameRepoRoot(terminalId)
+
+    const trialEvidence: Array<{
+      trial: number
+      titleAfter: string | null
+      customAfter: string | null
+      cwdAfter: string | null
+      manualRepoRootAfter: string | null
+      injectOk: boolean
+    }> = []
+    let aggregateOk = true
+
+    for (let trial = 0; trial < TTM_OSC_TRIALS; trial += 1) {
+      const injectOk = api.injectPtyData(variant.bytes, terminalId)
+      // Give xterm one paint frame to dispatch any internal OSC handler,
+      // plus a React flush so any consequent state update can land.
+      await sleep(80)
+
+      const titleAfter = api.getTerminalTitle(terminalId)
+      const customAfter = api.getTerminalCustomName(terminalId)
+      const cwdAfter = adaptiveCwdLabel(terminalId)
+      const manualRepoRootAfter = api.getTerminalManualNameRepoRoot(terminalId)
+
+      const titleOk = titleAfter === baselineTitle
+      const customOk = customAfter === baselineCustomName
+      const cwdOk = !variant.checkCwd || (cwdAfter === baselineCwd)
+      const manualOk = manualRepoRootAfter === baselineManualRepoRoot
+      const trialOk = injectOk && titleOk && customOk && cwdOk && manualOk
+      if (!trialOk) aggregateOk = false
+
+      trialEvidence.push({
+        trial,
+        titleAfter,
+        customAfter,
+        cwdAfter,
+        manualRepoRootAfter,
+        injectOk
+      })
+    }
+
+    record(
+      `${variant.id}-${variant.label}-ignored-by-task-label`,
+      aggregateOk,
+      {
+        description: `Injecting ${variant.label} via PTY must not change the Onward-managed task label or customName across ${TTM_OSC_TRIALS} trials`,
+        oscBytesPreview: variant.bytes
+          .replace(/\x1b/g, 'ESC ')
+          .replace(/\x07/g, ' BEL')
+          .replace(/\x5c/g, ' \\\\'),
+        probeText: OSC_INJECTION_PROBE_TEXT,
+        baseline: {
+          title: baselineTitle,
+          customName: baselineCustomName,
+          cwd: baselineCwd,
+          manualRepoRoot: baselineManualRepoRoot
+        },
+        trials: trialEvidence
+      }
+    )
+
+    api.setTerminalGitInfoOverride(terminalId, null)
+  }
+
   await resetState()
   log('terminal-title-rename:complete', { total: results.length })
 

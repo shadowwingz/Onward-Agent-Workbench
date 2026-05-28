@@ -735,6 +735,15 @@ export interface GitAPI {
    */
   onMirrorWatcherError: (callback: (cwd: string, message: string) => void) => () => void
   pushCwd: (terminalId: string, newCwd: string | null) => void
+  /**
+   * Notification that `pushCwd`'s raw value was rejected by the main-side
+   * filesystem check (path does not exist or fails normalisation). The
+   * renderer subscribes to roll back any speculative `oscDetectedCwds`
+   * entry it dispatched before the IPC round-trip resolved — closes the
+   * bug class where `OSC 7 ; file:///<free-text>` poisons the task
+   * header with a phantom path.
+   */
+  onMirrorCwdRejected: (callback: (terminalId: string, rawCwd: string) => void) => () => void
   requestFileBody: (cwd: string, fileKey: string, force: boolean) => Promise<GitFileContentResult | null>
   /**
    * Phase 5 PART 2 — Refresh Changes. Forces the Worker to bump the

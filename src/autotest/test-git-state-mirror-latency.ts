@@ -793,6 +793,299 @@ export async function testGitStateMirrorLatency(ctx: AutotestContext): Promise<T
     }
   }
 
+  // ================= GSM-18: cross-tab two-task git status consistency
+  //                            + real git commit-to-clean transition =====
+  // GSM-17 covers two-Task SAME-TAB consistency: both tasks share one
+  // TerminalGrid React tree, so they observe the same `mirrorSnapshots`
+  // map and any update fans into both via a single subscribe-mirror call.
+  //
+  // GSM-18 is the cross-TAB variant: the two tasks live in DIFFERENT
+  // TerminalGrid instances, each with its own `mirrorSnapshots` /
+  // `oscDetectedCwds` state, each calling `subscribeMirror(repoA)`
+  // independently. The router's `refCounts` should bump to 2 and fan
+  // out every delta to both renderers in lockstep. If a renderer ever
+  // drops a delta, that tab's task chip would degrade to "no Git info"
+  // (the user's bug B symptom) — and a real `git commit` in one tab
+  // must drive BOTH tabs to clean within the same GitStateMirror budget
+  // (bug C's user-visible symptom: dirty stays yellow forever after a
+  // commit).
+  if (!cancelled()) {
+    // The renderer's AppDebugApi effect re-binds `window.__onwardAppDebug`
+    // every time `state.tabs` changes (so each call sees the latest
+    // closure). Always read through `getAppDebug()` rather than caching
+    // a stale `appDebug` variable from before `createTab()` ran.
+    const getAppDebug = () => window.__onwardAppDebug
+    const initialApi = getAppDebug()
+    const tabApiReady = Boolean(initialApi)
+      && typeof initialApi?.getTabIds === 'function'
+      && typeof initialApi?.getActiveTabId === 'function'
+      && typeof initialApi?.createTab === 'function'
+      && typeof initialApi?.switchToTabById === 'function'
+    record('GSM-18a-tab-debug-api', tabApiReady, {
+      hasGetTabIds: typeof initialApi?.getTabIds === 'function',
+      hasGetActiveTabId: typeof initialApi?.getActiveTabId === 'function',
+      hasCreateTab: typeof initialApi?.createTab === 'function',
+      hasSwitchToTabById: typeof initialApi?.switchToTabById === 'function'
+    })
+
+    if (tabApiReady && initialApi) {
+      const tabAId = initialApi.getActiveTabId()
+      const initialTabIds = initialApi.getTabIds()
+
+      // Capture Tab A's initial task BEFORE creating the second tab so
+      // we don't race with the newly-mounted Tab B's TerminalGrid
+      // overwriting `window.__onwardTerminalDebug`. The session-manager-
+      // owned terminal IDs survive tab churn; reading the DOM is safe
+      // even when the active tab changes.
+      const tabATerminalIds = window.__onwardTerminalDebug?.getVisibleTerminalIds?.() ?? []
+      const taskAId = tabATerminalIds[0] ?? null
+
+      record('GSM-18b-tab-a-task-resolved', Boolean(tabAId && taskAId), {
+        tabAId,
+        taskAId,
+        initialTabIds,
+        initialTabCount: initialTabIds.length
+      })
+
+      if (tabAId && taskAId && !cancelled()) {
+        // Open a second tab. createTab returns 'pending' synchronously
+        // (React state update is async); poll getTabIds for the new id.
+        const createOk = getAppDebug()?.createTab() ?? null
+        const tabBReady = await waitFor(
+          'GSM-18-tab-b-appeared',
+          () => (getAppDebug()?.getTabIds()?.length ?? 0) > initialTabIds.length,
+          5000,
+          50
+        )
+        const tabBId = tabBReady
+          ? (getAppDebug()?.getTabIds() ?? []).find((id) => !initialTabIds.includes(id)) ?? null
+          : null
+
+        record('GSM-18c-tab-b-created', tabBReady && Boolean(tabBId), {
+          createOk,
+          tabBId,
+          tabIdsAfter: getAppDebug()?.getTabIds() ?? null
+        })
+
+        if (tabBReady && tabBId && !cancelled()) {
+          // The new tab is now active. Its TerminalGrid mounts a single
+          // default task. `__onwardTerminalDebug` is shared by every
+          // TerminalGrid effect, so it can transiently point at Tab A
+          // while Tab B's effect is still queueing. Wait until the
+          // visible-id set actually contains a terminal NOT already
+          // owned by Tab A (i.e. a freshly-mounted Tab B task), so
+          // taskBId truly identifies Tab B's task. Using `tabATerminalIds`
+          // as the exclusion set (snapshot taken before createTab) gives
+          // a definitive "this id belongs to Tab B" rule.
+          const tabATerminalIdSet = new Set(tabATerminalIds)
+          await waitFor(
+            'GSM-18-tab-b-terminal-debug',
+            () => {
+              const ids = window.__onwardTerminalDebug?.getVisibleTerminalIds?.() ?? []
+              return ids.some((id) => !tabATerminalIdSet.has(id))
+            },
+            8000,
+            50
+          )
+          const tabBTerminalIds = window.__onwardTerminalDebug?.getVisibleTerminalIds?.() ?? []
+          const taskBId = tabBTerminalIds.find((id) => !tabATerminalIdSet.has(id)) ?? null
+
+          // Cross-tab terminal IDs must be distinct (each tab spawns a
+          // fresh PTY session). If they're the same, the tab churn
+          // collided with state and the test isn't measuring what it
+          // claims to measure.
+          record('GSM-18d-tab-b-task-distinct', Boolean(taskBId && taskBId !== taskAId), {
+            taskAId,
+            taskBId,
+            tabBTerminalIds
+          })
+
+          if (taskBId && !cancelled()) {
+            // Wait for Tab B's session to reach 'ready' before pushing
+            // a cwd — otherwise the OSC handler races the create call
+            // and the session manager drops the push.
+            await waitFor(
+              'GSM-18-tab-b-session-ready',
+              () => window.__onwardTerminalDebug?.getSessionState?.(taskBId)?.status === 'ready',
+              10000,
+              80
+            )
+
+            // Direct DOM probe: read each task's branch / colour / cwd
+            // regardless of which tab is currently active. Each tab's
+            // TerminalGrid mounts its own `.terminal-grid-wrapper`, but
+            // `data-terminal-id` is unique app-wide and a hidden tab's
+            // cells stay in the DOM (hidden via the CSS class, not
+            // unmounted) — see App.tsx "Render all Tab terminals, hiding
+            // inactive ones to keep them alive".
+            const probeTask = (taskId: string) => {
+              const cell = document.querySelector(
+                `.terminal-grid-cell[data-terminal-id="${taskId}"]`
+              )
+              if (!cell) {
+                return { branch: null, colour: null, cwd: null, present: false }
+              }
+              const chip = cell.querySelector('.terminal-grid-branch')
+              const cwdEl = cell.querySelector('.terminal-grid-adaptive-cwd') as HTMLElement | null
+              let colour: MirrorColour | null = null
+              if (chip) {
+                if (chip.classList.contains('terminal-grid-branch--modified')) colour = 'modified'
+                else if (chip.classList.contains('terminal-grid-branch--added')) colour = 'added'
+                else if (chip.classList.contains('terminal-grid-branch--unknown')) colour = 'unknown'
+                else colour = 'clean'
+              }
+              return {
+                branch: chip?.textContent?.trim() || null,
+                colour,
+                cwd: cwdEl?.getAttribute('title') ?? cwdEl?.textContent?.trim() ?? null,
+                present: true
+              }
+            }
+
+            // Push repo-A to BOTH tasks. Tab A still owns repo-A from
+            // GSM-17 cleanup, so we explicitly re-push to make the test
+            // standalone.
+            await pushOscCwd(taskAId, repoA.abs)
+            await pushOscCwd(taskBId, repoA.abs)
+
+            const bothCleanReady = await waitFor(
+              'GSM-18-both-tasks-clean-baseline',
+              () => {
+                const headerA = probeTask(taskAId)
+                const headerB = probeTask(taskBId)
+                return (
+                  headerA.branch === repoA.entry.branch &&
+                  headerB.branch === repoA.entry.branch &&
+                  headerA.colour === 'clean' &&
+                  headerB.colour === 'clean'
+                )
+              },
+              10000,
+              80
+            )
+            const baselineHeaderA = probeTask(taskAId)
+            const baselineHeaderB = probeTask(taskBId)
+            record('GSM-18e-both-tasks-clean-baseline', bothCleanReady, {
+              taskA: baselineHeaderA,
+              taskB: baselineHeaderB,
+              repoRoot: repoA.abs,
+              expectedBranch: repoA.entry.branch
+            })
+
+            if (bothCleanReady && !cancelled()) {
+              // Run N=5 modify-commit cycles. Each trial:
+              //   1. Modify a tracked file → both tabs flip to modified.
+              //   2. Real `git commit` via Tab A's task → both tabs flip
+              //      back to clean within the GitStateMirror budget.
+              // The aggregate boolean asserts EVERY trial succeeded
+              // (CLAUDE.md "boolean correctness" rule for N=5 trials).
+              const TWO_TAB_TRIALS = 5
+              const HEADER_BUDGET_MS = 8000
+              const perTrialEvidence: Array<Record<string, unknown>> = []
+              let aggregateOk = true
+              let lastCleanContent = REPO_A_MAIN_BASELINE
+
+              try {
+                await mutate.modifyFile(repoA.abs, 'src/main.ts', lastCleanContent)
+                for (let trial = 0; trial < TWO_TAB_TRIALS && !cancelled(); trial += 1) {
+                  // ----- Modify tracked file -----
+                  const dirtyContent = `export const REPO = "A-crosstab-${trial}"\n`
+                  await mutate.modifyFile(repoA.abs, 'src/main.ts', dirtyContent)
+                  const bothModified = await waitFor(
+                    `GSM-18-${trial}-both-modified`,
+                    () => {
+                      const headerA = probeTask(taskAId)
+                      const headerB = probeTask(taskBId)
+                      return headerA.colour === 'modified' && headerB.colour === 'modified'
+                    },
+                    HEADER_BUDGET_MS,
+                    80
+                  )
+                  const modifiedHeaderA = probeTask(taskAId)
+                  const modifiedHeaderB = probeTask(taskBId)
+
+                  // ----- Real `git commit` via Tab A's task -----
+                  const commitPorcelain = await commitAllAndReadPorcelainViaTerminal(
+                    `gsm-18-${trial}-commit-clean`,
+                    taskAId,
+                    repoA.abs,
+                    `GSM-18 cross-tab commit ${trial}`
+                  )
+                  const bothCleanAfterCommit = await waitFor(
+                    `GSM-18-${trial}-both-clean-after-commit`,
+                    () => {
+                      const headerA = probeTask(taskAId)
+                      const headerB = probeTask(taskBId)
+                      return headerA.colour === 'clean' && headerB.colour === 'clean'
+                    },
+                    HEADER_BUDGET_MS,
+                    80
+                  )
+                  const cleanHeaderA = probeTask(taskAId)
+                  const cleanHeaderB = probeTask(taskBId)
+                  lastCleanContent = commitPorcelain.content === '' ? dirtyContent : lastCleanContent
+
+                  const trialOk = bothModified
+                    && bothCleanAfterCommit
+                    && commitPorcelain.content === ''
+                    && cleanHeaderA.branch === repoA.entry.branch
+                    && cleanHeaderB.branch === repoA.entry.branch
+                  if (!trialOk) aggregateOk = false
+
+                  perTrialEvidence.push({
+                    trial,
+                    bothModifiedOk: bothModified,
+                    bothCleanAfterCommitOk: bothCleanAfterCommit,
+                    commitPorcelain: commitPorcelain.content,
+                    modifiedHeaderA,
+                    modifiedHeaderB,
+                    cleanHeaderA,
+                    cleanHeaderB
+                  })
+                }
+              } finally {
+                await mutate.modifyFile(repoA.abs, 'src/main.ts', lastCleanContent).catch(() => undefined)
+                await window.electronAPI.git.forceRefresh(repoA.abs).catch(() => false)
+              }
+
+              const restoredClean = await waitFor(
+                'GSM-18-final-clean-restored',
+                () => {
+                  const headerA = probeTask(taskAId)
+                  const headerB = probeTask(taskBId)
+                  return headerA.colour === 'clean' && headerB.colour === 'clean'
+                },
+                HEADER_BUDGET_MS,
+                80
+              )
+
+              record('GSM-18-cross-tab-two-tabs-commit-to-clean', aggregateOk && restoredClean, {
+                description: 'Two Tasks in DIFFERENT tabs sharing one worktree must render identical dirty / clean Git colour and converge to clean within the GitStateMirror budget after a real `git commit`',
+                trials: TWO_TAB_TRIALS,
+                headerBudgetMs: HEADER_BUDGET_MS,
+                tabAId,
+                tabBId,
+                taskAId,
+                taskBId,
+                evidence: perTrialEvidence
+              })
+            }
+
+            // Tear down: switch back to Tab A so subsequent assertions
+            // (the GSM-13 trace check) see the original tab layout.
+            getAppDebug()?.switchToTabById(tabAId)
+            await waitFor(
+              'GSM-18-restore-tab-a-active',
+              () => getAppDebug()?.getActiveTabId() === tabAId,
+              3000,
+              40
+            )
+          }
+        }
+      }
+    }
+  }
+
   if (!cancelled()) {
     const traceInfo = await window.electronAPI.debug.getPerfTraceInfo()
     record('GSM-13-trace-marker-mirror-events-expected', Boolean(traceInfo?.logPath), {
