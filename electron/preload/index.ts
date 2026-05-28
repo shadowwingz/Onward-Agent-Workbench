@@ -826,6 +826,17 @@ export interface GitAPI {
    * router routes to the worker.
    */
   pushCwd: (terminalId: string, newCwd: string | null) => void
+  /**
+   * Notification that `pushCwd`'s raw value was rejected by the main-side
+   * filesystem check. The renderer-side OSC handler commits the raw cwd
+   * synchronously to `oscDetectedCwds` for the <50 ms latency win; this
+   * back-channel lets us roll back phantom commits (free-text OSC 7
+   * payloads, mistyped CurrentDir, deleted directories the OSC handler
+   * raced with). The renderer matches by `(terminalId, rawCwd)` and only
+   * clears the entry when the speculative value is still pinned to the
+   * rejected raw cwd.
+   */
+  onMirrorCwdRejected: (callback: (terminalId: string, rawCwd: string) => void) => () => void
   /** Request the diff body for a single file via the mirror's stat-token cache. */
   requestFileBody: (cwd: string, fileKey: string, force: boolean) => Promise<unknown | null>
   /**
@@ -1777,6 +1788,21 @@ const gitAPI: GitAPI = {
 
   pushCwd: (terminalId: string, newCwd: string | null) => {
     ipcRenderer.send(IPC.GIT_STATE_PUSH_CWD, terminalId, newCwd)
+  },
+
+  // Rolls back the renderer's speculative `oscDetectedCwds` entry when
+  // main's `pushTerminalCwd` rejected the raw cwd (path does not exist
+  // or fails normalisation). The renderer-side OSC handler commits the
+  // OSC-parsed cwd synchronously for the <50 ms latency win, so we need
+  // this back-channel to undo phantom entries (e.g. OSC 7 with free text).
+  onMirrorCwdRejected: (callback: (terminalId: string, rawCwd: string) => void) => {
+    const listener = (_: Electron.IpcRendererEvent, terminalId: string, rawCwd: string) => {
+      callback(terminalId, rawCwd)
+    }
+    ipcRenderer.on(IPC.GIT_STATE_MIRROR_CWD_REJECTED, listener)
+    return () => {
+      ipcRenderer.removeListener(IPC.GIT_STATE_MIRROR_CWD_REJECTED, listener)
+    }
   },
 
   requestFileBody: (cwd: string, fileKey: string, force: boolean) => {

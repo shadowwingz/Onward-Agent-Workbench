@@ -758,6 +758,19 @@ export class TerminalSessionManager {
     return true
   }
 
+  /**
+   * Autotest-only: synthesize PTY output as if the underlying process had
+   * written `data` to its stdout. Used to reproduce OSC injection scenarios
+   * (TTM-29..31 / OSC 0/1/2 title sequences from Claude CLI and similar
+   * inner programs) without spawning a real shell that echoes the bytes.
+   */
+  injectPtyDataForAutotest(id: string, data: string): boolean {
+    const session = this.sessions.get(id)
+    if (!session?.open || typeof data !== 'string' || data.length === 0) return false
+    this.writeTerminalData(session, data)
+    return true
+  }
+
   scrollToBottom(id: string): boolean {
     const session = this.sessions.get(id)
     if (!session?.open) return false

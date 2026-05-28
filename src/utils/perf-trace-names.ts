@@ -383,6 +383,16 @@ export const PERF_TRACE_EVENT = {
   RENDERER_TERMINAL_OSC_CWD_DETECTED: 'renderer:terminal.osc-cwd-detected',
   MAIN_GIT_STATE_MIRROR_CWD_SWITCHED: 'main:git-state-mirror.cwd-switched',
   MAIN_GIT_STATE_MIRROR_CWD_IGNORED: 'main:git-state-mirror.cwd-ignored',
+  // Diagnostic breadcrumb for the Bug A reject channel: emitted INSIDE
+  // `broadcastCwdRejected` when main fans out the reject IPC to every live
+  // renderer. Pair with `renderer:terminal.osc-cwd-rolled-back` to verify the
+  // full main-reject → renderer-rollback round-trip from a perf trace.
+  MAIN_GIT_STATE_MIRROR_CWD_REJECTED_BROADCAST: 'main:git-state-mirror.cwd-rejected-broadcast',
+  // Renderer-side counterpart: emitted by TerminalGrid's onMirrorCwdRejected
+  // listener with `action` = 'rolled-back' | 'skipped-no-speculative' |
+  // 'skipped-value-mismatch' so the trace distinguishes "rollback happened"
+  // from "rollback was a no-op because speculative was already replaced".
+  RENDERER_TERMINAL_OSC_CWD_ROLLED_BACK: 'renderer:terminal.osc-cwd-rolled-back',
   WORKER_GIT_STATE_MIRROR_WATCHER_FIRE: 'worker:git-state-mirror.watcher-fire',
   WORKER_GIT_STATE_MIRROR_WATCHER_FILTERED: 'worker:git-state-mirror.watcher-filtered',
   WORKER_GIT_STATE_MIRROR_WATCHER_SKIPPED: 'worker:git-state-mirror.watcher-skipped',

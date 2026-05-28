@@ -70,6 +70,18 @@ type SendAndExecuteDelayPlatform = AppInfo['platform']
 
 interface AppDebugApi {
   triggerShortcutAction: (action: ShortcutAction) => boolean
+  /** Autotest-only: read the current tab id list (order matches the tab bar). */
+  getTabIds: () => string[]
+  /** Autotest-only: read the active tab id. */
+  getActiveTabId: () => string | null
+  /**
+   * Autotest-only: create a new tab. Returns `'pending'` when the request
+   * was accepted (the new tab id appears in `getTabIds()` on the next
+   * frame) or `null` when the tab limit has been reached.
+   */
+  createTab: () => 'pending' | null
+  /** Autotest-only: switch to an existing tab by id. Returns false if unknown. */
+  switchToTabById: (tabId: string) => boolean
 }
 
 interface SendAndExecuteDelayContext {
@@ -1945,6 +1957,7 @@ function AppWithSettings() {
 function SettingsProviderWithHandler() {
   const {
     switchTab,
+    createTab,
     updateActiveTab,
     activeTab,
     state,
@@ -2161,6 +2174,29 @@ function SettingsProviderWithHandler() {
       triggerShortcutAction: (action) => {
         handleShortcutAction(action)
         return true
+      },
+      // GSM-18 cross-tab coverage: tests need to open a second tab and
+      // navigate between tabs to verify that two Tasks in DIFFERENT tabs
+      // (which build separate TerminalGrid React trees and separate
+      // mirror subscription sets) still observe identical Git colour /
+      // branch text when pointed at the same worktree. Same-tab two-task
+      // coverage already exists in GSM-17.
+      getTabIds: () => state.tabs.map((t) => t.id),
+      getActiveTabId: () => state.activeTabId ?? null,
+      createTab: () => {
+        const before = new Set(state.tabs.map((t) => t.id))
+        const ok = createTab()
+        if (!ok) return null
+        // `createTab` updates AppState in the next tick; we can't read the
+        // new tabId synchronously from React state. Return null and let
+        // the caller poll `getTabIds`.
+        void before
+        return 'pending'
+      },
+      switchToTabById: (tabId) => {
+        if (!state.tabs.some((t) => t.id === tabId)) return false
+        switchTab(tabId)
+        return true
       }
     }
     debugWindow.__onwardAppDebug = api
@@ -2169,7 +2205,7 @@ function SettingsProviderWithHandler() {
         delete debugWindow.__onwardAppDebug
       }
     }
-  }, [handleShortcutAction])
+  }, [handleShortcutAction, state.tabs, state.activeTabId, createTab, switchTab])
 
   const restoreLastFocus = useCallback((reason: TerminalFocusRestoreReason) => {
     if (!activeTab) return

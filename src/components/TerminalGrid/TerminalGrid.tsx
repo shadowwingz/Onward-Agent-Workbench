@@ -583,6 +583,61 @@ export const TerminalGrid = memo(function TerminalGrid({
     }
   }, [oscDetectedCwds, terminals, onPersistTerminalCwd])
 
+  // OSC-detected cwd rollback — fires when main's pushTerminalCwd
+  // rejected a raw cwd (path does not exist / fails normalisation).
+  // The renderer-side OSC handler commits the cwd synchronously for
+  // the <50 ms latency win; this listener is the back-channel that
+  // undoes phantom commits. Without it, an inner program emitting
+  // `OSC 7 ; file:///<free-text>` would otherwise leave free text
+  // pinned in the task header indefinitely (TTM-32 reproducer).
+  useEffect(() => {
+    const dispose = window.electronAPI?.git?.onMirrorCwdRejected?.((terminalId, rawCwd) => {
+      const speculative = oscDetectedCwdsRef.current[terminalId]
+      // Three distinct outcomes the trace must distinguish so post-mortem
+      // can tell "rejection landed but a newer valid push had already
+      // replaced the phantom" from "rejection landed and we cleaned it
+      // up" from "rejection landed but our state never held this id".
+      if (!speculative) {
+        perfTrace(PERF_TRACE_EVENT.RENDERER_TERMINAL_OSC_CWD_ROLLED_BACK, {
+          terminalId,
+          rawCwd: rawCwd.slice(0, 512),
+          action: 'skipped-no-speculative'
+        })
+        return
+      }
+      if (speculative !== rawCwd) {
+        perfTrace(PERF_TRACE_EVENT.RENDERER_TERMINAL_OSC_CWD_ROLLED_BACK, {
+          terminalId,
+          rawCwd: rawCwd.slice(0, 512),
+          action: 'skipped-value-mismatch',
+          speculative: speculative.slice(0, 512)
+        })
+        return
+      }
+      setOscDetectedCwds((prev) => {
+        if (!(terminalId in prev)) return prev
+        const next = { ...prev }
+        delete next[terminalId]
+        return next
+      })
+      // Roll back the persisted cwd too: the OSC handler called
+      // `onPersistTerminalCwd(terminalId, cwd)` synchronously when
+      // it dispatched the local event. Persist null so the bad cwd
+      // doesn't survive across sessions.
+      const persisted = terminalIdsRef.current.includes(terminalId)
+      if (persisted) {
+        onPersistTerminalCwd(terminalId, null)
+      }
+      perfTrace(PERF_TRACE_EVENT.RENDERER_TERMINAL_OSC_CWD_ROLLED_BACK, {
+        terminalId,
+        rawCwd: rawCwd.slice(0, 512),
+        action: 'rolled-back',
+        persisted
+      })
+    })
+    return () => { try { dispose?.() } catch { /* ignore */ } }
+  }, [onPersistTerminalCwd])
+
   // GitStateMirror update listener — global, single subscription. Merges
   // every incoming delta into mirrorSnapshots keyed by cwd. Subsequent
   // useEffect manages per-cwd subscribe / unsubscribe lifecycle.
@@ -1809,6 +1864,11 @@ export const TerminalGrid = memo(function TerminalGrid({
         // Single click now opens the menu immediately — no debounce timer.
         setTitleMenuTerminalId(resolved)
         return true
+      },
+      injectPtyData: (data, terminalId) => {
+        const resolved = resolveTerminalId(terminalId)
+        if (!resolved) return false
+        return terminalSessionManager.injectPtyDataForAutotest(resolved, data)
       },
       simulateTitleDoubleClick: (terminalId) => {
         // Double-click rename has been removed from the production UX, but

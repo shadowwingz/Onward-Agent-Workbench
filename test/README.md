@@ -76,6 +76,8 @@ point at files under `test/unittest/`.
 | Bug fix: title double-click no longer enters rename | `run-terminal-title-rename` (TTM-11, TTM-14) |
 | Trace events emit on click / snapshot / rename | `run-terminal-title-rename` (TTM-20) |
 | Outside-click / Escape closes the title menu | `run-terminal-title-rename` (TTM-18, TTM-19) |
+| Bug fix: external OSC 0/1/2 title writes (Claude CLI, shell PROMPT_COMMAND, etc.) are ignored by the Task label — title / customName / cwd / manualNameRepoRoot stay byte-identical across 5 trials of PTY injection | `run-terminal-title-rename` (TTM-29, TTM-30, TTM-31) |
+| Bug fix: OSC 7 with a phantom `file:///` path that does not exist on disk is rolled back from the renderer's speculative `oscDetectedCwds` once the main process rejects via `GIT_STATE_MIRROR_CWD_REJECTED`, so the Task header does not pin free text as its cwd indefinitely | `run-terminal-title-rename` (TTM-32) |
 | Per-task ESC routes to terminal, not subpages | `run-subpage-navigation` (SN-*) |
 | Terminal startup creates a packaged PTY, accepts shell input, and zsh integration chains back to the user ZDOTDIR | `run-terminal-autofollow` (TA-00a, TA-00b, TA-00c) |
 | Terminal viewport keeps bottom-follow during refresh | `run-terminal-autofollow` (TA-02, TA-04, TA-06) |
@@ -117,7 +119,7 @@ point at files under `test/unittest/`.
 | Bug fix: 3-second request cache invalidated by FS watcher | `run-git-diff-staleness-and-submodule` (GDS-06..10, GDS-12, GDS-15) |
 | Bug fix: GitStateMirror parcel-watcher shutdown exits cleanly after an active subscription | `run-git-state-mirror-quit` (GSMQ-*) |
 | GitStateMirror watcher supervisor recovery, degraded polling, and failure injection | `run-git-state-mirror-latency` (GSM-15, GSM-16) |
-| Bug fix: two Tasks pointing at the same repo/worktree render the same Git status colour across clean/dirty cycles, including real commit-to-clean and post-commit dirty transitions | `run-git-state-mirror-latency` (GSM-17) + `test/unittest/terminal-grid-git-status-identity.test.mts` + `test/unittest/git-state-mirror-worker-core.test.mts` |
+| Bug fix: two Tasks pointing at the same repo/worktree render the same Git status colour across clean/dirty cycles, including real commit-to-clean and post-commit dirty transitions (same-tab two-task layout AND cross-tab two-task each in its own TerminalGrid). Cross-tab path exercises router refCount + fanout to multiple subscribers and asserts both tabs converge to clean within the GitStateMirror budget after a real `git commit` | `run-git-state-mirror-latency` (GSM-17, GSM-18) + `test/unittest/terminal-grid-git-status-identity.test.mts` + `test/unittest/git-state-mirror-worker-core.test.mts` |
 | Snapshot service caches submodule meta (cache-hit / capture / invalidate) | `run-git-diff-staleness-and-submodule` (GDS-11, GDS-16) |
 | Trace markers emitted on watcher / freshness / snapshot paths | `run-git-diff-staleness-and-submodule` (GDS-12, GDS-16) |
 | Files over 3 MB prompt in Git Diff, cancel shows a clear message, continue displays content | `run-git-large-file-confirmation` (GLF-01..06) + `test/unittest/git-large-file-policy.test.mts` |

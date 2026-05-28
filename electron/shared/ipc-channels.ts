@@ -131,6 +131,13 @@ export const IPC = {
   GIT_STATE_MIRROR_REQUEST_FILE_BODY: 'git-state-mirror:request-file-body',
   GIT_STATE_MIRROR_FILE_BODY_UPDATE: 'git-state-mirror:file-body-update',
   GIT_STATE_PUSH_CWD: 'git-state-mirror:push-cwd',
+  // Main → renderer: emitted when `pushTerminalCwd` rejects a raw cwd
+  // (path does not exist, fails normalization, etc.). Renderer uses this
+  // to roll back any speculative `oscDetectedCwds` entry it dispatched
+  // before the main-side filesystem check ran. Closes the bug class where
+  // an inner program emits `OSC 7 ; file:///<free-text>` and the renderer
+  // commits the free text as a phantom cwd that never auto-recovers.
+  GIT_STATE_MIRROR_CWD_REJECTED: 'git-state-mirror:cwd-rejected',
   // Worker thread → main → renderer watcher supervisor health. Hard
   // watcher-error is reserved for failed watcher + failed fallback refresh.
   GIT_STATE_MIRROR_WATCHER_STATUS: 'git-state-mirror:watcher-status',
