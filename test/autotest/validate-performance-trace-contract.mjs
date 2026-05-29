@@ -13,8 +13,18 @@ if (!traceFile) {
 }
 
 const raw = readFileSync(traceFile, 'utf8')
-const parsed = JSON.parse(raw)
-const events = Array.isArray(parsed.traceEvents) ? parsed.traceEvents : []
+// Support both the legacy single-file JSON format { traceEvents: [...] } and
+// the current NDJSON chunked format where each line is one Chrome Trace Event.
+let events
+const trimmed = raw.trim()
+if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+  const parsed = JSON.parse(trimmed)
+  events = Array.isArray(parsed.traceEvents) ? parsed.traceEvents : []
+} else {
+  events = trimmed.split('\n')
+    .filter((line) => line.trim())
+    .map((line) => JSON.parse(line))
+}
 const failures = []
 const rows = []
 

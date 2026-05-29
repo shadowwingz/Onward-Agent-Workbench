@@ -3781,6 +3781,15 @@ export function ProjectEditor({
     sizeBytes: number
   }) => {
     return new Promise<FileOpenChoiceResult>((resolve) => {
+      // In autotest mode the dialog must never block test execution.
+      // Auto-select 'text' so navigation-marker .txt files (which may appear
+      // binary on Windows due to UTF-16 LE output from the terminal) open
+      // without user interaction.  The remember flag is false so the choice
+      // does not persist across test suites.
+      if (window.electronAPI?.debug?.autotest) {
+        resolve({ mode: 'text', remember: false })
+        return
+      }
       fileOpenChoiceResolveRef.current = resolve
       setFileOpenChoiceDialog({
         path: params.path,

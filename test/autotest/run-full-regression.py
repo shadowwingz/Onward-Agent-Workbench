@@ -62,6 +62,15 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import List, Optional
 
+# Force UTF-8 output so runner logs containing Unicode characters (e.g. ANSI
+# escape sequences or non-ASCII identifiers) do not crash the orchestrator on
+# Windows where the console code page may default to GBK / CP936.
+# `reconfigure` is Python 3.7+; the `hasattr` guard keeps this safe on older
+# interpreters that might be found on minimal CI images.
+for _stream in [sys.stdout, sys.stderr]:
+    if hasattr(_stream, 'reconfigure'):
+        _stream.reconfigure(encoding='utf-8', errors='replace')
+
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 # Mirrors test/full-regression-checklist.md § 7 SCRIPTS array.
@@ -151,15 +160,24 @@ PER_SCRIPT_TIMEOUT_SEC = 180
 # exceeds the 180s default. Add entries here (not by patching the runner) so
 # the orchestrator's authority remains the single source of truth.
 PER_SCRIPT_TIMEOUT_OVERRIDES_SEC = {
-    # GitDiff staleness + submodule walks through 46 distinct GDS-* cases;
-    # ~270s end-to-end after the GitStateMirror Worker bring-up overhead.
-    "test/autotest/run-git-diff-staleness-and-submodule-autotest.sh": 360,
+    # GitDiff staleness + submodule walks through 46 distinct GDS-* cases.
+    # Git operations are slow on Windows; individual steps can exceed 15s.
+    # Measured: test was at 317s during a sleep and was killed at 360s.
+    "test/autotest/run-git-diff-staleness-and-submodule-autotest.sh": 600,
     # GitDiff click-latency suite measures multi-trial first-click vs
     # cache-warm latencies; needs more headroom than 180s allows.
     "test/autotest/run-git-diff-click-latency-autotest.sh": 300,
-    # PDF / EPUB preview + search are I/O-heavy on large fixtures.
-    "test/autotest/run-pdf-epub-preview-autotest.sh": 300,
+    # PDF / EPUB suites render large binary fixtures through PDF.js; the test
+    # source for pdf-epub-preview alone is 1000+ lines covering font, outline,
+    # search, and state-restore.  Measured: 88 assertions completed in 600s
+    # (pdf-state-scale-changed, near end of suite) — needs ~120s more headroom.
+    "test/autotest/run-pdf-epub-preview-autotest.sh": 900,
+    # pdf-epub-full adds diff + history on top of preview.
+    "test/autotest/run-pdf-epub-full-autotest.sh": 1200,
     "test/autotest/run-preview-search-autotest.sh": 300,
+    # Longtail suite simulates many keystrokes across 5+ latency scenarios;
+    # 180s default is not enough on Windows dev boxes.
+    "test/autotest/run-prompt-input-longtail-autotest.sh": 360,
     # CPU gate samples preview idle, post-scroll recovery, split mode, and editor-only idle windows.
     "test/autotest/run-markdown-preview-cpu-autotest.sh": 300,
     # GitStateMirror latency suite runs 3 passes (baseline + 2 watcher-
@@ -380,6 +398,32 @@ def run_one(
     env = os.environ.copy()
     env["ONWARD_USER_DATA_DIR"] = user_data_dir
     env["ONWARD_REPO_ROOT"] = str(REPO_ROOT)
+
+    # Inject the orchestrator's own Python as PYTHON3 so .sh runners can use
+    # ${PYTHON3:-python3} portably.  On Windows, 'python3' is not a recognized
+    # command alias, but sys.executable always points to the running interpreter.
+    env["PYTHON3"] = sys.executable
+
+    # On Windows, Python spawns bash with the raw Windows PATH, so POSIX tools
+    # such as find(1) and sort(1) resolve to System32 built-ins (DOS find.exe,
+    # DOS sort.exe) rather than the GNU versions bundled with Git for Windows.
+    # Prepend Git Bash's usr/bin (GNU coreutils) and mingw64/bin so every
+    # runner sees the correct tools regardless of the invoking shell's PATH.
+    if IS_WINDOWS:
+        bash_path = Path(bash).resolve()
+        for candidate_root in [
+            bash_path.parent,
+            bash_path.parent.parent,
+            bash_path.parent.parent.parent,
+        ]:
+            if (candidate_root / "usr" / "bin" / "find.exe").exists():
+                prepend = os.pathsep.join([
+                    str(candidate_root / "usr" / "bin"),
+                    str(candidate_root / "mingw64" / "bin"),
+                    str(candidate_root / "bin"),
+                ])
+                env["PATH"] = prepend + os.pathsep + env.get("PATH", "")
+                break
 
     start = time.monotonic()
     log_fh = log_path.open("w", encoding="utf-8")

@@ -54,10 +54,23 @@ if ! grep -q "PT-09-no-dropped-events" "$LOG_FILE"; then
   exit 1
 fi
 
-TRACE_FILE="$(sed -n 's/.*\[PerfTrace\] Active (ONWARD_PERF_TRACE=1): //p' "$LOG_FILE" | tail -n 1)"
-if [[ -z "$TRACE_FILE" || ! -f "$TRACE_FILE" ]]; then
-  echo "Performance trace file was not written" >&2
+# The log now emits: [PerfTrace] enabled format=ndjson-chunked dir=<dir> (<kind>)
+# Two-stage sed: first extract everything after 'dir=', then strip the
+# trailing ' (<kind>)' suffix.  Two passes avoids BRE greedy-match issues
+# across BSD (macOS) and GNU sed.
+TRACE_DIR="$(sed -n 's/.*\[PerfTrace\] enabled format=ndjson-chunked dir=//p' "$LOG_FILE" | \
+  sed 's/ ([^)]*$//' | tail -n 1)"
+if [[ -z "$TRACE_DIR" || ! -d "$TRACE_DIR" ]]; then
+  echo "Performance trace directory not found in log (expected [PerfTrace] enabled ...)" >&2
   tail -n 40 "$LOG_FILE" >&2
+  exit 1
+fi
+
+# Pick the most recently written chunk for contract validation.
+TRACE_FILE="$(ls -t "$TRACE_DIR"/perf-*.jsonl 2>/dev/null | head -n 1)"
+if [[ -z "$TRACE_FILE" || ! -f "$TRACE_FILE" ]]; then
+  echo "No performance trace chunks found in $TRACE_DIR" >&2
+  ls -la "$TRACE_DIR" >&2
   exit 1
 fi
 

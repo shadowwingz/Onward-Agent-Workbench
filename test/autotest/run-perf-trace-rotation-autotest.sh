@@ -41,13 +41,19 @@ if [[ ! -x "$APP_BIN" ]]; then
 fi
 
 APP_NAME="$(basename "$APP_BIN")"
-TRACE_DIR_A="$(mktemp -d "${TMPDIR:-/tmp}/onward-trot-A.XXXXXX")"
-TRACE_DIR_B="$(mktemp -d "${TMPDIR:-/tmp}/onward-trot-B.XXXXXX")"
+# SYN_ROOT_{A,B} serve as ONWARD_REPO_ROOT.  The trace store resolver looks for
+# <ONWARD_REPO_ROOT>/traces/perf and writes chunks there.  Creating the subdir
+# as a real directory avoids symlinks, which require elevated privileges on Windows.
+SYN_ROOT_A="$(mktemp -d "${TMPDIR:-/tmp}/onward-trot-A.XXXXXX")"
+SYN_ROOT_B="$(mktemp -d "${TMPDIR:-/tmp}/onward-trot-B.XXXXXX")"
+TRACE_DIR_A="$SYN_ROOT_A/traces/perf"
+TRACE_DIR_B="$SYN_ROOT_B/traces/perf"
 USER_DATA_DIR_A="$(mktemp -d "${TMPDIR:-/tmp}/onward-trot-Aud.XXXXXX")"
 USER_DATA_DIR_B="$(mktemp -d "${TMPDIR:-/tmp}/onward-trot-Bud.XXXXXX")"
+mkdir -p "$TRACE_DIR_A" "$TRACE_DIR_B"
 
 cleanup() {
-  rm -rf "$TRACE_DIR_A" "$TRACE_DIR_B" "$USER_DATA_DIR_A" "$USER_DATA_DIR_B" 2>/dev/null || true
+  rm -rf "$SYN_ROOT_A" "$SYN_ROOT_B" "$USER_DATA_DIR_A" "$USER_DATA_DIR_B" 2>/dev/null || true
   pkill -x "$APP_NAME" 2>/dev/null || true
 }
 trap cleanup EXIT
@@ -68,15 +74,9 @@ echo "=== Phase A: rotation + budget eviction (stress 80 MB) ===" | tee -a "$LOG
 pkill -x "$APP_NAME" 2>/dev/null || true
 sleep 0.5
 
-# Use ONWARD_REPO_ROOT to redirect traces back into our temp dir for the
-# autotest. The trace-store resolver picks this up first (see
-# electron/main/trace-store.ts::resolveTraceStoreRoot). We set
-# ONWARD_REPO_ROOT to a synthetic root whose `traces/perf` subdir is our
-# test dir; symlink the layout so the resolver finds it.
-SYN_ROOT_A="$(dirname "$TRACE_DIR_A")/syn-A"
-mkdir -p "$SYN_ROOT_A/traces"
-ln -sfn "$TRACE_DIR_A" "$SYN_ROOT_A/traces/perf"
-
+# SYN_ROOT_A already has traces/perf created as a real directory (see setup
+# above). Set ONWARD_REPO_ROOT so the trace-store resolver writes chunks into
+# SYN_ROOT_A/traces/perf (= TRACE_DIR_A).
 ONWARD_AUTOTEST=1 \
   ONWARD_AUTOTEST_SKIP_CONSENT=1 \
   ONWARD_PERF_TRACE=1 \
@@ -141,10 +141,6 @@ echo "=== Phase B: SIGKILL mid-write resilience ===" | tee -a "$LOG_FILE"
 
 pkill -x "$APP_NAME" 2>/dev/null || true
 sleep 0.5
-
-SYN_ROOT_B="$(dirname "$TRACE_DIR_B")/syn-B"
-mkdir -p "$SYN_ROOT_B/traces"
-ln -sfn "$TRACE_DIR_B" "$SYN_ROOT_B/traces/perf"
 
 ONWARD_AUTOTEST=1 \
   ONWARD_AUTOTEST_SKIP_CONSENT=1 \
