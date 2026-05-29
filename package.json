@@ -19,7 +19,7 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "typecheck": "tsc -p tsconfig.typecheck.json --noEmit",
-    "test:unit": "node test/unittest/run-unittest-suite.mjs",
+    "test:unit": "node test/autotest/run-unittest-suite.mjs",
     "preview": "electron-vite preview",
     "postinstall": "electron-rebuild -f -w node-pty,better-sqlite3 && node scripts/ensure-node-pty-spawn-helper.js && node scripts/ensure-ripgrep-binary.js",
     "rebuild": "electron-rebuild -f -w node-pty,better-sqlite3",
@@ -32,8 +32,7 @@
     "dist:dev": "node scripts/dist-dev.js",
     "dist:release": "node scripts/dist-release.js",
     "generate-notices": "license-checker-rseidelsohn --production --plainVertical --out ThirdPartyNotices.txt && node scripts/normalize-notices.js",
-    "verify:seti-file-tree": "node test/autotest/seti-file-tree-icon-verify.mjs",
-    "test:unit": "node test/autotest/run-unittest-suite.mjs"
+    "verify:seti-file-tree": "node test/autotest/seti-file-tree-icon-verify.mjs"
   },
   "build": {
     "appId": "com.onward2.app",
@@ -141,6 +140,9 @@
       "rollup": "4.60.1",
       "tar": ">=7.5.8",
       "https-proxy-agent": ">=7.0.6"
+    },
+    "patchedDependencies": {
+      "@xterm/addon-webgl@0.18.0": "patches/@xterm__addon-webgl@0.18.0.patch"
     }
   },
   "devDependencies": {

@@ -47,6 +47,7 @@ import { testTerminalArchitectureBaseline } from './test-terminal-architecture-b
 import { testPromptInputLatency, testPromptInputLongtail } from './test-prompt-input-latency'
 import { testTerminalFocusActivation } from './test-terminal-focus-activation'
 import { testTerminalStress } from './test-terminal-stress'
+import { testRenderCorruptionStress } from './test-render-corruption-stress'
 import { testImageDiff } from './test-image-diff'
 import { testPdfEpubPreview } from './test-pdf-epub-preview'
 import { testPdfEpubDiff } from './test-pdf-epub-diff'
@@ -713,6 +714,16 @@ export async function runAllTests(ctx: AutotestContext): Promise<void> {
       log('phase5.8:begin')
       const results = await testTerminalStress(ctx)
       collectSuiteResults('TerminalStress', results)
+      await sleep(500)
+    }
+
+    // Phase 5.9: Render corruption stress — six-terminal pixel-fidelity probe
+    // for the multi-WebGL atlas-pollution / context-pressure rendering bug
+    // observed when six Tasks run heavy TUI workloads simultaneously.
+    if (!ctx.cancelled() && shouldRun('render-corruption-stress')) {
+      log('phase5.9:begin')
+      const results = await testRenderCorruptionStress(ctx)
+      collectSuiteResults('RenderCorruptionStress', results)
       await sleep(500)
     }
 

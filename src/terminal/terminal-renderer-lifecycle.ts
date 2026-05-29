@@ -405,7 +405,11 @@ export class TerminalRendererLifecycle {
     // suites measure frame timing and should use production-default
     // context options to avoid measurement skew.
     const suite = (debug.autotestSuite ?? '').toLowerCase()
-    const pixelProbingSuites = new Set(['terminal-blank-task-repro', 'terminal-focus-activation'])
+    const pixelProbingSuites = new Set([
+      'terminal-blank-task-repro',
+      'terminal-focus-activation',
+      'render-corruption-stress'
+    ])
     return suite.split(',').some((part) => pixelProbingSuites.has(part.trim()))
   }
 

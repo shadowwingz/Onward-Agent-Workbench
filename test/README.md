@@ -92,6 +92,7 @@ point at files under `test/unittest/`.
 | Bug fix: host surface events and later old-canvas restore events do not recreate or disturb WebGL while cooldown-backed DOM fallback is active | `run-terminal-focus-activation` (TFA-16, TFA-17, TFA-18) |
 | Terminal output rendering perf (frame budget, longtask) | `run-terminal-perf` (TP-*) |
 | Multi-task terminal stress under concurrent output | `run-terminal-stress` (ST-*) |
+| Bug fix: 6-task WebGL render corruption (garbled glyphs) root cause = xterm.js module-level shared texture atlas; all config-identical terminals share one TextureAtlas, and the per-page version counter collides on a _createNewPage merge re-index causing stale GPU texture rebinds to be skipped. RCS-ATLAS-01 proves 6 terminals share one atlas canvas; RCS-ATLAS-02 proves cross-terminal shared mutation (page-adds fire on siblings); RCS-ATLAS-03 guards the back-ported PR #5883 fix (global-monotonic page version). Drop patches/@xterm__addon-webgl@0.18.0.patch when upgrading to xterm.js >= 7.0.0 | `run-render-corruption-stress` (RCS-00..RCS-05, RCS-ATLAS-01, RCS-ATLAS-02, RCS-ATLAS-03) |
 | Off-renderer scheduling architecture invariants | `run-terminal-architecture-baseline` (TAB-00, TAB-01) |
 | Terminal layout / state restore across app restart | (`shouldRun('terminal-state-persistence')`, no shell runner) |
 | Per-Task font override (style settings) | (`shouldRun('per-agent-font')`, no shell runner) |
