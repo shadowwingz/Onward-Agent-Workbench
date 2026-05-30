@@ -90,7 +90,7 @@ function buildLaunch() {
   const sh = process.env.SHELL || '/bin/bash'
   const base = sh.split('/').pop()
   if (base === 'zsh') {
-    return { shell: sh, args: ['-i'], env: { ...env, ZDOTDIR: join(INTEGRATION_DIR, 'zsh-zdotdir') }, kind: 'zsh' }
+    return { shell: sh, args: ['-i'], env: { ...env, ZDOTDIR: join(INTEGRATION_DIR, 'zsh-zdotdir'), HISTFILE: '/dev/null' }, kind: 'zsh' }
   }
   // bash (and unknown POSIX shells fall back to bash): source the real bash.sh
   // as the rcfile so PROMPT_COMMAND emits OSC 633 + OSC 7.

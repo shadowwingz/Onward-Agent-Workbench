@@ -120,7 +120,7 @@ function openPackagedApp(appPath) {
     // Launch the GUI exe detached. Do NOT route through `cmd /c start`: the
     // product name contains spaces ("Under Development <ver>-<branch>.exe"), so
     // `cmd /c start "" <unquoted path>` splits the path at the first space
-    // ("...\Under"), which both fails to launch ("系统找不到文件") AND leaves
+    // ("...\Under"), which both fails to launch ("The system cannot find the file specified") AND leaves
     // the blocking spawnSync waiting — the build appears to hang. spawn() with
     // an args array passes the full path as a single argument (no shell, no
     // quoting), and detached + unref makes it fire-and-forget so the build
