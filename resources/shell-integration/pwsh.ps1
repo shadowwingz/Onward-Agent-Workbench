@@ -25,10 +25,17 @@ function global:Prompt {
     #      becomes `file://localhost/C:/foo`, not `file://localhostC:/foo`.
     $cwdForUri = $cwd -replace '\\', '/'
     $cwdForUri = $cwdForUri -replace ' ', '%20'
-    $host = if ($env:COMPUTERNAME) { $env:COMPUTERNAME } else { 'localhost' }
+    # MUST NOT be named `$host`: that is a read-only automatic variable in
+    # Windows PowerShell 5.x. Assigning to it raises a non-terminating error
+    # that the interactive prompt machinery treats as a failed prompt, so
+    # PowerShell discards the whole prompt (including the OSC writes below)
+    # and falls back to the bare `PS>` prompt — emitting ZERO cwd OSC. The
+    # renderer's xterm OSC parser then never fires and the Task status bar
+    # never reflects `cd`. Keep this as `$hostName` (or any non-reserved name).
+    $hostName = if ($env:COMPUTERNAME) { $env:COMPUTERNAME } else { 'localhost' }
     $esc = [char]0x1b
     $bel = [char]0x07
     Write-Host -NoNewline ($esc + ']633;P;Cwd=' + $cwd + $bel)
-    Write-Host -NoNewline ($esc + ']7;file://' + $host + '/' + $cwdForUri + $esc + '\')
+    Write-Host -NoNewline ($esc + ']7;file://' + $hostName + '/' + $cwdForUri + $esc + '\')
     & $Global:__OnwardOriginalPrompt
 }

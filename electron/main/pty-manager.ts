@@ -100,10 +100,13 @@ export class PtyManager {
       execArgs = ['-l']
     }
 
-    // On Windows, inject shell integration for CWD tracking via OSC 9;9
-    if (platform() === 'win32' && !command) {
-      execArgs = this.getWindowsShellArgs(shell)
-    }
+    // Windows PowerShell CWD tracking is handled by the pwsh.ps1 dot-source
+    // injected below (OSC 633 + OSC 7), the same richer path macOS/Linux use.
+    // The old OSC 9;9 `-EncodedCommand` prompt was removed: PowerShell swallows
+    // everything after a `-Command` string as that command's arguments, so when
+    // both were emitted the `-EncodedCommand` was dead AND the two mechanisms
+    // produced a confusing, conflicting arg list. cmd.exe still uses the PROMPT
+    // env var below (it has no .ps1 integration path).
 
     // Inject Onward Bridge API environment variables
     const apiPort = getApiPort()
@@ -523,32 +526,6 @@ export class PtyManager {
     return env
   }
 
-  // Build PowerShell args that set up a CWD-reporting prompt via OSC 9;9.
-  // Uses -EncodedCommand (Base64-encoded UTF-16LE) to avoid all command-line
-  // quoting issues with node-pty's argsToCommandLine escaping.
-  private getWindowsShellArgs(shell: string): string[] {
-    const lower = shell.toLowerCase()
-    if (lower.includes('pwsh') || lower.includes('powershell')) {
-      // Wrap the user's existing prompt (from $PROFILE) to prepend an
-      // invisible OSC 9;9 escape with the CWD.
-      const script = [
-        'if (Test-Path $PROFILE) { . $PROFILE }',
-        '$__onwardOrigPrompt = $function:prompt',
-        'if (-not $__onwardOrigPrompt) {',
-        '  $__onwardOrigPrompt = { "PS $($executionContext.SessionState.Path.CurrentLocation)$(' + "'>'" + ' * ($nestedPromptLevel + 1)) " }',
-        '}',
-        'function prompt {',
-        '  $p = $executionContext.SessionState.Path.CurrentLocation.Path',
-        '  "$([char]27)]9;9;$p$([char]7)" + (& $__onwardOrigPrompt)',
-        '}'
-      ].join('\n')
-      const encoded = Buffer.from(script, 'utf16le').toString('base64')
-      return ['-NoLogo', '-NoExit', '-EncodedCommand', encoded]
-    }
-    // cmd.exe uses the PROMPT env var (set in create())
-    return []
-  }
-
   private isCmdShell(shell: string): boolean {
     const lower = shell.toLowerCase()
     return lower.includes('cmd') && !lower.includes('powershell') && !lower.includes('pwsh')
@@ -717,9 +694,12 @@ export class PtyManager {
     }
 
     if (baseName === 'pwsh' || baseName === 'powershell') {
+      // -NoLogo suppresses the startup banner (previously contributed by the
+      // removed getWindowsShellArgs path). The dot-source installs the
+      // OSC 633 + OSC 7 prompt wrapper from pwsh.ps1.
       const psScript = join(integrationDir, 'pwsh.ps1')
       return {
-        argsPrepend: ['-NoExit', '-Command', `. '${psScript.replace(/'/g, "''")}'`],
+        argsPrepend: ['-NoLogo', '-NoExit', '-Command', `. '${psScript.replace(/'/g, "''")}'`],
         env: {},
         cleanupPath: null
       }

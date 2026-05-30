@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-const { execSync, spawnSync } = require('child_process')
+const { execSync, spawnSync, spawn } = require('child_process')
 const { existsSync, readFileSync, readdirSync } = require('fs')
 const { join } = require('path')
 
@@ -117,7 +117,16 @@ function openPackagedApp(appPath) {
     return
   }
   if (process.platform === 'win32') {
-    spawnSync('cmd', ['/c', 'start', '', appPath], { stdio: 'inherit', shell: true })
+    // Launch the GUI exe detached. Do NOT route through `cmd /c start`: the
+    // product name contains spaces ("Under Development <ver>-<branch>.exe"), so
+    // `cmd /c start "" <unquoted path>` splits the path at the first space
+    // ("...\Under"), which both fails to launch ("系统找不到文件") AND leaves
+    // the blocking spawnSync waiting — the build appears to hang. spawn() with
+    // an args array passes the full path as a single argument (no shell, no
+    // quoting), and detached + unref makes it fire-and-forget so the build
+    // script returns immediately.
+    const child = spawn(appPath, [], { detached: true, stdio: 'ignore' })
+    child.unref()
     return
   }
   spawnSync('xdg-open', [appPath], { stdio: 'inherit' })
