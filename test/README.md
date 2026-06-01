@@ -100,6 +100,7 @@ point at files under `test/unittest/`.
 | Renderer + main work scheduler unit tests | `test/unittest/main-work-scheduler-unit.mjs`, `renderer-work-scheduler-unit.mjs`, `terminal-output-scheduler-unit.mjs` (all executed by `run-unittest-suite`) |
 | 8-grid (2x4) preset, Custom layout popover, downsize confirm dialog, focusTerminal 7/8 shortcuts | `run-task-layout` (TLM-00..05) + `test/unittest/task-layout-utils.test.mts` (TLM-U-01..41) |
 | Terminal content right-click menu sends a manually ordered pinned Prompt to the clicked Task without touching Prompt history metadata | `run-prompt-editor-context-menu` (TPCM-01..03) |
+| Bug fix: idle renderer ~8% CPU (Windows-only) = terminal cwd ping-ponged 'D:/x' ↔ 'D:\x' because the OSC writer ('/') and git-watcher writer ('\') disagreed on the path separator and the persistence layer didn't canonicalize, defeating setTerminalLastCwd's idempotency → whole-tree re-render storm. Fix: `normalizePersistedTerminalCwd` canonicalizes to '/' + `updateState` bails out on the resulting no-op. | `run-appstate-render-loop` (CDP idle-churn smoke test ARC-00/01 via `check-renderer-idle-churn.mjs` — hang-proof) + `test/unittest/terminal-cwd-persist-canonical.test.mts` + `test/unittest/appstate-update-bailout.test.mts` |
 
 ### 2.2 Tab / Subpage navigation / Settings UI
 

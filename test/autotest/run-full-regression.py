@@ -75,6 +75,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 # Mirrors test/full-regression-checklist.md § 7 SCRIPTS array.
 SCRIPTS: List[str] = [
+    "test/autotest/run-appstate-render-loop-autotest.sh",
     "test/autotest/run-change-log-autotest.sh",
     "test/autotest/run-feedback-autotest.sh",
     "test/autotest/run-feedback-persistence-autotest.sh",
