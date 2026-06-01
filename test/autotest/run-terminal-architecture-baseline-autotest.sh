@@ -79,7 +79,12 @@ if [[ -n "$LINE" ]]; then
   # marker is parsed as a glob character class and strips the wrong prefix
   # ("[R" is dropped because R is in the class), corrupting JSON_PAYLOAD.
   JSON_PAYLOAD="${LINE#*"$MARKER"}"
-  printf '%s\n' "$JSON_PAYLOAD" | python3 -m json.tool > "$RESULT_FILE"
+  # Use json.dumps instead of json.tool: Python 3.13+ json.tool emits ANSI
+  # colour codes even when writing to a plain file, which breaks the later
+  # json.load() call in the baseline-summary step.
+  printf '%s\n' "$JSON_PAYLOAD" | "${PYTHON3:-python3}" -c \
+    "import json,sys; sys.stdout.write(json.dumps(json.loads(sys.stdin.read()),indent=2)+'\n')" \
+    > "$RESULT_FILE"
 fi
 
 if grep -q "\[AutoTest\] FAIL" "$LOG_FILE"; then
@@ -101,7 +106,7 @@ echo "  Log:    $LOG_FILE"
 echo "  Result: $RESULT_FILE"
 echo
 echo "=== Baseline summary ==="
-python3 - "$RESULT_FILE" <<'PY'
+"${PYTHON3:-python3}" - "$RESULT_FILE" <<'PY'
 import json
 import sys
 

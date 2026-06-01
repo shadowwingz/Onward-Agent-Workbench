@@ -6,17 +6,9 @@ set -euo pipefail
 
 REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
-BRANCH=$(git -C "$ROOT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
-VERSION=$(node -p "require('$ROOT_DIR/package.json').version" 2>/dev/null || echo "0.0.0")
-PRODUCT_NAME="Under Development ${VERSION}-${BRANCH}"
+source "$ROOT_DIR/test/autotest/resolve-dev-app-bin.sh"
 
-if [[ "$(uname)" == "Darwin" ]]; then
-  APP_BIN_DEFAULT="$ROOT_DIR/release/mac-arm64/${PRODUCT_NAME}.app/Contents/MacOS/${PRODUCT_NAME}"
-else
-  APP_BIN_DEFAULT=$(find "$ROOT_DIR/release" -maxdepth 1 -name "*.AppImage" 2>/dev/null | head -1)
-fi
-
-APP_BIN="${1:-$APP_BIN_DEFAULT}"
+APP_BIN="${1:-$(resolve_dev_app_bin "$ROOT_DIR")}"
 LOG_FILE="${2:-$REPO_ROOT/traces/test-logs/file-watch-autotest.log}"
 mkdir -p "$(dirname "$LOG_FILE")"
 if [[ ! -x "$APP_BIN" ]]; then

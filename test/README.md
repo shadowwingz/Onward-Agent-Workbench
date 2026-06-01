@@ -78,6 +78,7 @@ point at files under `test/unittest/`.
 | Outside-click / Escape closes the title menu | `run-terminal-title-rename` (TTM-18, TTM-19) |
 | Bug fix: external OSC 0/1/2 title writes (Claude CLI, shell PROMPT_COMMAND, etc.) are ignored by the Task label — title / customName / cwd / manualNameRepoRoot stay byte-identical across 5 trials of PTY injection | `run-terminal-title-rename` (TTM-29, TTM-30, TTM-31) |
 | Bug fix: OSC 7 with a phantom `file:///` path that does not exist on disk is rolled back from the renderer's speculative `oscDetectedCwds` once the main process rejects via `GIT_STATE_MIRROR_CWD_REJECTED`, so the Task header does not pin free text as its cwd indefinitely | `run-terminal-title-rename` (TTM-32) |
+| Bug fix (Windows): the real default shell emits a cwd OSC (633 / 7 / 9;9) after every `cd` so the Task status bar tracks the working directory — guards the pwsh.ps1 `$host` read-only regression that silenced all cwd OSC on Windows PowerShell 5.x; spawns the host shell via node-pty under Electron ABI, 5 cd trials, all must emit | `run-shell-integration-cwd` (SIC-01..SIC-05) + `test/unittest/shell-integration-cwd-osc.test.mts` |
 | Per-task ESC routes to terminal, not subpages | `run-subpage-navigation` (SN-*) |
 | Terminal startup creates a packaged PTY, accepts shell input, and zsh integration chains back to the user ZDOTDIR | `run-terminal-autofollow` (TA-00a, TA-00b, TA-00c) |
 | Terminal viewport keeps bottom-follow during refresh | `run-terminal-autofollow` (TA-02, TA-04, TA-06) |
@@ -99,6 +100,7 @@ point at files under `test/unittest/`.
 | Renderer + main work scheduler unit tests | `test/unittest/main-work-scheduler-unit.mjs`, `renderer-work-scheduler-unit.mjs`, `terminal-output-scheduler-unit.mjs` (all executed by `run-unittest-suite`) |
 | 8-grid (2x4) preset, Custom layout popover, downsize confirm dialog, focusTerminal 7/8 shortcuts | `run-task-layout` (TLM-00..05) + `test/unittest/task-layout-utils.test.mts` (TLM-U-01..41) |
 | Terminal content right-click menu sends a manually ordered pinned Prompt to the clicked Task without touching Prompt history metadata | `run-prompt-editor-context-menu` (TPCM-01..03) |
+| Bug fix: idle renderer ~8% CPU (Windows-only) = terminal cwd ping-ponged 'D:/x' ↔ 'D:\x' because the OSC writer ('/') and git-watcher writer ('\') disagreed on the path separator and the persistence layer didn't canonicalize, defeating setTerminalLastCwd's idempotency → whole-tree re-render storm. Fix: `normalizePersistedTerminalCwd` canonicalizes to '/' + `updateState` bails out on the resulting no-op. | `run-appstate-render-loop` (CDP idle-churn smoke test ARC-00/01 via `check-renderer-idle-churn.mjs` — hang-proof) + `test/unittest/terminal-cwd-persist-canonical.test.mts` + `test/unittest/appstate-update-bailout.test.mts` |
 
 ### 2.2 Tab / Subpage navigation / Settings UI
 

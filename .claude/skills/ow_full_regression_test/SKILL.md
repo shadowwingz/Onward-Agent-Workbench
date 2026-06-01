@@ -1,6 +1,6 @@
 ---
 name: ow_full_regression_test
-description: Run the Onward full automated-test regression. Invoked explicitly by the user. Test mode (default): clean dev build (`--build` mandatory), runs `python3 test/autotest/run-full-regression.py --build`, then reports pass/fail/skip counts and failing-runner names. No analysis, no edits. Repair mode (`--repair`): clusters FAIL/TIMEOUT entries from the newest `test/full-regression-results/<timestamp>/` by root cause, then per-cluster Plan-Mode → fix → `--build --only run-<suite>` verify loop tracked in `repair-progress.json`, finishing with one final `--build` full pass. Clean mode (`--clean`): wipes accumulated test artefacts (traces, regression results, autotest scratch) by delegating to `scripts/clean-test-data.py` so the user can reset before a fresh run without leaving the skill. The three modes do not chain.
+description: Run the Onward full automated-test regression. Invoked explicitly by the user. Test mode (default): clean dev build (`--build` mandatory), runs `python3 test/autotest/run-full-regression.py --build`, then reports pass/fail/skip counts and failing-runner names. No analysis, no edits to fix contract failures. Environment / toolchain blockers that stop test cases from executing (missing interpreter or pnpm, absent node_modules, ABI mismatch, stale build artefacts, leftover processes, full disk) are auto-healed and the run retried — bounded per symptom — so every test case actually runs; this self-heal never edits source, test, or fixture files to flip a red assertion. Repair mode (`--repair`): clusters FAIL/TIMEOUT entries from the newest `test/full-regression-results/<timestamp>/` by root cause, then per-cluster Plan-Mode → fix → `--build --only run-<suite>` verify loop tracked in `repair-progress.json`, finishing with one final `--build` full pass. Clean mode (`--clean`): wipes accumulated test artefacts (traces, regression results, autotest scratch) by delegating to `scripts/clean-test-data.py` so the user can reset before a fresh run without leaving the skill. The three modes do not chain.
 ---
 
 # ow_full_regression_test
@@ -21,6 +21,100 @@ clean first; it operates on the existing case file on disk.
 `--clean` never runs tests. If the user passes more than one mode
 flag at once (e.g. `--build --clean`, `--repair --clean`), ask which
 they meant before doing anything. The user picks each transition.
+
+---
+
+## Environment self-heal (every run-bearing step)
+
+Mode A's regression run and Mode B's per-cluster verify / final pass
+all depend on a healthy toolchain. Before and during any `--build`
+invocation you MUST separate two failure classes and treat them in
+opposite ways:
+
+- **Environment / toolchain failure** — the run cannot *reach* or
+  *finish* the test assertions because a prerequisite is missing or
+  broken: the build never produces a package, a runner can't launch
+  the app, the interpreter / package manager isn't found,
+  dependencies aren't installed, a leftover process holds a lock, the
+  disk is full. The orchestrator aborts (or a runner errors out)
+  **before the test contract is actually exercised**. These are yours
+  to fix automatically — heal the environment, then re-run, looping
+  until every test case actually executes. No Plan Mode, no user
+  approval; these are environment chores, not contract changes.
+
+- **Test-contract failure** — a runner launched, drove the app, and an
+  assertion went red (`[AutoTest] FAIL`, `AssertionError`, a
+  `FAIL` / `TIMEOUT` entry with assertion markers). The environment
+  was healthy; the app behaviour drifted. Self-heal must **never**
+  touch these. Mode A reports them as counts and stops; fixing them
+  is Mode B (`--repair`) behind its Plan-Mode + approval gate.
+
+The dividing question is always: **did every test case get to run?**
+If a case never executed because the toolchain choked, self-heal and
+retry. If it executed and disagreed with the app, that is a contract
+failure — leave it for the user / repair mode. The goal of this
+section is narrow and literal: get every test case to *execute*
+(pass, fail, or legitimately skip), not to make any case pass.
+
+### Heal-and-retry loop
+
+When a run-bearing step fails for an environment reason:
+
+1. **Read the actual error** from the orchestrator output / build log
+   — never guess. Name the missing or broken prerequisite.
+2. **Apply the narrowest heal** that addresses exactly that
+   prerequisite (table below). Scope is strictly
+   environment / toolchain / process / dependency / disk — never
+   source, test, fixture, or orchestrator files.
+3. **Re-run** the same `--build` invocation from the top (the clean
+   `out/` + `release/` wipe still applies).
+4. **Bound it.** At most ~3 heal attempts per distinct symptom. If the
+   identical error survives its targeted heal, stop thrashing — report
+   what you tried and the remaining blocker, and hand back to the
+   user. Do not loop forever and do not escalate to broader,
+   more destructive actions.
+5. **Report every heal you applied** (what was missing, what command
+   fixed it) in the final summary, so the environment drift is visible
+   and the user can decide whether to make it permanent (e.g. add a
+   genuinely-missing dependency to `package.json` themselves).
+
+### Common environment symptoms → heal
+
+Cross-platform applies throughout (macOS / Linux / Windows); pick the
+host-appropriate command.
+
+| Symptom in the log                                            | Likely cause                                  | Heal, then re-run                                                                                  |
+|---------------------------------------------------------------|-----------------------------------------------|----------------------------------------------------------------------------------------------------|
+| `python3: command not found` / `python3` not recognized       | wrong interpreter name for this host          | use `py` on Windows, `python3` on macOS / Linux to launch the orchestrator                          |
+| `pnpm: command not found` / not recognized                    | package manager not on PATH                   | `corepack enable pnpm` (fallback `npm i -g pnpm`), confirm with `pnpm -v`                            |
+| build / runner: `Cannot find module …`, `ERR_MODULE_NOT_FOUND`| `node_modules` absent or stale                | `pnpm install`, then rebuild                                                                         |
+| `electron … ENOENT` / Electron binary missing                 | install incomplete / postinstall skipped      | `pnpm install` (re-runs the electron download); if still missing, `node node_modules/electron/install.js` |
+| native module `NODE_MODULE_VERSION` / ABI mismatch            | electron version changed vs prebuilt binary   | `pnpm rebuild`, or `pnpm electron-builder install-app-deps`                                          |
+| app won't launch / `EADDRINUSE` / debug port held             | leftover dev-app or helper process            | kill by **EXACT** name only, then re-run                                                            |
+| `ENOSPC` / no space left on device                            | gitignored scratch piled up                   | `python3 scripts/clean-test-data.py --traces --autotest-results` (scratch only — never the regression-results dir, which may hold an active case file), then re-run; if still full, report |
+| runner `.sh`: `Permission denied` (POSIX)                     | lost the executable bit                       | `chmod +x test/autotest/run-*.sh`                                                                   |
+| stale package despite source edits                            | `out/` / `release/` not wiped                 | confirm `--build` ran its clean wipe; if it was bypassed, wipe both and rebuild                     |
+
+### Cross-platform & process-safety notes
+
+- **Interpreter name.** This skill writes `python3` for POSIX. On
+  Windows launch the orchestrator with the platform's Python (`py`,
+  per the global rule). A bare `python3: not found` on Windows is
+  itself an environment symptom — switch to `py`, don't report defeat.
+- **Killing leftover processes** uses EXACT-name matching only
+  (`pkill -x "<exact>"` / `taskkill /IM "<exact>.exe"` /
+  `Get-Process -Name "<exact>"`). Never wildcard or substring — the
+  same hard rule as `CLAUDE.md`; a loose selector can kill the user's
+  Claude Code session and other builds.
+- **Dependency heals are install / rebuild only** (`pnpm install`,
+  `corepack enable`, `pnpm rebuild`). Never hand-edit `package.json`
+  or the lockfile to force a build green. If a dependency is genuinely
+  missing from the manifest, report it — do not silently add it.
+- **The `ENOSPC` heal is not Mode C.** It shells out to the cleanup
+  script for *scratch* categories only and never enters the
+  user-facing `--clean` mode; it must skip `test/full-regression-results/`
+  so an in-progress `repair-progress.json` case file is never
+  destroyed.
 
 ---
 
@@ -77,9 +171,16 @@ the macOS suite either.
 
 A full pass typically takes 25–70 minutes (≈ 5–10 min build + 20–60
 min runners). Run it in the background when feasible so the rest of
-the conversation stays usable. If `pnpm dist:dev` itself fails, the
-orchestrator stops before the runner list executes — read the build
-error and report it to the user.
+the conversation stays usable. If `pnpm dist:dev` itself fails — or a
+runner can't launch the app — the orchestrator stops before (or
+mid-way through) the runner list. That is an **environment / toolchain
+failure**, not a test result: first work the *Environment self-heal*
+loop above (fix the missing prerequisite, re-run, bounded to ~3
+attempts per symptom) so every test case actually gets to execute.
+Only after self-heal is exhausted do you report the remaining blocker
+to the user. Self-heal stays inside the environment / dependency /
+process / disk scope — it never edits source, test, or fixture files
+to get past a failure.
 
 ### Step 3 — Report counts only
 
@@ -413,9 +514,20 @@ and require an explicit "yes, clean" before invoking the script.
 - Treat tests as the contract; production code is what drifts.
 - Use `--build` on every regression invocation — Mode A's run, Mode
   B's per-cluster verify, and Mode B's final pass alike.
+- Self-heal environment / toolchain blockers (missing interpreter or
+  `pnpm`, absent `node_modules`, ABI mismatch, stale `out/` /
+  `release/`, leftover app process, full disk) so every test case
+  actually executes — bounded to ~3 attempts per symptom — then report
+  exactly what you healed.
 
 **Never:**
 
+- Use environment self-heal as a backdoor to edit production, test,
+  fixture, or orchestrator files. Self-heal is
+  dependencies / processes / artefacts / interpreter only. A red
+  assertion is a **contract** failure (Mode A reports it, Mode B fixes
+  it with approval), never an "environment fix" — and a missing
+  dependency is reported, not silently written into `package.json`.
 - Auto-chain the three modes. Mode A reports counts and stops; Mode
   B operates on existing artefacts; Mode C only deletes. `--clean`
   never runs tests, never auto-runs `--build`, never auto-enters
