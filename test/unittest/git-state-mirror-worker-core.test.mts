@@ -148,8 +148,18 @@ test('path missing errors are classified for suspended watcher state', () => {
 })
 
 test('watcher root is only armed for resolved git repositories', () => {
+  // Use platform-native absolute paths so path.resolve() (called inside
+  // resolveMirrorWatcherRoot) is an identity transform and does not prepend
+  // the current drive letter to a POSIX-style /Users/... path on Windows.
+  const testRepoRoot = process.platform === 'win32'
+    ? 'C:\\Users\\test\\Projects\\repo'
+    : '/Users/test/Projects/repo'
+  const testSubdirCwd = process.platform === 'win32'
+    ? 'C:\\Users\\test\\Projects\\repo\\packages\\app'
+    : '/Users/test/Projects/repo/packages/app'
+
   const nonRepo: MirrorState = {
-    cwd: '/Users/test/Projects',
+    cwd: testRepoRoot,
     repoRoot: null,
     repoName: null,
     branch: null,
@@ -160,8 +170,8 @@ test('watcher root is only armed for resolved git repositories', () => {
     generation: 1
   }
   const subdirRepo: MirrorState = {
-    cwd: '/Users/test/Projects/repo/packages/app',
-    repoRoot: '/Users/test/Projects/repo',
+    cwd: testSubdirCwd,
+    repoRoot: testRepoRoot,
     repoName: 'repo',
     branch: 'main',
     status: 'clean',
@@ -172,7 +182,7 @@ test('watcher root is only armed for resolved git repositories', () => {
   }
 
   assert.equal(resolveMirrorWatcherRoot(nonRepo), null)
-  assert.equal(resolveMirrorWatcherRoot(subdirRepo), '/Users/test/Projects/repo')
+  assert.equal(resolveMirrorWatcherRoot(subdirRepo), testRepoRoot)
 })
 
 test('detach while attach is in flight disposes the late watcher handle', async () => {

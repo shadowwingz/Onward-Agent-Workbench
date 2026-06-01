@@ -12,6 +12,7 @@ import { perfTrace } from '../utils/perf-trace'
 import { migrateLayoutMode, DEFAULT_LAYOUT_MODE } from '../utils/layout-mode'
 import { isValidCustomLayoutCells } from '../utils/custom-layout-validator'
 import { normalizeTerminalCwdCandidate } from '../utils/terminal-cwd-osc'
+import { appStateContentChanged } from '../utils/app-state-diff'
 
 export const normalizeProjectCwd = normalizeProjectCwdImpl
 
@@ -223,7 +224,18 @@ function normalizePromptEditorHeight(value: number | null | undefined): number {
 }
 
 function normalizePersistedTerminalCwd(value: string | null | undefined): string | null {
-  return normalizeTerminalCwdCandidate(value)
+  const validated = normalizeTerminalCwdCandidate(value)
+  if (validated === null) return null
+  // Canonicalize path separators to '/'. On Windows the terminal cwd reaches us
+  // from two sources with different conventions — OSC 7 (`file:///D:/...` → '/')
+  // and the main-process git watcher (native '\'). Persisting them verbatim made
+  // two TerminalGrid effects (the OSC-cwd persist at TerminalGrid.tsx:579 and the
+  // git-info persist via applyTerminalInfoUpdate) ping-pong `terminal.lastCwd`
+  // between 'D:/x' and 'D:\x' ~700×/s, defeating setTerminalLastCwd's idempotency
+  // check and pinning the renderer JS thread (idle ~8% CPU — Windows-only, since
+  // POSIX has no '\' variant). Forward slash matches normalizeProjectCwd and the
+  // OSC path, and is accepted by Git + the filesystem on all three platforms.
+  return normalizeProjectCwd(validated)
 }
 
 function normalizePromptInputMode(value: unknown): 'canvas' | 'line' {
@@ -471,6 +483,10 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
   const terminalGitInfoRef = useRef<Map<string, { repoRoot: string | null; branch: string | null }>>(new Map())
   const perfCountersRef = useRef({
     updateCalls: 0,
+    // Number of updateState calls whose updater produced no real change and
+    // were bailed out (returned prev, React skips re-render). A non-trivial
+    // steady-state value here is the fingerprint of a render-storm regression.
+    bailedCalls: 0,
     createTab: 0,
     closeTab: 0,
     switchTab: 0,
@@ -668,11 +684,25 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
   // Update state and save
   const updateState = useCallback((updater: (prev: AppState) => AppState) => {
     setState(prev => {
+      const next = updater(prev)
+      // Bail out on no-op updates so React applies its Object.is bail-out and
+      // skips re-rendering the whole tree. Without this, the `updatedAt:
+      // Date.now()` stamp below makes every result a brand-new object that
+      // defeats the bail-out, turning any effect that (directly or
+      // transitively) calls updateState into an unbounded whole-tree render
+      // loop — the idle ~8% CPU bug. See utils/app-state-diff.ts.
+      if (!appStateContentChanged(prev, next)) {
+        if (DEBUG_APP_STATE) {
+          perfCountersRef.current.updateCalls += 1
+          perfCountersRef.current.bailedCalls += 1
+        }
+        return prev
+      }
       if (DEBUG_APP_STATE) {
         perfCountersRef.current.updateCalls += 1
       }
       const newState = {
-        ...updater(prev),
+        ...next,
         updatedAt: Date.now()
       }
       stateRef.current = newState

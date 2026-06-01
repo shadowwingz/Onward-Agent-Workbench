@@ -7,8 +7,11 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 
-const repoRoot = new URL('../..', import.meta.url).pathname
+// fileURLToPath converts file:///D:/... to D:\... on Windows, avoiding the
+// double-drive-letter (D:\D:\...) that .pathname produces on that platform.
+const repoRoot = fileURLToPath(new URL('../..', import.meta.url))
 
 async function readRepoFile(path: string): Promise<string> {
   return await readFile(join(repoRoot, path), 'utf8')

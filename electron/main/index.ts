@@ -11,6 +11,25 @@ for (const stream of [process.stdout, process.stderr]) {
   })
 }
 
+// On Windows, node-pty 1.1.0 forks `conpty_console_list_agent.js` during
+// PTY teardown to enumerate the console process list.  If the shell's
+// console session was already destroyed (app is exiting), AttachConsole()
+// fails inside the forked process, which crashes it.  Node.js then fires
+// an ECONNRESET 'error' event on the ChildProcess object; without a
+// handler this becomes an uncaughtException that exits Electron with a
+// non-zero code, even though traceStore and the API server were already
+// cleanly flushed inside the will-quit handler.
+if (process.platform === 'win32') {
+  process.on('uncaughtException', (error: Error) => {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'ECONNRESET') {
+      console.warn('[PTY] node-pty teardown ECONNRESET suppressed:', error.message)
+      return
+    }
+    throw error
+  })
+}
+
 import { app, BrowserWindow, nativeImage, Menu, dialog, ipcMain } from 'electron'
 import { writeFileSync } from 'fs'
 import { join } from 'path'

@@ -36,11 +36,25 @@ node --test \
   "$ROOT_DIR/test/autotest/test-changelog-generation.mjs" \
   "$ROOT_DIR/test/autotest/test-changelog-manifest.mjs"
 
-TEMP_ROOT="$(mktemp -d /tmp/onward-change-log-autotest.XXXXXX)"
+TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/onward-change-log-autotest.XXXXXX")"
 TEMP_CHANGELOG="$TEMP_ROOT/changelog"
 TEMP_USER_DATA="$TEMP_ROOT/user-data"
 mkdir -p "$TEMP_CHANGELOG/en/daily" "$TEMP_USER_DATA"
 mkdir -p "$TEMP_CHANGELOG/html/en/daily"
+
+# On Windows (MSYS2/Git Bash), /tmp is a virtual MSYS2 mount point that
+# Electron's Node.js (a native Windows process) cannot resolve via fs APIs.
+# cygpath -w converts the POSIX path to a native Windows absolute path.
+# On macOS and Linux the function is a no-op.
+to_native_path() {
+  if command -v cygpath >/dev/null 2>&1; then
+    cygpath -w "$1"
+  else
+    printf '%s' "$1"
+  fi
+}
+APP_CHANGELOG_ROOT="$(to_native_path "$TEMP_CHANGELOG")"
+APP_USER_DATA_DIR="$(to_native_path "$TEMP_USER_DATA")"
 
 cat > "$TEMP_CHANGELOG/en/daily/$TEST_TAG.md" <<EOF
 # Onward Daily Build $TEST_TAG
@@ -95,9 +109,9 @@ ONWARD_AUTOTEST=1 \
 ONWARD_AUTOTEST_SUITE=change-log \
 ONWARD_AUTOTEST_CWD="$ROOT_DIR" \
 ONWARD_AUTOTEST_EXIT=1 \
-ONWARD_USER_DATA_DIR="$TEMP_USER_DATA" \
+ONWARD_USER_DATA_DIR="$APP_USER_DATA_DIR" \
 ONWARD_TAG="$TEST_TAG" \
-ONWARD_CHANGELOG_ROOT="$TEMP_CHANGELOG" \
+ONWARD_CHANGELOG_ROOT="$APP_CHANGELOG_ROOT" \
 "$APP_BIN" > "$LOG_FILE" 2>&1 || true
 
 if grep -q "\[AutoTest\] FAIL" "$LOG_FILE"; then
