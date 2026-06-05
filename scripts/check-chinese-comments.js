@@ -59,7 +59,8 @@ function isAllowlistedPath(relPath) {
   // Engineering / architecture docs may be authored bilingually; the
   // single-language constraint that applies to product UI copy is
   // intentionally relaxed here so design write-ups can use the natural
-  // language for the audience.
+  // language for the audience. This also covers docs/html/ — the canonical
+  // output dir for user-requested HTML interpretation docs (see CLAUDE.md).
   if (relPath.startsWith('docs/')) return true
   return false
 }

@@ -34,6 +34,7 @@ import {
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 import { gitDiffCacheInvalidator } from './git-diff-cache-invalidator'
 import { resolveExistingTerminalCwd } from './terminal-cwd-validation'
+import { shouldRespawnGitStateMirrorWorker } from './git-state-mirror-teardown'
 import type {
   MainToMirrorMessage,
   MirrorToMainMessage,
@@ -91,7 +92,13 @@ interface FileBodyPending {
 }
 
 const WORKER_REQUEST_TIMEOUT_MS = 30_000
-const WORKER_SHUTDOWN_TIMEOUT_MS = 5_000
+// Generous: the worker now proves native @parcel/watcher quiesce before exiting,
+// which can take up to its settle ceiling under churn. terminate() only fires if
+// this elapses with NO shutdown-complete ack (the unsafe last resort).
+const WORKER_SHUTDOWN_TIMEOUT_MS = 15_000
+// Once the worker HAS acked native quiesce, a slow exit can be terminated safely
+// after this short grace (no live native async-work remains to corrupt teardown).
+const ACK_TERMINATE_GRACE_MS = 1_000
 
 type MirrorUpdateListener = (cwd: string, state: MirrorState, delta: MirrorDelta) => void
 type CwdChangeListener = (terminalId: string, prevCwd: string | null, nextCwd: string | null) => void
@@ -105,6 +112,17 @@ class GitStateMirrorRouter {
   private workerShutdownStartedAt = new WeakMap<Worker, number>()
   private workerShutdownTimedOut = new WeakSet<Worker>()
   private disposePromise: Promise<void> | null = null
+  // Teardown-quiesce gating (the @parcel/watcher worker-teardown SIGABRT fix).
+  // A worker that has emitted 'shutdown-complete' has PROVEN native quiescence,
+  // so terminate() becomes safe; until then terminate is the unsafe last resort.
+  private shutdownAcked = new WeakSet<Worker>()
+  private ackTerminateTimers = new WeakMap<Worker, ReturnType<typeof setTimeout>>()
+  // Respawn cancellation: dispose() must not let a worker that died near quit
+  // respawn a fresh watcher-bearing worker into a quitting app (the compounding
+  // teardown path). `disposed` latches the router as torn down; `respawnTimer`
+  // holds any pending respawn so dispose() can cancel it.
+  private respawnTimer: ReturnType<typeof setTimeout> | null = null
+  private disposed = false
 
   /**
    * webContents.id → (canonical cwd → per-renderer subscribe refCount).
@@ -140,12 +158,23 @@ class GitStateMirrorRouter {
   private pendingBodies = new Map<number, FileBodyPending>()
 
   init(_mainWindow: BrowserWindow): void {
+    // Clean (re-)entry: clear the torn-down latch so a dispose()-then-init()
+    // (test harness / re-init) re-enables respawn.
+    this.disposed = false
     this.spawnWorker()
     this.registerIpcHandlers()
     this.registerWebContentsCleanup()
   }
 
   dispose(): Promise<void> {
+    // Latch torn-down and cancel any pending respawn FIRST so a worker that died
+    // near quit cannot spawn a fresh watcher-bearing worker into a quitting app.
+    this.disposed = true
+    if (this.respawnTimer) {
+      clearTimeout(this.respawnTimer)
+      this.respawnTimer = null
+      performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_STATE_MIRROR_RESPAWN_CANCELLED, { reason: 'dispose' })
+    }
     if (this.disposePromise) {
       this.clearLocalState()
       return this.disposePromise
@@ -167,7 +196,12 @@ class GitStateMirrorRouter {
       })
       timer = setTimeout(() => {
         this.workerShutdownTimedOut.add(worker)
-        worker.terminate().catch(() => { /* ignore */ })
+        // Last resort: NO shutdown-complete ack within the timeout. Terminating
+        // now is unsafe (a live @parcel/watcher PromiseRunner async-work may
+        // still be queued in the worker loop) but necessary to avoid a hung
+        // quit. The ack-gated safe-terminate path (handleWorkerMessage) is the
+        // normal route; this fires only when the worker is genuinely wedged.
+        if (!this.shutdownAcked.has(worker)) worker.terminate().catch(() => { /* ignore */ })
       }, WORKER_SHUTDOWN_TIMEOUT_MS)
       timer.unref?.()
       this.workerShutdownTimers.set(worker, timer)
@@ -227,7 +261,7 @@ class GitStateMirrorRouter {
         })
         return
       }
-      this.handleWorkerMessage(msg as MirrorToMainMessage)
+      this.handleWorkerMessage(msg as MirrorToMainMessage, worker)
     })
     worker.on('error', (error) => {
       // Loud — anything that hits this is a true worker-thread exception
@@ -239,6 +273,10 @@ class GitStateMirrorRouter {
       const shutdownTimer = this.workerShutdownTimers.get(worker)
       if (shutdownTimer) clearTimeout(shutdownTimer)
       this.workerShutdownTimers.delete(worker)
+      const ackTimer = this.ackTerminateTimers.get(worker)
+      if (ackTimer) clearTimeout(ackTimer)
+      this.ackTerminateTimers.delete(worker)
+      this.shutdownAcked.delete(worker)
 
       const wasDisposing = this.disposingWorkers.delete(worker)
       const shutdownStartedAt = this.workerShutdownStartedAt.get(worker)
@@ -263,7 +301,10 @@ class GitStateMirrorRouter {
       // crashed silently". Without this, a single death between tests
       // is invisible until 5 in a row trip the giveup branch.
       console.error('[GitStateMirrorRouter] worker EXITED', { code, respawnAttempt: this.respawnAttempt, exitedAt: new Date().toISOString() })
-      if (wasDisposing || this.worker !== null) {
+      // Suppress respawn when disposing/disposed (quit in progress) or a worker
+      // already exists — never spawn a fresh watcher-bearing worker into a
+      // quitting app (the compounding teardown path).
+      if (wasDisposing || this.disposed || this.worker !== null) {
         return
       }
       // Reject every pending file-body request — the renderer will retry.
@@ -273,20 +314,37 @@ class GitStateMirrorRouter {
       this.pendingBodies.clear()
       // Respawn with a tiny back-off; clamp to 5 retries before giving up
       // (consumers fall back to manual refresh until the next entry).
-      if (this.respawnAttempt >= 5) {
-        console.error('[GitStateMirrorRouter] worker exited 5 times in a row; giving up')
+      // Canonical respawn decision (unit-tested in git-state-mirror-teardown).
+      // disposed / hasLiveWorker are already false here (the early return above),
+      // so this gates on the retry budget; kept explicit so the predicate is the
+      // single source of truth for "may a fresh worker spawn?".
+      if (!shouldRespawnGitStateMirrorWorker({
+        disposed: this.disposed,
+        hasLiveWorker: this.worker !== null,
+        respawnAttempt: this.respawnAttempt,
+        maxAttempts: 5
+      })) {
+        if (this.respawnAttempt >= 5) {
+          console.error('[GitStateMirrorRouter] worker exited 5 times in a row; giving up')
+        }
         return
       }
       this.respawnAttempt += 1
-      setTimeout(() => {
-        if (this.worker) return
+      this.respawnTimer = setTimeout(() => {
+        this.respawnTimer = null
+        // Re-check at fire time: a dispose() during the back-off window must win.
+        if (this.disposed || this.worker) return
         this.spawnWorker()
         this.reattachAllAfterRespawn()
       }, Math.min(2000, 100 * this.respawnAttempt))
+      this.respawnTimer.unref?.()
     })
   }
 
   private reattachAllAfterRespawn(): void {
+    // A dispose() that landed between spawn and reattach must win — do not arm
+    // fresh watchers into a quitting app.
+    if (this.disposed) return
     // Re-subscribe every cwd that still has subscribers. The new worker
     // starts empty — we replay attach-watch so it rebuilds its state.
     for (const cwd of this.refCounts.keys()) {
@@ -294,19 +352,42 @@ class GitStateMirrorRouter {
     }
   }
 
-  private handleWorkerMessage(msg: MirrorToMainMessage): void {
+  private handleWorkerMessage(msg: MirrorToMainMessage, worker: Worker): void {
     switch (msg.kind) {
       case 'ready':
         this.workerReady = true
         this.respawnAttempt = 0
         return
-      case 'shutdown-complete':
+      case 'shutdown-complete': {
+        // The worker PROVED native @parcel/watcher quiescence before closing its
+        // port. Record it, mark the ack (so the unsafe terminate timer is now
+        // gated off), and schedule a SHORT safe-terminate grace as a backstop in
+        // case the exit is slow — terminating after the ack cannot corrupt
+        // teardown because no live native async-work remains.
+        this.shutdownAcked.add(worker)
+        performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_STATE_MIRROR_WORKER_SHUTDOWN_ACK, {
+          quiesce: msg.quiesce ?? null
+        })
+        if (!this.ackTerminateTimers.has(worker)) {
+          const ackTimer = setTimeout(() => {
+            this.ackTerminateTimers.delete(worker)
+            if (this.disposingWorkers.has(worker)) worker.terminate().catch(() => { /* ignore */ })
+          }, ACK_TERMINATE_GRACE_MS)
+          ackTimer.unref?.()
+          this.ackTerminateTimers.set(worker, ackTimer)
+        }
         return
+      }
       case 'mirror-update':
         this.latest.set(msg.cwd, msg.state)
         performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_STATE_MIRROR_FANOUT, {
           cwd: msg.cwd,
           subscriberCount: this.refCounts.get(msg.cwd) ?? 0,
+          // The authoritative 5-state badge status the worker just COMPUTED. The
+          // renderer's `terminal-title.color-rendered` records what was RENDERED,
+          // so a "wrong badge colour" trace can localise a classification bug
+          // (this value wrong) vs a render/propagation bug (rendered != this).
+          status: msg.state.status,
           deltaKeys: Object.keys(msg.delta).filter((k) => k !== 'capturedAt')
         })
         this.fanout(msg.cwd, msg.delta)
@@ -660,6 +741,17 @@ class GitStateMirrorRouter {
     const cwd = canonicalise(rawCwd)
     if (!this.refCounts.has(cwd)) return
     this.postToWorker({ kind: 'focus-resync', cwd })
+  }
+
+  /**
+   * Tell the worker which repo (by the focused terminal's cwd) is focused, so
+   * its always-on reconcile heartbeat polls that repo at 1 s and the rest of
+   * the visible repos at 3 s. Forward-only — no git work on main (constraint
+   * H1 in docs/git-status-reconcile-design.md). Pass null to clear focus.
+   */
+  setReconcileFocus(rawCwd: string | null): void {
+    const cwd = rawCwd ? canonicalise(rawCwd) : null
+    this.postToWorker({ kind: 'reconcile-focus', cwd })
   }
 
   /** Read-only access to the last-pushed cwd for a terminal (for bridge cold-start). */

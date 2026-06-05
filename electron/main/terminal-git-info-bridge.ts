@@ -53,6 +53,10 @@ export class TerminalGitInfoBridge {
   private disposed = false
   private offMirrorUpdate: (() => void) | null = null
   private offCwdChange: (() => void) | null = null
+  // The terminal the renderer last reported as focused. Tracked so a `cd` into a
+  // different repo IN the focused terminal re-points the reconcile heartbeat's
+  // 1 s focused cadence at the new repo — focus events alone do not fire on `cd`.
+  private focusedTerminalId: string | null = null
 
   constructor(private emit: TerminalInfoEmitter) {
     this.offMirrorUpdate = gitStateMirrorRouter.onMirrorUpdate((cwd, state) => {
@@ -103,6 +107,12 @@ export class TerminalGitInfoBridge {
     if (!entry) return
     this.entries.delete(terminalId)
     this.detachMirror(entry)
+    // The focused terminal went away — drop the stale focus so the reconcile
+    // heartbeat doesn't keep a removed repo on the fast 1 s cadence.
+    if (terminalId === this.focusedTerminalId) {
+      this.focusedTerminalId = null
+      gitStateMirrorRouter.setReconcileFocus(null)
+    }
   }
 
   /**
@@ -116,6 +126,18 @@ export class TerminalGitInfoBridge {
     gitStateMirrorRouter.internalForceRecompute(entry.subscribedCwd)
   }
 
+  /**
+   * Renderer reported the focused terminal changed. Forward the focused
+   * terminal's cwd to the GitStateMirror worker so its always-on reconcile
+   * heartbeat polls that repo at the fast (1 s) cadence and the rest at 3 s.
+   * Event-driven; no git work here (the worker owns the reconcile).
+   */
+  notifyFocus(terminalId: string): void {
+    this.focusedTerminalId = terminalId
+    const entry = this.entries.get(terminalId)
+    gitStateMirrorRouter.setReconcileFocus(entry?.subscribedCwd ?? entry?.cwd ?? null)
+  }
+
   dispose(): void {
     if (this.disposed) return
     this.disposed = true
@@ -123,6 +145,7 @@ export class TerminalGitInfoBridge {
       this.detachMirror(entry)
     }
     this.entries.clear()
+    this.focusedTerminalId = null
     this.offMirrorUpdate?.()
     this.offCwdChange?.()
     this.offMirrorUpdate = null
@@ -188,6 +211,14 @@ export class TerminalGitInfoBridge {
       this.attachMirror(entry, nextCwd)
     } else {
       this.tryEmit(entry, emptyInfo(null))
+    }
+
+    // If this IS the focused terminal, the `cd` just moved its repo. Focus
+    // events do not fire on `cd`, so without this the new repo would fall back
+    // to the 3 s visible reconcile cadence instead of the advertised 1 s
+    // focused cadence. Re-point the heartbeat at the new (or null) repo.
+    if (terminalId === this.focusedTerminalId) {
+      gitStateMirrorRouter.setReconcileFocus(entry.subscribedCwd ?? entry.cwd ?? null)
     }
   }
 

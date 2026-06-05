@@ -46,6 +46,7 @@ import {
   type MirrorWorkerEntryCore
 } from './git-state-mirror-worker-core'
 import { buildMirrorChangeFingerprint } from './git-state-mirror-change-fingerprint'
+import { GitReconcileScheduler, type ReconcileReason } from './git-reconcile-scheduler'
 import { parseStatusPorcelainV2Z } from './git-porcelain-parse'
 import { performanceTrace } from './performance-trace'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
@@ -59,6 +60,10 @@ import type {
   MirrorWatcherHealth,
   MirrorWatcherStatus
 } from './git-state-mirror-types'
+import {
+  awaitWatcherQuiescence,
+  NATIVE_WATCHER_SETTLE_MS
+} from './git-state-mirror-teardown'
 
 const execFileAsync = promisify(execFile)
 
@@ -66,10 +71,21 @@ const execFileAsync = promisify(execFile)
 // many files at once). Coalesces inside this window — recompute happens
 // once at the trailing edge, not per-event. This is debounce, not polling.
 const DEBOUNCE_MS = 80
-// @parcel/watcher's macOS FSEvents backend can resolve unsubscribe work just
-// after our awaited unsubscribe promise; keep the Worker isolate alive briefly
-// so those native N-API completions drain before Electron tears workers down.
-const NATIVE_WATCHER_SHUTDOWN_DRAIN_MS = 250
+// The native-quiesce barrier + its constants (NATIVE_WATCHER_SETTLE_MS, the
+// deadline) live in the pure leaf `git-state-mirror-teardown.ts` so the
+// unsubscribe-settled -> drain -> close ordering is unit-tested without an
+// Electron build. shutdownWorker proves real native quiescence (zero live
+// @parcel/watcher subscriptions, zero pending unsubscribes) before closing the
+// port, instead of the old blind 250 ms sleep — see that module for the why.
+
+// Always-on reconcile heartbeat (parallel to the watcher; constraint H1 — runs
+// in THIS worker thread, never main). The scheduler gates the real cadence
+// (focused 1 s / visible 3 s); this timer just samples it every tick. See
+// docs/git-status-reconcile-design.md.
+const RECONCILE_TICK_MS = 500
+// A heartbeat reconcile that finds a change while the watcher has been silent
+// longer than this is treated as a silently-missed watcher event (drift).
+const RECONCILE_DRIFT_WINDOW_MS = 3000
 
 // Git command timing budgets. Deadlines (kill after N ms), not intervals.
 const EXEC_TIMEOUT_MS = 10_000
@@ -104,12 +120,29 @@ interface MirrorWatcherGroup {
 const watcherGroups = new Map<string, MirrorWatcherGroup>()
 const entryToGroupKey = new Map<string, string>()
 
+// Native-quiesce accounting for the @parcel/watcher teardown race. Every
+// successful parcelWatcher.subscribe() bumps the counter; every unsubscribe()
+// promise is tracked until it settles. shutdownWorker() waits on BOTH reaching
+// zero before parentPort.close() so no PromiseRunner async-work outlives the env.
+// INVARIANT: every increment MUST have a paired decrement on EVERY dispose path
+// (success, throw, cancel) — a leaked count would wedge shutdown until the
+// deadline. Enforced by the dispose closure's finally + a unit test.
+let activeWatcherSubscriptions = 0
+const pendingUnsubscribes = new Set<Promise<unknown>>()
+
 const autotestWatcherFailSubscribeOnce =
   process.env.ONWARD_AUTOTEST === '1' &&
   process.env.ONWARD_AUTOTEST_GSM_WATCHER_FAIL_SUBSCRIBE_ONCE === '1'
 const autotestWatcherFailCallbackOnce =
   process.env.ONWARD_AUTOTEST === '1' &&
   process.env.ONWARD_AUTOTEST_GSM_WATCHER_FAIL_CALLBACK_ONCE === '1'
+// Persistent SILENT failure: the watcher stays subscribed and reports no error,
+// but every event it would deliver is dropped — the exact production failure
+// mode (parcel-bundler/watcher#187). Exercises the always-on reconcile heartbeat
+// as the only path that can still refresh the badge.
+const autotestWatcherSilent =
+  process.env.ONWARD_AUTOTEST === '1' &&
+  process.env.ONWARD_AUTOTEST_GSM_WATCHER_SILENT === '1'
 let autotestSubscribeFailurePending = autotestWatcherFailSubscribeOnce
 
 // Per-cwd MirrorState.generation counter. Bumped on every focus-resync
@@ -119,6 +152,15 @@ let autotestSubscribeFailurePending = autotestWatcherFailSubscribeOnce
 // new content with the same generation, which is the correct invariant
 // for "data changed but mount stays".
 const mirrorGenerations = new Map<string, number>()
+
+// Always-on reconcile state (all in this worker thread, constraint H1). The
+// scheduler keys by repoRootKey so a repo runs at most one git status per cycle
+// (min 1 s focused / max 3 s visible), never back-to-back.
+const reconcileScheduler = new GitReconcileScheduler()
+let focusedRepoRootKey: string | null = null
+const lastWatcherFireAt = new Map<string, number>()
+let reconcileTimer: NodeJS.Timeout | null = null
+
 function delay(ms: number): Promise<void> {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, ms))
 }
@@ -165,10 +207,11 @@ function log(
   emit({ kind: 'log', level, message, data })
 }
 
-if (autotestWatcherFailSubscribeOnce || autotestWatcherFailCallbackOnce) {
+if (autotestWatcherFailSubscribeOnce || autotestWatcherFailCallbackOnce || autotestWatcherSilent) {
   log('warn', 'autotest watcher failure injection active', {
     subscribeOnce: autotestWatcherFailSubscribeOnce,
-    callbackOnce: autotestWatcherFailCallbackOnce
+    callbackOnce: autotestWatcherFailCallbackOnce,
+    silent: autotestWatcherSilent
   })
 }
 
@@ -404,16 +447,16 @@ function scheduleRecompute(entry: MirrorWorkerEntryCore): void {
 
 async function runRecompute(
   entry: MirrorWorkerEntryCore,
-  reason: 'attach' | 'watcher' | 'polling' | 'focus-resync' | 'osc-switch',
+  reason: 'attach' | 'watcher' | 'polling' | 'focus-resync' | 'osc-switch' | 'reconcile',
   options: { queueIfBusy?: boolean } = {}
-): Promise<void> {
-  if (shuttingDown) return
-  if (entry.detachRequested) return
+): Promise<boolean> {
+  if (shuttingDown) return false
+  if (entry.detachRequested) return false
   if (entry.recomputeInFlight) {
     if (options.queueIfBusy !== false) {
       entry.recomputeQueued = true
     }
-    return
+    return false
   }
   entry.recomputeInFlight = true
   const startedAt = Date.now()
@@ -431,7 +474,7 @@ async function runRecompute(
       entry.recomputeQueued = false
       scheduleRecompute(entry)
     }
-    return
+    return false
   }
   const delta = finishMirrorRecomputeIfCurrent(entry, generation, next)
   performanceTrace.record(PERF_TRACE_EVENT.WORKER_GIT_STATE_MIRROR_RECOMPUTE_DONE, {
@@ -448,10 +491,11 @@ async function runRecompute(
     entry.recomputeQueued = false
     scheduleRecompute(entry)
   }
-  if (!delta) return // stale, detached, or no-op
+  if (!delta) return false // stale, detached, or no-op
   // Short-circuit: only emit when delta has actual fields beyond capturedAt.
-  if (Object.keys(delta).length <= 1) return
+  if (Object.keys(delta).length <= 1) return false
   emit({ kind: 'mirror-update', cwd: entry.cwd, state: next, delta })
+  return true
 }
 
 function activeEntriesForGroup(group: MirrorWatcherGroup): MirrorWorkerEntryCore[] {
@@ -689,6 +733,87 @@ function startDegradedPolling(group: MirrorWatcherGroup, failureKind: MirrorWatc
   void runDegradedPoll(group)
 }
 
+// ---------------------------------------------------------------------------
+// Always-on reconcile heartbeat — parallel safety net for SILENT watcher
+// failure (@parcel/watcher can stop delivering events with no error, leaving
+// the badge stale). Runs in this worker thread (constraint H1); gated by
+// GitReconcileScheduler so a repo polls at most once per cycle (focused 1 s /
+// visible 3 s), never back-to-back. See docs/git-status-reconcile-design.md.
+// ---------------------------------------------------------------------------
+
+function resolveFocusedRepoRootKey(cwd: string | null): string | null {
+  if (!cwd) return null
+  return entryToGroupKey.get(resolvePath(cwd)) ?? null
+}
+
+async function runGroupReconcile(group: MirrorWatcherGroup, reason: ReconcileReason): Promise<void> {
+  reconcileScheduler.onReconcileStart(group.repoRootKey)
+  let changed = false
+  try {
+    const results = await Promise.all(
+      activeEntriesForGroup(group).map((entry) => runRecompute(entry, 'reconcile', { queueIfBusy: false }))
+    )
+    changed = results.some(Boolean)
+  } catch (error) {
+    log('warn', 'reconcile recompute failed', {
+      repoRoot: group.repoRoot,
+      error: error instanceof Error ? error.message : String(error)
+    })
+  } finally {
+    reconcileScheduler.onReconcileDone(group.repoRootKey, Date.now())
+  }
+  // Drift: a heartbeat reconcile produced a real change while the watcher had
+  // been silent — the watcher silently missed the event. Make it observable so
+  // a future "badge went stale" report shows the watcher, not the badge, broke.
+  if (changed && (reason === 'heartbeat-focused' || reason === 'heartbeat-visible')) {
+    const lastFire = lastWatcherFireAt.get(group.repoRootKey) ?? Number.NEGATIVE_INFINITY
+    const sinceFire = Date.now() - lastFire
+    if (sinceFire > RECONCILE_DRIFT_WINDOW_MS) {
+      performanceTrace.record(PERF_TRACE_EVENT.WORKER_GIT_STATE_MIRROR_RECONCILE_FOUND_DRIFT, {
+        repoRoot: group.repoRoot,
+        reason,
+        sinceWatcherFireMs: Number.isFinite(lastFire) ? sinceFire : -1
+      })
+    }
+  }
+}
+
+function reconcileTick(): void {
+  if (shuttingDown) return
+  const now = Date.now()
+  // Visible repos = live watcher groups (one per repo). Feed each into the
+  // scheduler with its cadence: the focused repo at 1 s, the rest at 3 s.
+  const liveRepoKeys = new Set<string>()
+  for (const [repoRootKey, group] of watcherGroups) {
+    if (group.entries.size === 0) continue
+    liveRepoKeys.add(repoRootKey)
+    reconcileScheduler.setTaskState(
+      repoRootKey,
+      repoRootKey,
+      repoRootKey === focusedRepoRootKey ? 'focused' : 'visible'
+    )
+  }
+  // Drop scheduler entries for groups that detached (e.g. tab switched away).
+  for (const repoKey of reconcileScheduler.inspect().repos) {
+    if (!liveRepoKeys.has(repoKey)) reconcileScheduler.removeTask(repoKey)
+  }
+  const due = reconcileScheduler.tick(now)
+  if (due.length === 0) return
+  performanceTrace.record(PERF_TRACE_EVENT.WORKER_GIT_STATE_MIRROR_RECONCILE_TICK, {
+    dueCount: due.length,
+    focused: focusedRepoRootKey ? 1 : 0,
+    reasons: due.map((d) => d.reason)
+  })
+  for (const { repoKey, reason } of due) {
+    const group = watcherGroups.get(repoKey)
+    if (!group) {
+      reconcileScheduler.removeTask(repoKey)
+      continue
+    }
+    trackOperation('reconcile', runGroupReconcile(group, reason))
+  }
+}
+
 async function runSuspendedProbe(group: MirrorWatcherGroup): Promise<void> {
   if (shuttingDown || group.entries.size === 0) return
   const startedAt = Date.now()
@@ -782,6 +907,9 @@ async function startWatcherForGroup(group: MirrorWatcherGroup): Promise<() => Pr
       void handleWatcherFault(group, 'callback-error', err)
       return
     }
+    // Autotest: simulate a SILENT watcher (subscribed, no error, but delivers
+    // nothing) so the test proves the reconcile heartbeat still refreshes.
+    if (autotestWatcherSilent) return
     if (group.entries.size === 0) return
     const keptPaths: string[] = []
     for (const event of events) {
@@ -803,18 +931,35 @@ async function startWatcherForGroup(group: MirrorWatcherGroup): Promise<() => Pr
       })
     }
     if (keptPaths.length > 0) {
+      // Record fast-path liveness so the reconcile heartbeat can tell a change
+      // it caught from one the watcher silently missed (drift detection).
+      lastWatcherFireAt.set(group.repoRootKey, Date.now())
       scheduleGroupRecompute(group, keptPaths)
     }
   }, { ignore: [...MIRROR_WATCHER_IGNORE] })
 
+  // Subscription is live — count it for the shutdown quiesce barrier.
+  activeWatcherSubscriptions += 1
+
+  let disposed = false
   return async () => {
+    // Idempotent: a group can be torn down via detach AND shutdown; only the
+    // first call unsubscribes and adjusts the quiesce accounting so the counter
+    // never double-decrements.
+    if (disposed) return
+    disposed = true
+    const unsubscribePromise = subscription.unsubscribe()
+    pendingUnsubscribes.add(unsubscribePromise)
     try {
-      await subscription.unsubscribe()
+      await unsubscribePromise
     } catch (error) {
       log('warn', 'parcel-watcher unsubscribe failed', {
         repoRoot: group.repoRoot,
         error: error instanceof Error ? error.message : String(error)
       })
+    } finally {
+      pendingUnsubscribes.delete(unsubscribePromise)
+      activeWatcherSubscriptions -= 1
     }
   }
 }
@@ -1041,6 +1186,11 @@ async function shutdownWorker(): Promise<void> {
   if (shuttingDown) return
   shuttingDown = true
 
+  if (reconcileTimer) {
+    clearInterval(reconcileTimer)
+    reconcileTimer = null
+  }
+
   for (const entry of entries.values()) {
     try {
       await requestMirrorDetach(entry)
@@ -1062,8 +1212,30 @@ async function shutdownWorker(): Promise<void> {
   entryToGroupKey.clear()
   bodyCache.clear()
   mirrorGenerations.clear()
-  await delay(NATIVE_WATCHER_SHUTDOWN_DRAIN_MS)
-  emit({ kind: 'shutdown-complete' })
+  // Real native quiesce barrier (replaces the old blind 250 ms sleep): wait for
+  // every in-flight unsubscribe to settle, then spin until the live-subscription
+  // count and the pending-unsubscribe set both reach zero (bounded by a hard
+  // deadline so a leaked counter can never wedge teardown — the router's
+  // terminate backstop is only provably safe AFTER shutdown-complete), then a
+  // fixed settle past parcel's FSEvents debounce ceiling for the independent
+  // coalesced-event channel. Only after this is it safe to free the env: no
+  // @parcel/watcher PromiseRunner completion can resolve into a dead isolate.
+  const { deadlineHit, spunMs } = await awaitWatcherQuiescence({
+    getActive: () => activeWatcherSubscriptions,
+    getPending: () => pendingUnsubscribes.size,
+    settlePending: () => Promise.allSettled(Array.from(pendingUnsubscribes)).then(() => undefined),
+    delay,
+    now: Date.now
+  })
+  await delay(NATIVE_WATCHER_SETTLE_MS)
+  const quiesce = {
+    activeSubscriptions: activeWatcherSubscriptions,
+    pendingUnsubscribes: pendingUnsubscribes.size,
+    settledMs: spunMs,
+    deadlineHit
+  }
+  performanceTrace.record(PERF_TRACE_EVENT.WORKER_GIT_STATE_MIRROR_SHUTDOWN_QUIESCED, quiesce)
+  emit({ kind: 'shutdown-complete', quiesce })
   parentPort?.close()
 }
 
@@ -1158,6 +1330,13 @@ parentPort.on('message', (msg: MainToMirrorMessage) => {
     case 'focus-resync':
       if (!shuttingDown) trackOperation('focus-resync', handleFocusResync(msg.cwd))
       return
+    case 'reconcile-focus':
+      // Which repo is focused (1 s cadence) vs the rest (3 s). Cheap — no git
+      // work here; the heartbeat timer runs the reconcile. Mark the newly
+      // focused repo dirty so a focus / activate gives an instant refresh.
+      focusedRepoRootKey = resolveFocusedRepoRootKey(msg.cwd)
+      if (focusedRepoRootKey) reconcileScheduler.markDirty(focusedRepoRootKey, 'activate')
+      return
     case 'shutdown':
       void shutdownWorker().catch((error) => {
         log('error', 'shutdown failed', {
@@ -1177,3 +1356,14 @@ parentPort.on('message', (msg: MainToMirrorMessage) => {
 // messages and parcel-watcher events; supervisor timers are only armed
 // while a watcher is recovering, polling, or suspended.
 emit({ kind: 'ready' })
+
+// Arm the always-on reconcile heartbeat (constraint H1: in this worker thread,
+// never main). unref'd so it never keeps the process alive on its own; a tick
+// with no visible repos returns immediately (cheap when idle).
+// ONWARD_DISABLE_RECONCILE_HEARTBEAT=1 turns it off (debugging / A-B isolation).
+if (process.env.ONWARD_DISABLE_RECONCILE_HEARTBEAT === '1') {
+  log('warn', 'reconcile heartbeat disabled (ONWARD_DISABLE_RECONCILE_HEARTBEAT=1)')
+} else {
+  reconcileTimer = setInterval(reconcileTick, RECONCILE_TICK_MS)
+  reconcileTimer.unref?.()
+}

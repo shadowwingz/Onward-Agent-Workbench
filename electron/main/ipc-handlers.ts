@@ -1837,7 +1837,9 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   ipcMain.handle(IPC.GIT_NOTIFY_TERMINAL_ACTIVITY, async (_event, _terminalId: string) => {
     return { success: true }
   })
-  ipcMain.handle(IPC.GIT_NOTIFY_TERMINAL_FOCUS, async (_event, _terminalId: string) => {
+  ipcMain.handle(IPC.GIT_NOTIFY_TERMINAL_FOCUS, async (_event, terminalId: string) => {
+    // Drive the GitStateMirror reconcile heartbeat's focused repo (1 s cadence).
+    gitWatchManager?.notifyFocus(terminalId)
     return { success: true }
   })
   ipcMain.handle(IPC.GIT_NOTIFY_TERMINAL_GIT_UPDATE, async (_event, terminalId: string) => {
@@ -2200,7 +2202,23 @@ export function setupWindowShortcuts(mainWindow: BrowserWindow): void {
   })
 }
 
-export async function cleanupIpcHandlers(): Promise<void> {
+let ipcHandlersCleanupPromise: Promise<void> | null = null
+
+/**
+ * Single-flight teardown. Every quit edge — the awaited before-quit→requestQuit
+ * path (index.ts), window-all-closed, AND the unawaited will-quit floor — must
+ * await the SAME cleanup. Without this, the unawaited will-quit call re-enters
+ * dispose while the awaited path's GitStateMirror worker drain is still in
+ * flight: the exact double-teardown that races the @parcel/watcher native
+ * unsubscribe and frees the worker isolate mid-quiesce (the teardown SIGABRT).
+ */
+export function cleanupIpcHandlers(): Promise<void> {
+  if (ipcHandlersCleanupPromise) return ipcHandlersCleanupPromise
+  ipcHandlersCleanupPromise = runCleanupIpcHandlers()
+  return ipcHandlersCleanupPromise
+}
+
+async function runCleanupIpcHandlers(): Promise<void> {
   // Dispose all terminal data buffers
   for (const [, buf] of terminalDataBuffers) {
     buf.dispose()
@@ -2234,6 +2252,11 @@ export async function cleanupIpcHandlers(): Promise<void> {
   setTerminalCwdAuthorityResolver(null)
   setTerminalCwdDetectedHandler(null)
   await gitStateMirrorRouter.dispose()
+  // Breadcrumb: the GitStateMirror worker has fully drained + exited on the
+  // cooperative path BEFORE the runtime frees worker isolates (the will-quit
+  // fire-and-forget fix). Its absence in a teardown-crash trace points at an
+  // unguarded quit edge that skipped the awaited dispose.
+  performanceTrace.record(PERF_TRACE_EVENT.MAIN_APP_QUIT_GSM_DRAINED, {})
   ipcMain.removeHandler(IPC.GIT_STATE_MIRROR_SUBSCRIBE)
   ipcMain.removeAllListeners(IPC.GIT_STATE_MIRROR_UNSUBSCRIBE)
   ipcMain.removeHandler(IPC.GIT_STATE_MIRROR_GET)

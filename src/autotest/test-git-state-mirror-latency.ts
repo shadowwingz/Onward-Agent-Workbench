@@ -26,7 +26,7 @@ import {
   getMirror
 } from './probe-utils'
 
-type MirrorColour = 'clean' | 'modified' | 'added' | 'unknown'
+type MirrorColour = 'clean' | 'modified' | 'added' | 'deleted' | 'mixed' | 'unknown'
 
 interface ExpectedHeaderState {
   branch: string | null
@@ -308,8 +308,18 @@ export async function testGitStateMirrorLatency(ctx: AutotestContext): Promise<T
   const repoModified = resolveFixtureRepo(manifest, 'repo-modified')
   const repoUntracked = resolveFixtureRepo(manifest, 'repo-untracked')
   const repoMixed = resolveFixtureRepo(manifest, 'repo-mixed')
+  // Exhaustive 5-state badge matrix: deleted (the missing static fixture) + the
+  // mixed-bucket sub-combinations (add+del, del+mod, add+del+mod, and a single
+  // two-sided "MD" file) so every dirty bucket and its combinations are pinned
+  // end-to-end by the rendered badge colour, not just by the classify unit test.
+  const repoDeleted = resolveFixtureRepo(manifest, 'repo-deleted')
+  const repoMixedAd = resolveFixtureRepo(manifest, 'repo-mixed-ad')
+  const repoMixedDm = resolveFixtureRepo(manifest, 'repo-mixed-dm')
+  const repoMixedAdm = resolveFixtureRepo(manifest, 'repo-mixed-adm')
+  const repoTwoSided = resolveFixtureRepo(manifest, 'repo-two-sided')
   const nonGitDir = resolveFixtureRepo(manifest, 'non-git-dir')
-  const allResolved = repoA && repoB && repoModified && repoUntracked && repoMixed && nonGitDir
+  const allResolved = repoA && repoB && repoModified && repoUntracked && repoMixed &&
+    repoDeleted && repoMixedAd && repoMixedDm && repoMixedAdm && repoTwoSided && nonGitDir
 
   record('GSM-00-fixture-loaded', Boolean(allResolved), {
     tempRoot: manifest.tempRoot,
@@ -320,6 +330,11 @@ export async function testGitStateMirrorLatency(ctx: AutotestContext): Promise<T
       !repoModified && 'repo-modified',
       !repoUntracked && 'repo-untracked',
       !repoMixed && 'repo-mixed',
+      !repoDeleted && 'repo-deleted',
+      !repoMixedAd && 'repo-mixed-ad',
+      !repoMixedDm && 'repo-mixed-dm',
+      !repoMixedAdm && 'repo-mixed-adm',
+      !repoTwoSided && 'repo-two-sided',
       !nonGitDir && 'non-git-dir'
     ].filter(Boolean)
   })
@@ -465,6 +480,55 @@ export async function testGitStateMirrorLatency(ctx: AutotestContext): Promise<T
     return results
   }
 
+  // GSM-19: silent-watcher pass. The watcher is subscribed but SILENTLY drops
+  // every event (no error) — the exact production failure mode. The always-on
+  // reconcile heartbeat is then the ONLY path that can flip the badge. Repeat
+  // N times and require EVERY trial to flip to `added` and back to `clean`
+  // within the focused 1 s cadence (one miss = a real hole; CLAUDE.md
+  // timing-sensitive aggregation rule). The 5 s budget is a generous heartbeat
+  // margin, not a product SLA — the cadence itself (1 s / 3 s) is the SLA.
+  const silentMode = window.electronAPI.debug.autotestGsmWatcherSilent
+  if (silentMode) {
+    await window.electronAPI.git.subscribeMirror(repoA.abs)
+    await waitForHeaderState('GSM-19a-silent-precondition', repoA.abs, {
+      branch: repoA.entry.branch,
+      colour: 'clean',
+      cwd: repoA.abs
+    }, 'Silent-watcher pass subscribes to repo-A; badge starts clean')
+
+    const SILENT_TRIALS = 3
+    const SILENT_BUDGET_MS = 5000
+    const trialResults: Array<{ trial: number; added: boolean; cleaned: boolean }> = []
+    for (let trial = 1; trial <= SILENT_TRIALS; trial += 1) {
+      if (cancelled()) break
+      const filename = `gsm-19-silent-${trial}.txt`
+      await mutate.createUntrackedFile(repoA.abs, filename, `created by GSM-19 trial ${trial}\n`)
+      const added = await waitForMirrorStatus(repoA.abs, 'added', SILENT_BUDGET_MS)
+      await window.electronAPI.project.deletePath(repoA.abs, filename).catch(() => ({ success: false }))
+      await pushOscCwd(terminalId, repoA.abs)
+      const cleaned = await waitForMirrorStatus(repoA.abs, 'clean', SILENT_BUDGET_MS)
+      trialResults.push({ trial, added: Boolean(added), cleaned: Boolean(cleaned) })
+    }
+    const allFlipped =
+      trialResults.length === SILENT_TRIALS && trialResults.every((t) => t.added && t.cleaned)
+    record('GSM-19-silent-watcher-reconcile-refresh', allFlipped, {
+      description:
+        'With the watcher silently dropping all events, the always-on reconcile heartbeat must still flip the badge to added (and back to clean) within the focused 1 s cadence, every trial',
+      trials: SILENT_TRIALS,
+      budgetMs: SILENT_BUDGET_MS,
+      trialResults
+    })
+
+    window.electronAPI.git.unsubscribeMirror(repoA.abs)
+    disposeWatcherError?.()
+    log('git-state-mirror-latency:done', {
+      passed: results.filter((r) => r.ok).length,
+      failed: results.filter((r) => !r.ok).length,
+      total: results.length
+    })
+    return results
+  }
+
   await waitForHeaderState('GSM-01-repo-a-clean-header', repoA.abs, {
     branch: repoA.entry.branch,
     colour: 'clean',
@@ -489,11 +553,45 @@ export async function testGitStateMirrorLatency(ctx: AutotestContext): Promise<T
     cwd: repoUntracked.abs
   }, 'Untracked file maps to the added colour bucket')
 
-  await waitForHeaderState('GSM-05-added-wins-over-modified', repoMixed.abs, {
+  await waitForHeaderState('GSM-05-mixed-changes-show-blue', repoMixed.abs, {
     branch: repoMixed.entry.branch,
-    colour: 'added',
+    colour: 'mixed',
     cwd: repoMixed.abs
-  }, 'Added wins when staged or untracked changes coexist with modified files')
+  }, 'Add + modify + untracked coexisting resolves to the mixed (blue) bucket')
+
+  // ---- Exhaustive 5-state badge matrix (static fixtures → rendered colour) ----
+  // The classify unit test pins the porcelain→status math; these pin the WIRING:
+  // the deleted bucket + EVERY mixed sub-combination resolve to the right rendered
+  // badge colour end-to-end, not just one mixed case.
+  await waitForHeaderState('GSM-05a-deleted-only-shows-red', repoDeleted.abs, {
+    branch: repoDeleted.entry.branch,
+    colour: 'deleted',
+    cwd: repoDeleted.abs
+  }, 'A worktree-only deletion resolves to the deleted (red) bucket')
+
+  await waitForHeaderState('GSM-05b-mixed-add-delete-shows-blue', repoMixedAd.abs, {
+    branch: repoMixedAd.entry.branch,
+    colour: 'mixed',
+    cwd: repoMixedAd.abs
+  }, 'Add + delete across files resolves to mixed (blue)')
+
+  await waitForHeaderState('GSM-05c-mixed-delete-modify-shows-blue', repoMixedDm.abs, {
+    branch: repoMixedDm.entry.branch,
+    colour: 'mixed',
+    cwd: repoMixedDm.abs
+  }, 'Delete + modify across files resolves to mixed (blue)')
+
+  await waitForHeaderState('GSM-05d-mixed-add-delete-modify-shows-blue', repoMixedAdm.abs, {
+    branch: repoMixedAdm.entry.branch,
+    colour: 'mixed',
+    cwd: repoMixedAdm.abs
+  }, 'Add + delete + modify (the full triple) resolves to mixed (blue)')
+
+  await waitForHeaderState('GSM-05e-two-sided-MD-file-shows-blue', repoTwoSided.abs, {
+    branch: repoTwoSided.entry.branch,
+    colour: 'mixed',
+    cwd: repoTwoSided.abs
+  }, 'A single file staged-modified AND worktree-deleted (XY=MD) resolves to mixed, not deleted')
 
   await waitForHeaderState('GSM-06-non-git-hides-chip-keeps-cwd', nonGitDir.abs, {
     branch: null,
@@ -582,6 +680,35 @@ export async function testGitStateMirrorLatency(ctx: AutotestContext): Promise<T
     })
   }
 
+  if (!cancelled()) {
+    await waitForHeaderState('GSM-09c-active-repo-b-clean-before-delete', repoB.abs, {
+      branch: repoB.entry.branch,
+      colour: 'clean',
+      cwd: repoB.abs
+    }, 'Precondition for tracked-file deletion watcher transition')
+
+    const startedAt = performance.now()
+    // Delete a tracked file from the worktree → " D app.ts" → deletions are the
+    // only change kind → the new red "deleted" bucket (was folded into purple).
+    await mutate.deleteFile(repoB.abs, 'app.ts')
+    const ok = await waitFor('GSM-09c-deleted-watch-flip', () => captureColorClass(terminalId) === 'deleted', 5000, 20)
+    const mirror = await waitForMirrorStatus(repoB.abs, 'deleted')
+    record('GSM-09c-tracked-file-delete-flips-clean-to-deleted', ok && Boolean(mirror), {
+      description: 'Deleting the only tracked change resolves to the deleted (red) bucket',
+      observed: observedHeader(),
+      mirror: summarizeMirror(mirror),
+      perf: { elapsedMs: Math.round(performance.now() - startedAt), hardTimeoutMs: 5000 }
+    })
+
+    // Restore the file to its committed content → worktree matches HEAD → clean.
+    await mutate.modifyFile(repoB.abs, 'app.ts', 'export const REPO = "B"\n')
+    const restored = await waitFor('GSM-09c-clean-restored', () => captureColorClass(terminalId) === 'clean', 5000, 20)
+    record('GSM-09d-clean-restored-after-tracked-delete', restored, {
+      observed: observedHeader(),
+      mirror: summarizeMirror(await waitForMirrorStatus(repoB.abs, 'clean'))
+    })
+  }
+
   await waitForHeaderState('GSM-10-trailing-slash-cwd-canonicalized', `${repoA.abs}/`, {
     branch: repoA.entry.branch,
     colour: 'clean',
@@ -611,12 +738,12 @@ export async function testGitStateMirrorLatency(ctx: AutotestContext): Promise<T
   }
 
   if (!cancelled()) {
-    const mirror = await waitForMirrorStatus(repoMixed.abs, 'added')
+    const mirror = await waitForMirrorStatus(repoMixed.abs, 'mixed')
     const typed = mirror as Partial<GitStateMirrorSnapshot> | null
     record('GSM-12-mirror-snapshot-exposes-file-list', Boolean(
       typed &&
       typed.branch === repoMixed.entry.branch &&
-      typed.status === 'added' &&
+      typed.status === 'mixed' &&
       Array.isArray(typed.files) &&
       typed.files.length >= 2
     ), {

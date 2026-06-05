@@ -264,6 +264,28 @@
   box-shadow: 0 0 0 1px rgba(168, 85, 247, 0.45);
 }
 
+/* Deleted-only working tree → red (#EF4444, == --danger / Tailwind red-500). */
+.terminal-grid-branch--deleted {
+  border-color: rgba(239, 68, 68, 0.45);
+  background: rgba(239, 68, 68, 0.2);
+}
+
+.terminal-grid-branch--deleted::before {
+  background: rgba(239, 68, 68, 0.95);
+  box-shadow: 0 0 0 1px rgba(239, 68, 68, 0.4);
+}
+
+/* Mixed working tree (>=2 of add/delete/modify) → blue (#3B82F6, Tailwind blue-500). */
+.terminal-grid-branch--mixed {
+  border-color: rgba(59, 130, 246, 0.45);
+  background: rgba(59, 130, 246, 0.2);
+}
+
+.terminal-grid-branch--mixed::before {
+  background: rgba(59, 130, 246, 0.95);
+  box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.4);
+}
+
 .terminal-grid-branch--unknown {
   border-color: rgba(148, 163, 184, 0.45);
   background: rgba(148, 163, 184, 0.2);

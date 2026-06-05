@@ -358,7 +358,7 @@ export interface GitHistoryFileContentOptions {
   allowLargeFile?: boolean
 }
 
-export type TerminalGitStatus = 'clean' | 'modified' | 'added' | 'unknown'
+export type TerminalGitStatus = 'clean' | 'modified' | 'added' | 'deleted' | 'mixed' | 'unknown'
 
 export type GitDiffContentCacheMissReason =
   | 'first-load'
@@ -1048,6 +1048,7 @@ export interface DebugAPI {
   autotestHtmlSkipSaveFlow: boolean
   autotestGsmWatcherFailSubscribeOnce: boolean
   autotestGsmWatcherFailCallbackOnce: boolean
+  autotestGsmWatcherSilent: boolean
   getMirrorWatcherStatusHistory: () => GitStateMirrorWatcherStatus[]
   perfTraceCaptureContent: boolean
   virtualCursorDisabled: boolean

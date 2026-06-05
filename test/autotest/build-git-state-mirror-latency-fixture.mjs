@@ -21,7 +21,7 @@
  *   repo-B             clean       branch=main
  *   repo-modified      M           branch=dirty-yellow
  *   repo-untracked     ??          branch=dirty-purple
- *   repo-mixed         M+A+??      branch=dirty-mixed   (added wins → purple)
+ *   repo-mixed         M+A+??      branch=dirty-mixed   (add+modify mix → blue)
  *   non-git-dir        n/a         not a git repo
  *
  * Re-running this script wipes and rebuilds; intended only when the fixture
@@ -57,6 +57,13 @@ function git(cwd, args) {
 function initRepo(absPath, branch, files, commitMessage) {
   mkdirSync(absPath, { recursive: true })
   git(absPath, ['init', '-b', branch])
+  // Pin line-ending behaviour in the fixture's LOCAL config (travels inside the
+  // tarball's .git/config, overrides the user's global setting on extract). On
+  // Windows the default `core.autocrlf=true` would re-normalise our LF blobs and
+  // make clean fixtures show spurious modifications — breaking the deterministic
+  // porcelain the badge-state matrix asserts on. `-text` semantics for all repos.
+  git(absPath, ['config', 'core.autocrlf', 'false'])
+  git(absPath, ['config', 'core.safecrlf', 'false'])
   for (const [rel, content] of Object.entries(files)) {
     const full = join(absPath, rel)
     mkdirSync(dirname(full), { recursive: true })
@@ -102,7 +109,7 @@ function tarball(repoName) {
 rmSync(stagingRoot, { recursive: true, force: true })
 mkdirSync(stagingRoot, { recursive: true })
 mkdirSync(fixtureRoot, { recursive: true })
-for (const old of ['repo-A.tar.gz', 'repo-B.tar.gz', 'repo-modified.tar.gz', 'repo-untracked.tar.gz', 'repo-mixed.tar.gz', 'non-git-dir.tar.gz']) {
+for (const old of ['repo-A.tar.gz', 'repo-B.tar.gz', 'repo-modified.tar.gz', 'repo-untracked.tar.gz', 'repo-mixed.tar.gz', 'repo-deleted.tar.gz', 'repo-mixed-ad.tar.gz', 'repo-mixed-dm.tar.gz', 'repo-mixed-adm.tar.gz', 'repo-two-sided.tar.gz', 'non-git-dir.tar.gz']) {
   const oldPath = join(fixtureRoot, old)
   if (existsSync(oldPath)) rmSync(oldPath)
 }
@@ -150,11 +157,11 @@ for (const old of ['repo-A.tar.gz', 'repo-B.tar.gz', 'repo-modified.tar.gz', 're
   tarball('repo-untracked')
 }
 
-// --- repo-mixed: M + A staged + ??, branch dirty-mixed (verifies "added > modified" precedence) ---
+// --- repo-mixed: M + A staged + ??, branch dirty-mixed (verifies the mixed/blue bucket: add+modify coexist) ---
 {
   const repo = join(stagingRoot, 'repo-mixed')
   initRepo(repo, 'dirty-mixed', {
-    'README.md': '# repo-mixed\n\nFixture for "added wins" colour precedence over modified.\n',
+    'README.md': '# repo-mixed\n\nFixture for the mixed (blue) bucket: additions and modifications coexist.\n',
     'src/main.ts': 'export const VERSION = "v0"\n'
   }, 'Initial commit on dirty-mixed')
   // Modify tracked → " M".
@@ -165,6 +172,75 @@ for (const old of ['repo-A.tar.gz', 'repo-B.tar.gz', 'repo-modified.tar.gz', 're
   // Drop another untracked file → "??".
   writeFile(repo, 'untracked.txt', 'still untracked\n')
   tarball('repo-mixed')
+}
+
+// --- repo-deleted: D only, branch dirty-red (verifies the deleted/red bucket) ---
+{
+  const repo = join(stagingRoot, 'repo-deleted')
+  initRepo(repo, 'dirty-red', {
+    'README.md': '# repo-deleted\n\nFixture for the deleted (red) bucket: deletions are the only change.\n',
+    'src/gone.ts': 'export const GONE = true\n'
+  }, 'Initial commit on dirty-red')
+  // Remove a tracked file from the worktree → " D" (deletions only → deleted).
+  rmSync(join(repo, 'src/gone.ts'), { force: true })
+  tarball('repo-deleted')
+}
+
+// --- repo-mixed-ad: A + D across files, branch dirty-ad (mixed = add + delete) ---
+{
+  const repo = join(stagingRoot, 'repo-mixed-ad')
+  initRepo(repo, 'dirty-ad', {
+    'README.md': '# repo-mixed-ad\n\nMixed (blue): a staged add coexists with a worktree delete.\n',
+    'src/old.ts': 'export const OLD = true\n'
+  }, 'Initial commit on dirty-ad')
+  writeFile(repo, 'src/new.ts', 'export const NEW = true\n') // new file
+  git(repo, ['add', 'src/new.ts'])                           // "A " staged
+  rmSync(join(repo, 'src/old.ts'), { force: true })          // " D" worktree delete
+  tarball('repo-mixed-ad')
+}
+
+// --- repo-mixed-dm: D + M across files, branch dirty-dm (mixed = delete + modify) ---
+{
+  const repo = join(stagingRoot, 'repo-mixed-dm')
+  initRepo(repo, 'dirty-dm', {
+    'README.md': '# repo-mixed-dm\n\nMixed (blue): a worktree delete coexists with a modify.\n',
+    'src/keep.ts': 'export const KEEP = "v0"\n',
+    'src/gone.ts': 'export const GONE = true\n'
+  }, 'Initial commit on dirty-dm')
+  writeFile(repo, 'src/keep.ts', 'export const KEEP = "v1"\n') // " M"
+  rmSync(join(repo, 'src/gone.ts'), { force: true })           // " D"
+  tarball('repo-mixed-dm')
+}
+
+// --- repo-mixed-adm: A + D + M (the full triple), branch dirty-adm ---
+{
+  const repo = join(stagingRoot, 'repo-mixed-adm')
+  initRepo(repo, 'dirty-adm', {
+    'README.md': '# repo-mixed-adm\n\nMixed (blue): add + delete + modify all coexist.\n',
+    'src/keep.ts': 'export const KEEP = "v0"\n',
+    'src/gone.ts': 'export const GONE = true\n'
+  }, 'Initial commit on dirty-adm')
+  writeFile(repo, 'src/keep.ts', 'export const KEEP = "v1"\n') // " M"
+  rmSync(join(repo, 'src/gone.ts'), { force: true })           // " D"
+  writeFile(repo, 'src/new.ts', 'export const NEW = true\n')   // new file
+  git(repo, ['add', 'src/new.ts'])                             // "A "
+  tarball('repo-mixed-adm')
+}
+
+// --- repo-two-sided: ONE file staged-modified + worktree-deleted → XY "MD", branch dirty-twosided ---
+// Exercises the two-sided-XY → mixed rule (collectXyCategories) end-to-end: a
+// single record carries BOTH index 'M' and worktree 'D', so the badge must be
+// mixed (blue), not collapse to deleted.
+{
+  const repo = join(stagingRoot, 'repo-two-sided')
+  initRepo(repo, 'dirty-twosided', {
+    'README.md': '# repo-two-sided\n\nMixed (blue): ONE file is staged-modified AND worktree-deleted (XY="MD").\n',
+    'src/twosided.ts': 'export const V = "v0"\n'
+  }, 'Initial commit on dirty-twosided')
+  writeFile(repo, 'src/twosided.ts', 'export const V = "v1-staged"\n') // modify
+  git(repo, ['add', 'src/twosided.ts'])                                // stage → index "M"
+  rmSync(join(repo, 'src/twosided.ts'), { force: true })               // worktree delete → "D"
+  tarball('repo-two-sided')
 }
 
 // --- non-git-dir: plain directory, no .git ---
@@ -183,7 +259,12 @@ const manifest = {
     { name: 'repo-B',          branch: 'main',         expectedStatus: 'clean'    },
     { name: 'repo-modified',   branch: 'dirty-yellow', expectedStatus: 'modified' },
     { name: 'repo-untracked',  branch: 'dirty-purple', expectedStatus: 'added'    },
-    { name: 'repo-mixed',      branch: 'dirty-mixed',  expectedStatus: 'added'    },
+    { name: 'repo-mixed',      branch: 'dirty-mixed',  expectedStatus: 'mixed'    },
+    { name: 'repo-deleted',    branch: 'dirty-red',    expectedStatus: 'deleted'  },
+    { name: 'repo-mixed-ad',   branch: 'dirty-ad',     expectedStatus: 'mixed'    },
+    { name: 'repo-mixed-dm',   branch: 'dirty-dm',     expectedStatus: 'mixed'    },
+    { name: 'repo-mixed-adm',  branch: 'dirty-adm',    expectedStatus: 'mixed'    },
+    { name: 'repo-two-sided',  branch: 'dirty-twosided', expectedStatus: 'mixed'  },
     { name: 'non-git-dir',     branch: null,           expectedStatus: 'unknown'  }
   ]
 }

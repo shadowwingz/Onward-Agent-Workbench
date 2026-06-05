@@ -489,7 +489,7 @@ export interface GitHistoryFileContentOptions {
   allowLargeFile?: boolean
 }
 
-export type TerminalGitStatus = 'clean' | 'modified' | 'added' | 'unknown'
+export type TerminalGitStatus = 'clean' | 'modified' | 'added' | 'deleted' | 'mixed' | 'unknown'
 
 export interface TerminalGitInfo {
   cwd: string | null
@@ -1210,6 +1210,7 @@ export interface DebugAPI {
   autotestHtmlSkipSaveFlow: boolean
   autotestGsmWatcherFailSubscribeOnce: boolean
   autotestGsmWatcherFailCallbackOnce: boolean
+  autotestGsmWatcherSilent: boolean
   getMirrorWatcherStatusHistory: () => unknown[]
   perfTraceCaptureContent: boolean
   // ONWARD_DISABLE_VIRTUAL_CURSOR=1 disables the Prompt textarea's
@@ -2123,6 +2124,8 @@ const debugAutotestGsmWatcherFailSubscribeOnce =
   debugAutotestEnabled && process.env.ONWARD_AUTOTEST_GSM_WATCHER_FAIL_SUBSCRIBE_ONCE === '1'
 const debugAutotestGsmWatcherFailCallbackOnce =
   debugAutotestEnabled && process.env.ONWARD_AUTOTEST_GSM_WATCHER_FAIL_CALLBACK_ONCE === '1'
+const debugAutotestGsmWatcherSilent =
+  debugAutotestEnabled && process.env.ONWARD_AUTOTEST_GSM_WATCHER_SILENT === '1'
 const perfTraceCaptureContent = process.env.ONWARD_PERF_TRACE_CAPTURE_CONTENT === '1'
 const virtualCursorDisabled = process.env.ONWARD_DISABLE_VIRTUAL_CURSOR === '1'
 const gitDiffPerformanceDiagnosticsEnabled =
@@ -2151,6 +2154,7 @@ const debugAPI: DebugAPI = {
   autotestHtmlSkipSaveFlow: debugAutotestHtmlSkipSaveFlow,
   autotestGsmWatcherFailSubscribeOnce: debugAutotestGsmWatcherFailSubscribeOnce,
   autotestGsmWatcherFailCallbackOnce: debugAutotestGsmWatcherFailCallbackOnce,
+  autotestGsmWatcherSilent: debugAutotestGsmWatcherSilent,
   getMirrorWatcherStatusHistory: () => {
     return mirrorWatcherStatusHistory.slice()
   },

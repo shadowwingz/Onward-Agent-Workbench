@@ -84,15 +84,22 @@ try {
 
   $TraceDir = Join-Path $RootDir "traces\perf"
   $LatestPointer = Join-Path $TraceDir "latest.txt"
+  $LatestTracePath = $null
   if (Test-Path $LatestPointer) {
     $LatestTracePath = (Get-Content $LatestPointer -Raw).Trim()
-  } else {
-    $LatestTracePath = Get-ChildItem $TraceDir -Filter "*.json" -ErrorAction SilentlyContinue |
+  }
+  # Robustness (mirrors the .sh): the pointer may be missing, stale, or — when a
+  # prior run was killed mid-flush — hold the trace DIRECTORY path instead of a
+  # chunk file. In any of those cases fall back to the newest perf chunk by mtime.
+  # Perf chunks are ndjson-chunked perf-*.jsonl (older runs may have *.json).
+  if (-not $LatestTracePath -or -not (Test-Path $LatestTracePath -PathType Leaf)) {
+    $LatestTracePath = Get-ChildItem -Path $TraceDir -File -ErrorAction SilentlyContinue |
+      Where-Object { $_.Name -like "perf-*.jsonl" -or $_.Extension -eq ".json" } |
       Sort-Object LastWriteTime -Descending |
       Select-Object -First 1 |
       ForEach-Object { $_.FullName }
   }
-  if (-not $LatestTracePath -or -not (Test-Path $LatestTracePath)) {
+  if (-not $LatestTracePath -or -not (Test-Path $LatestTracePath -PathType Leaf)) {
     Write-Error "Cannot locate perf trace file under $TraceDir"
   }
 

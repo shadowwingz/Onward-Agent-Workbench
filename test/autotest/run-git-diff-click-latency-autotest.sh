@@ -113,12 +113,16 @@ fi
 # silently and the panel's stats / Perfetto SQL queries would lie.
 TRACE_DIR="$REPO_ROOT/traces/perf"
 LATEST_POINTER="$TRACE_DIR/latest.txt"
+LATEST_TRACE_PATH=""
 if [[ -f "$LATEST_POINTER" ]]; then
   LATEST_TRACE_PATH="$(cat "$LATEST_POINTER")"
-else
-  # Fallback: pick the newest *.json under traces/perf if the pointer
-  # file is missing (older runs / partially flushed startup sequences).
-  LATEST_TRACE_PATH="$(ls -t "$TRACE_DIR"/*.json 2>/dev/null | head -n 1 || true)"
+fi
+# Robustness: the pointer may be missing, stale, or — when a prior run was
+# killed mid-flush — hold the trace DIRECTORY path instead of a chunk file.
+# In any of those cases fall back to the newest perf chunk by mtime. Perf
+# chunks are ndjson-chunked `perf-*.jsonl` (older runs may have `*.json`).
+if [[ -z "$LATEST_TRACE_PATH" || ! -f "$LATEST_TRACE_PATH" ]]; then
+  LATEST_TRACE_PATH="$(ls -t "$TRACE_DIR"/perf-*.jsonl "$TRACE_DIR"/*.json 2>/dev/null | head -n 1 || true)"
 fi
 
 if [[ -z "$LATEST_TRACE_PATH" || ! -f "$LATEST_TRACE_PATH" ]]; then

@@ -21,6 +21,14 @@ import type {
   GitStatusCode,
   TerminalGitStatus
 } from './git-utils'
+// Explicit `.ts` extension (sanctioned by tsconfig `allowImportingTsExtensions`)
+// so the strip-types unit-test loader can resolve this leaf → leaf value import;
+// esbuild / electron-vite bundle it the same as any extensionless import.
+import {
+  collectXyCategories,
+  deriveTerminalGitStatus,
+  type GitChangeCategory
+} from './git-status-classify.ts'
 
 export function normalizeGitStatusCode(raw: string): GitStatusCode {
   switch (raw) {
@@ -93,20 +101,6 @@ export function getFieldAfterSpaceCount(record: string, spacesBeforeField: numbe
   return null
 }
 
-function normalizeStatusFromCode(code: string): TerminalGitStatus {
-  if (!code) return 'clean'
-  if (code === '??' || code.includes('A') || code.includes('D') || code.includes('R') || code.includes('C')) return 'added'
-  if (code.includes('M') || code.includes('U')) return 'modified'
-  return 'clean'
-}
-
-function mergeStatus(a: TerminalGitStatus, b: TerminalGitStatus): TerminalGitStatus {
-  if (a === 'added' || b === 'added') return 'added'
-  if (a === 'modified' || b === 'modified') return 'modified'
-  if (a === 'unknown' || b === 'unknown') return 'unknown'
-  return 'clean'
-}
-
 export interface ParsedStatus {
   branch: string | null
   status: TerminalGitStatus
@@ -124,8 +118,8 @@ export function parseStatusPorcelainV2Z(output: string, repoRoot: string): Parse
   const files: GitFileStatus[] = []
   let branch: string | null = null
   let branchOid: string | null = null
-  let aggregate: TerminalGitStatus = 'clean'
-  if (!output) return { branch, status: aggregate, files }
+  const categories = new Set<GitChangeCategory>()
+  if (!output) return { branch, status: 'clean', files }
 
   const tokens = output.split('\0')
   let i = 0
@@ -153,7 +147,7 @@ export function parseStatusPorcelainV2Z(output: string, repoRoot: string): Parse
     if (line.startsWith('? ')) {
       const filename = line.slice(2)
       if (filename) {
-        aggregate = mergeStatus(aggregate, 'added')
+        categories.add('add')
         files.push(makeGitFileStatus({
           filename,
           status: '?',
@@ -196,7 +190,9 @@ export function parseStatusPorcelainV2Z(output: string, repoRoot: string): Parse
     }
 
     if (type === 'u') {
-      aggregate = mergeStatus(aggregate, 'modified')
+      // Unmerged record → conflict → modify bucket (never classify its XY: an
+      // 'AA' / 'DD' conflict is an edit to existing content, not add/delete).
+      categories.add('mod')
       files.push(makeGitFileStatus({
         filename,
         status: '!',
@@ -209,7 +205,10 @@ export function parseStatusPorcelainV2Z(output: string, repoRoot: string): Parse
       continue
     }
 
-    aggregate = mergeStatus(aggregate, normalizeStatusFromCode(`${indexStatus}${worktreeStatus}`))
+    // Type-1 ordinary change or type-2 rename/copy: a new path (A/R/C) is a
+    // single 'add'; a genuinely two-sided file (e.g. 'MD') contributes each
+    // side's change kind, so it can resolve to 'mixed'.
+    collectXyCategories(`${indexStatus}${worktreeStatus}`, categories)
 
     if (indexStatus && indexStatus !== '.') {
       files.push(makeGitFileStatus({
@@ -242,5 +241,5 @@ export function parseStatusPorcelainV2Z(output: string, repoRoot: string): Parse
     branch = branchOid ? branchOid.slice(0, 7) : null
   }
 
-  return { branch, status: aggregate, files }
+  return { branch, status: deriveTerminalGitStatus(categories), files }
 }

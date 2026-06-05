@@ -23,7 +23,32 @@
     {
       "name": "repo-mixed",
       "branch": "dirty-mixed",
-      "expectedStatus": "added"
+      "expectedStatus": "mixed"
+    },
+    {
+      "name": "repo-deleted",
+      "branch": "dirty-red",
+      "expectedStatus": "deleted"
+    },
+    {
+      "name": "repo-mixed-ad",
+      "branch": "dirty-ad",
+      "expectedStatus": "mixed"
+    },
+    {
+      "name": "repo-mixed-dm",
+      "branch": "dirty-dm",
+      "expectedStatus": "mixed"
+    },
+    {
+      "name": "repo-mixed-adm",
+      "branch": "dirty-adm",
+      "expectedStatus": "mixed"
+    },
+    {
+      "name": "repo-two-sided",
+      "branch": "dirty-twosided",
+      "expectedStatus": "mixed"
     },
     {
       "name": "non-git-dir",

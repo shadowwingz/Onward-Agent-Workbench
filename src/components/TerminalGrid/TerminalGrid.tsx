@@ -15,7 +15,7 @@ import { GitHistoryViewer } from '../GitHistoryViewer'
 import { ProjectEditor } from '../ProjectEditor'
 import { SubpagePanelShell, type SubpagePanelShellState } from '../SubpageSwitcher'
 import { CodingAgentModal } from '../CodingAgentModal'
-import type { CodingAgentConfigInput, GitStateMirrorSnapshot, GitStateMirrorDelta } from '../../types/electron'
+import type { CodingAgentConfigInput, GitStateMirrorSnapshot, GitStateMirrorDelta, TerminalGitStatus } from '../../types/electron'
 import { BrowserPanel } from '../BrowserPanel/BrowserPanel'
 import { useSettings } from '../../contexts/SettingsContext'
 import { useAppState } from '../../contexts/AppStateContext'
@@ -117,7 +117,7 @@ interface TerminalGitInfo {
   repoRoot: string | null
   branch: string | null
   repoName: string | null
-  status: 'clean' | 'modified' | 'added' | 'unknown' | null
+  status: TerminalGitStatus | null
 }
 
 const TERMINAL_PATH_SEGMENTS = 3
@@ -328,7 +328,7 @@ export const TerminalGrid = memo(function TerminalGrid({
   const lastRenderedGitSignalRef = useRef<Record<string, {
     cwd: string | null
     branch: string | null
-    status: 'clean' | 'modified' | 'added' | 'unknown' | null
+    status: TerminalGitStatus | null
   }>>({})
   // macOS canonicalises `/var/...` to `/private/var/...` (the actual mount
   // point of the symlink). The mirror worker uses `path.resolve` so its

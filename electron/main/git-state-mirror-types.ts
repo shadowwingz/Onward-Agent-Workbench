@@ -142,11 +142,19 @@ export type MainToMirrorMessage =
   | { kind: 'switch-cwd'; terminalId: string; newCwd: string | null }
   | { kind: 'request-file-body'; cwd: string; fileKey: string; force: boolean; replyId: number }
   | { kind: 'focus-resync'; cwd: string | null }
+  // Always-on reconcile heartbeat input: the focused terminal's cwd, so the
+  // worker polls that repo at 1 s and the rest of the visible repos at 3 s.
+  | { kind: 'reconcile-focus'; cwd: string | null }
   | { kind: 'shutdown' }
 
 export type MirrorToMainMessage =
   | { kind: 'ready' }
-  | { kind: 'shutdown-complete' }
+  | {
+      kind: 'shutdown-complete'
+      // Native-quiesce breadcrumb so a future teardown-crash trace shows whether
+      // the worker actually reached zero live watcher subscriptions before close.
+      quiesce?: { activeSubscriptions: number; pendingUnsubscribes: number; settledMs: number; deadlineHit: boolean }
+    }
   | { kind: 'mirror-update'; cwd: string; state: MirrorState; delta: MirrorDelta }
   | { kind: 'file-body-update'; replyId: number; body: MirrorFileBody | null; error?: string }
   | { kind: 'watcher-status'; status: MirrorWatcherStatus }

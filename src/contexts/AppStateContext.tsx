@@ -663,11 +663,17 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     const patch = buildAppStatePatch(previous, newState)
     lastPersistedStateRef.current = newState
     if (Object.keys(patch).length === 0) return
+    // Best-effort BACKGROUND persistence: swallow a transient IPC rejection
+    // (main handler not yet registered at startup, or already removed during
+    // teardown) so it never becomes an UNCAUGHT promise rejection — which under
+    // load aborts autotests and, in production, surfaces as a renderer console
+    // error for a save that will retry on the next state change anyway. Quit
+    // uses the awaited flushAppState path above, so no data is lost here.
     if (Object.keys(patch).length >= APP_STATE_PATCH_KEYS.length) {
-      window.electronAPI.appState.save(newState)
+      void window.electronAPI.appState.save(newState).catch(() => { /* best effort */ })
       return
     }
-    window.electronAPI.appState.savePatch(patch)
+    void window.electronAPI.appState.savePatch(patch).catch(() => { /* best effort */ })
   }, [])
 
   // Debounced state save

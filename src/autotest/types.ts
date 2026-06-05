@@ -827,7 +827,7 @@ export interface TerminalDebugApi {
     repoName: string | null
     cwd: string | null
     repoRoot: string | null
-    status: 'clean' | 'modified' | 'added' | 'unknown' | null
+    status: 'clean' | 'modified' | 'added' | 'deleted' | 'mixed' | 'unknown' | null
   } | null
   openTitleMenu: (terminalId?: string) => boolean
   closeTitleMenu: () => boolean
@@ -869,7 +869,7 @@ export interface TerminalDebugApi {
       repoName?: string | null
       cwd?: string | null
       repoRoot?: string | null
-      status?: 'clean' | 'modified' | 'added' | 'unknown' | null
+      status?: 'clean' | 'modified' | 'added' | 'deleted' | 'mixed' | 'unknown' | null
     } | null
   ) => boolean
   closeAllSubpages: () => boolean

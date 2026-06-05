@@ -11,7 +11,12 @@ import { platform } from 'os'
 import { parentPort } from 'worker_threads'
 import { promisify } from 'util'
 
-type TerminalGitStatus = 'clean' | 'modified' | 'added' | 'unknown'
+import {
+  collectXyCategories,
+  deriveTerminalGitStatus,
+  type GitChangeCategory,
+  type TerminalGitStatus
+} from './git-status-classify'
 
 type GitBranchAndStatus = {
   branch: string | null
@@ -181,35 +186,11 @@ async function getRepoFingerprint(gitDir: string | null, repoRoot: string): Prom
   return [headToken, indexToken, packedRefsToken, refsToken, logsHeadToken].join('|')
 }
 
-function normalizeGitStatusFromCode(statusCode: string): TerminalGitStatus {
-  if (!statusCode) return 'clean'
-  if (
-    statusCode === '??' ||
-    statusCode.includes('A') ||
-    statusCode.includes('D') ||
-    statusCode.includes('R') ||
-    statusCode.includes('C')
-  ) {
-    return 'added'
-  }
-  if (statusCode.includes('M') || statusCode.includes('U')) {
-    return 'modified'
-  }
-  return 'clean'
-}
-
-function mergeTerminalStatus(a: TerminalGitStatus, b: TerminalGitStatus): TerminalGitStatus {
-  if (a === 'added' || b === 'added') return 'added'
-  if (a === 'modified' || b === 'modified') return 'modified'
-  if (a === 'unknown' || b === 'unknown') return 'unknown'
-  return 'clean'
-}
-
 function parsePorcelainV2BranchAndStatus(output: string): GitBranchAndStatus {
   const lines = output.split('\n').map((line) => line.trim()).filter(Boolean)
   let branchHead: string | null = null
   let branchOid: string | null = null
-  let status: TerminalGitStatus = 'clean'
+  const categories = new Set<GitChangeCategory>()
 
   for (const line of lines) {
     if (line.startsWith('# branch.head ')) {
@@ -221,16 +202,21 @@ function parsePorcelainV2BranchAndStatus(output: string): GitBranchAndStatus {
       continue
     }
     if (line.startsWith('? ')) {
-      status = 'added'
+      categories.add('add')
       continue
     }
-    if (line.startsWith('1 ') || line.startsWith('2 ') || line.startsWith('u ')) {
+    if (line.startsWith('u ')) {
+      // Unmerged record → conflict → modify (never classify its XY).
+      categories.add('mod')
+      continue
+    }
+    if (line.startsWith('1 ') || line.startsWith('2 ')) {
       const tokens = line.split(' ')
-      const statusCode = tokens[1] || ''
-      status = mergeTerminalStatus(status, normalizeGitStatusFromCode(statusCode))
+      collectXyCategories(tokens[1] || '', categories)
     }
   }
 
+  const status = deriveTerminalGitStatus(categories)
   const detached = branchHead === '(detached)' || branchHead === 'HEAD'
   const branch = branchHead && !detached ? branchHead : (branchOid ? branchOid.slice(0, 7) : null)
   return { branch, status }

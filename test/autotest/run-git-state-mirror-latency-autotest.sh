@@ -108,6 +108,9 @@ run_pass() {
 run_pass "baseline"
 run_pass "subscribe-failure" ONWARD_AUTOTEST_GSM_WATCHER_FAIL_SUBSCRIBE_ONCE=1
 run_pass "callback-failure" ONWARD_AUTOTEST_GSM_WATCHER_FAIL_CALLBACK_ONCE=1
+# Silent watcher (subscribed, no error, drops every event) — the production
+# failure mode. Proves the always-on reconcile heartbeat still refreshes (GSM-19).
+run_pass "silent-watcher" ONWARD_AUTOTEST_GSM_WATCHER_SILENT=1
 
 echo ""
 echo "=== Test log (last 60 lines) ==="
@@ -166,6 +169,12 @@ fi
 
 if ! grep -q "GSM-16-watcher-callback-failure-recovers" "$LOG_FILE"; then
   echo "Missing GSM-16 marker; the callback failure recovery test did not run to completion" >&2
+  tail -n 40 "$LOG_FILE" >&2
+  exit 1
+fi
+
+if ! grep -q "GSM-19-silent-watcher-reconcile-refresh" "$LOG_FILE"; then
+  echo "Missing GSM-19 marker; the silent-watcher reconcile-heartbeat test did not run to completion" >&2
   tail -n 40 "$LOG_FILE" >&2
   exit 1
 fi

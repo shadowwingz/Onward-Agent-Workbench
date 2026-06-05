@@ -403,8 +403,27 @@ export const PERF_TRACE_EVENT = {
   WORKER_GIT_STATE_MIRROR_WATCHER_SUSPENDED_PROBE: 'worker:git-state-mirror.watcher-suspended-probe',
   WORKER_GIT_STATE_MIRROR_CHANGE_FINGERPRINT: 'worker:git-state-mirror.change-fingerprint',
   WORKER_GIT_STATE_MIRROR_RECOMPUTE_DONE: 'worker:git-state-mirror.recompute-status-done',
+  // Always-on reconcile heartbeat (parallel to the watcher; see
+  // docs/git-status-reconcile-design.md). reconcile-tick fires each worker-local
+  // heartbeat that has due repos; reconcile-found-drift fires when a heartbeat
+  // reconcile produced a change while no watcher-fire had occurred recently —
+  // i.e. the watcher silently missed it (the failure mode behind the
+  // green-badge-with-untracked-file bug).
+  WORKER_GIT_STATE_MIRROR_RECONCILE_TICK: 'worker:git-state-mirror.reconcile-tick',
+  WORKER_GIT_STATE_MIRROR_RECONCILE_FOUND_DRIFT: 'worker:git-state-mirror.reconcile-found-drift',
   MAIN_GIT_STATE_MIRROR_FANOUT: 'main:git-state-mirror.fanout',
   MAIN_GIT_STATE_MIRROR_WORKER_SHUTDOWN: 'main:git-state-mirror.worker-shutdown',
+  // Teardown-quiesce diagnostics (the @parcel/watcher worker-teardown SIGABRT fix).
+  // Worker emits when it has proven native quiescence before closing its port;
+  // main records receipt of that ack (which defuses the unsafe terminate timer);
+  // the respawn-cancel breadcrumb fires when dispose() suppresses a pending
+  // respawn so no fresh worker is spawned into a quitting app.
+  WORKER_GIT_STATE_MIRROR_SHUTDOWN_QUIESCED: 'worker:git-state-mirror.shutdown-quiesced',
+  MAIN_GIT_STATE_MIRROR_WORKER_SHUTDOWN_ACK: 'main:git-state-mirror.worker-shutdown-ack',
+  MAIN_GIT_STATE_MIRROR_RESPAWN_CANCELLED: 'main:git-state-mirror.respawn-cancelled',
+  // App-quit drained the GitStateMirror cooperatively before the runtime froze
+  // the worker isolate (the will-quit fire-and-forget fix).
+  MAIN_APP_QUIT_GSM_DRAINED: 'main:app.quit-gsm-drained',
   RENDERER_TERMINAL_TITLE_BRANCH_RENDERED: 'renderer:terminal-title.branch-rendered',
   RENDERER_TERMINAL_TITLE_COLOR_RENDERED: 'renderer:terminal-title.color-rendered',
   RENDERER_GIT_DIFF_MANUAL_REFRESH: 'renderer:git-diff.manual-refresh',

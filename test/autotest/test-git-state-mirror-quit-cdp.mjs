@@ -4,7 +4,7 @@
  */
 
 import { spawn, execFile } from 'node:child_process'
-import { createWriteStream, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { createWriteStream, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 
@@ -350,12 +350,14 @@ function launchApp({ port, userDataDir, stream, trial }) {
   let rejectBrowserWebSocket
   let browserWebSocketSettled = false
   let devToolsBuffer = ''
+  let captured = ''
   const browserWebSocketPromise = new Promise((resolve, reject) => {
     resolveBrowserWebSocket = resolve
     rejectBrowserWebSocket = reject
   })
   const noteChunk = (label, chunk) => {
     const text = chunk.toString()
+    captured += text
     appendLog(stream, `[trial ${trial} ${label}] ${text.replace(/\n$/, '')}`)
     if (browserWebSocketSettled) return
     devToolsBuffer += text
@@ -382,8 +384,25 @@ function launchApp({ port, userDataDir, stream, trial }) {
     browserWebSocketSettled = true
     rejectBrowserWebSocket(new Error(`App exited before DevTools WebSocket announcement (code=${code}, signal=${signal})`))
   })
-  return { child, browserWebSocketPromise }
+  return { child, browserWebSocketPromise, getCapturedLog: () => captured }
 }
+
+// Abort-class tokens that prove a native @parcel/watcher worker-teardown crash.
+// CROSS-PLATFORM contract: the PRIMARY gate is the clean exit below
+// (exit.code===0 && exit.signal===null) — that is the platform-neutral "did not
+// crash" proof (Windows reports no POSIX signal; a crash is a non-zero code).
+// This token scan is the ENRICHMENT that also catches an abort that still exits
+// 0: most tokens are V8 / N-API / Node fatal messages emitted on ALL platforms;
+// SIGABRT / abort() are the POSIX (macOS/Linux) signature; the access-violation
+// tokens are the Windows native-crash signature.
+const ABORT_TOKENS = [
+  // V8 / N-API / Node fatal — all platforms.
+  'napi_fatal_error', 'FATAL ERROR', 'Assertion failed', 'node::OnFatalError',
+  // POSIX (macOS / Linux).
+  'SIGABRT', 'abort()',
+  // Windows native crash.
+  'Access violation', '0xC0000005', 'STATUS_ACCESS_VIOLATION'
+]
 
 async function runTrial(trial, stream) {
   const port = BASE_CDP_PORT + trial - 1
@@ -400,6 +419,10 @@ async function runTrial(trial, stream) {
   const appLaunch = launchApp({ port, userDataDir, stream, trial })
   const { child } = appLaunch
   let cdp = null
+  // Hoisted so the finally can always stop the churn loop, even when
+  // requestGracefulQuit / waitForExit throw before the success-path stop runs.
+  let churning = false
+  let churnLoop = null
   const startedAt = Date.now()
   const detail = {
     trial,
@@ -428,13 +451,55 @@ async function runTrial(trial, stream) {
     }
     appendLog(stream, `GSMQ-02-watcher-mutation-observed trial=${trial} ok`)
 
-    writeFileSync(join(repoDir, `queued-before-quit-${trial}.txt`), `queued ${Date.now()}\n`)
-    await sleep(50)
+    // GSMQ-04: sustained FS churn THROUGH teardown. Unlike the old single
+    // queued-file + sleep(50), this keeps native @parcel/watcher callbacks
+    // continuously in-flight at the exact instant of quit (no pre-quit settle),
+    // reproducing the teardown race that produced the SIGABRT. The churn loop
+    // runs until the app process has fully exited, so the worker's quiesce
+    // barrier is exercised against live event delivery + pending unsubscribes.
+    churning = true
+    churnLoop = (async () => {
+      let writes = 0
+      while (churning) {
+        const file = join(repoDir, `churn-${writes % 8}.txt`)
+        try {
+          writeFileSync(file, `churn ${writes} ${Date.now()}\n`)
+          if (writes % 3 === 0 && existsSync(file)) rmSync(file, { force: true })
+          writes += 1
+        } catch { /* repo dir may be removed during cleanup — ignore */ }
+        await sleep(4)
+      }
+      return writes
+    })()
+
     detail.quitRequest = await requestGracefulQuit(userDataDir)
-    detail.exit = await waitForExit(child, 15000)
+    detail.exit = await waitForExit(child, 20000)
+    churning = false
+    detail.churnWrites = await churnLoop.catch(() => 0)
     detail.elapsedMs = Date.now() - startedAt
-    detail.ok = detail.exit.code === 0 && detail.exit.signal === null
-    appendLog(stream, `GSMQ-03-clean-process-exit trial=${trial} ok=${detail.ok}`)
+
+    // Fix-verification: clean process exit AND no abort-class token in THIS
+    // trial's app stdout/stderr AND the cooperative drain was taken (the worker
+    // reached clean-exit / emitted its quiesce breadcrumb, not a forced kill).
+    const appLog = appLaunch.getCapturedLog()
+    const abortToken = ABORT_TOKENS.find((token) => appLog.includes(token)) ?? null
+    const cleanExit = detail.exit.code === 0 && detail.exit.signal === null
+    const drainedCooperatively =
+      appLog.includes('shutdown-quiesced') ||
+      appLog.includes('worker EXITED') && appLog.includes('code: 0')
+    detail.abortToken = abortToken
+    detail.cleanExit = cleanExit
+    detail.drainedCooperatively = drainedCooperatively
+    // GSMQ-04 exists to prove the COOPERATIVE quiesce path was taken, so a clean
+    // exit alone is not enough: a forced terminate that still exits 0 must NOT
+    // silently pass. Gate on the cooperative-drain breadcrumb too.
+    detail.ok = cleanExit && abortToken === null && drainedCooperatively
+    appendLog(
+      stream,
+      `GSMQ-04-sustained-churn-clean-exit trial=${trial} ok=${detail.ok} ` +
+      `exit=${JSON.stringify(detail.exit)} churnWrites=${detail.churnWrites} ` +
+      `abortToken=${abortToken ?? 'none'} cooperativeDrain=${drainedCooperatively}`
+    )
     return detail
   } catch (error) {
     detail.error = serializeError(error)
@@ -451,6 +516,13 @@ async function runTrial(trial, stream) {
     detail.ok = false
     return detail
   } finally {
+    // Always stop + drain the churn loop, even when the success-path stop was
+    // skipped by a throw — otherwise it spins (writing every 4 ms) forever and
+    // keeps the Node autotest process alive past the failing trial.
+    churning = false
+    if (churnLoop) {
+      try { await churnLoop } catch { /* ignore */ }
+    }
     try { cdp?.close() } catch { /* ignore */ }
   }
 }

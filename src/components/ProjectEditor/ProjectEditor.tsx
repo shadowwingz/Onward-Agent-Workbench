@@ -7920,9 +7920,17 @@ export function ProjectEditor({
       logBootstrap('waiting-for-tree')
       return
     }
-    if (autotestRunRef.current) return
+    // Guard the WHOLE suite against re-running. `autotestRunRef` is per-component
+    // and RESETS when the suite's own navigation (reopen editor / switch tab)
+    // unmounts + remounts ProjectEditor — which re-ran the entire suite, double-
+    // created fixtures, and left residue (e.g. an undeleted untracked file) that
+    // polluted later autotest passes' clean preconditions. A window-level flag
+    // survives remounts so the suite runs exactly once per app launch.
+    const autotestWin = window as unknown as { __onwardAutotestSuiteStarted?: boolean }
+    if (autotestRunRef.current || autotestWin.__onwardAutotestSuiteStarted) return
     logBootstrap('starting')
     autotestRunRef.current = true
+    autotestWin.__onwardAutotestSuiteStarted = true
 
     const log = (message: string, data?: unknown) => {
       const prefix = '[AutoTest]'

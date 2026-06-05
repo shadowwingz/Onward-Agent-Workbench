@@ -37,7 +37,7 @@ export class PendingCommitError extends Error {
 export interface MirrorFixtureRepo {
   name: string
   branch: string | null
-  expectedStatus: 'clean' | 'modified' | 'added' | 'unknown'
+  expectedStatus: 'clean' | 'modified' | 'added' | 'deleted' | 'mixed' | 'unknown'
 }
 
 export interface MirrorFixtureManifest {
@@ -117,16 +117,22 @@ export const mutate = {
 
 /**
  * Read the colour-class encoded on the active terminal's branch chip.
- * Returns one of the four canonical states; null when the chip is absent
+ * Returns one of the six canonical states; null when the chip is absent
  * (e.g. cwd outside a git repo / overlay subpage covering the terminal).
+ * The chip carries exactly one state class, so the checks are mutually
+ * exclusive and the order is only a fall-through to 'clean'.
  */
-export function captureColorClass(terminalId: string): 'clean' | 'modified' | 'added' | 'unknown' | null {
+export function captureColorClass(
+  terminalId: string
+): 'clean' | 'modified' | 'added' | 'deleted' | 'mixed' | 'unknown' | null {
   const cell = document.querySelector(`.terminal-grid-cell[data-terminal-id="${terminalId}"]`)
   if (!cell) return null
   const chip = cell.querySelector('.terminal-grid-branch')
   if (!chip) return null
   if (chip.classList.contains('terminal-grid-branch--modified')) return 'modified'
   if (chip.classList.contains('terminal-grid-branch--added')) return 'added'
+  if (chip.classList.contains('terminal-grid-branch--deleted')) return 'deleted'
+  if (chip.classList.contains('terminal-grid-branch--mixed')) return 'mixed'
   if (chip.classList.contains('terminal-grid-branch--unknown')) return 'unknown'
   return 'clean'
 }

@@ -227,14 +227,75 @@ test('parseStatusPorcelainV2Z marks unmerged (u) rows with status=! changeType=c
   assert.equal(result.status, 'modified')
 })
 
-test('parseStatusPorcelainV2Z status aggregation: any "added" wins over "modified"', () => {
+test('parseStatusPorcelainV2Z status aggregation: untracked + modified across files → mixed', () => {
+  // {add (untracked), mod} = two distinct categories → the blue mixed bucket.
+  // (Pre-5-state this collapsed to "added"; the new split is the whole point.)
   const out = '? untracked.md\0' + '1 .M N... 100644 100644 100644 a b modified.md\0'
+  const result = parseStatusPorcelainV2Z(out, '/repo')
+  assert.equal(result.status, 'mixed')
+})
+
+test('parseStatusPorcelainV2Z status aggregation: untracked-only → added', () => {
+  const out = '? a.md\0' + '? b.md\0'
   const result = parseStatusPorcelainV2Z(out, '/repo')
   assert.equal(result.status, 'added')
 })
 
-test('parseStatusPorcelainV2Z status aggregation: modified wins when no untracked / add / del / rename', () => {
+test('parseStatusPorcelainV2Z status aggregation: modified-only → modified', () => {
   const out = '1 .M N... 100644 100644 100644 a b modified.md\0'
   const result = parseStatusPorcelainV2Z(out, '/repo')
   assert.equal(result.status, 'modified')
+})
+
+test('parseStatusPorcelainV2Z status aggregation: worktree-delete only → deleted', () => {
+  // "1 .D ..." — tracked file removed from the worktree → red deleted bucket.
+  const out = '1 .D N... 100644 100644 000000 a 0000000 gone.md\0'
+  const result = parseStatusPorcelainV2Z(out, '/repo')
+  assert.equal(result.status, 'deleted')
+  // The file row is still emitted for the worktree (unstaged) side.
+  assert.equal(result.files.length, 1)
+  assert.equal(result.files[0].status, 'D')
+  assert.equal(result.files[0].changeType, 'unstaged')
+})
+
+test('parseStatusPorcelainV2Z status aggregation: staged-delete only → deleted', () => {
+  const out = '1 D. N... 100644 000000 000000 a 0000000 staged-gone.md\0'
+  const result = parseStatusPorcelainV2Z(out, '/repo')
+  assert.equal(result.status, 'deleted')
+})
+
+test('parseStatusPorcelainV2Z status aggregation: add + delete across files → mixed', () => {
+  const out = '1 A. N... 000000 100644 100644 0 b added.md\0' + '1 .D N... 100644 100644 000000 a 0 gone.md\0'
+  const result = parseStatusPorcelainV2Z(out, '/repo')
+  assert.equal(result.status, 'mixed')
+})
+
+test('parseStatusPorcelainV2Z status aggregation: rename counts as add, not modify', () => {
+  // A lone rename is the new path appearing → added (purple), not mixed.
+  const out = '2 R. N... 100644 100644 100644 hash1 hash2 R100 newName.md\0oldName.md\0'
+  const result = parseStatusPorcelainV2Z(out, '/repo')
+  assert.equal(result.status, 'added')
+})
+
+test('parseStatusPorcelainV2Z status aggregation: unmerged conflict → modified (not add/delete)', () => {
+  const out = 'u UU N... 100644 100644 100644 100644 hH hI hO conflict.txt\0'
+  const result = parseStatusPorcelainV2Z(out, '/repo')
+  assert.equal(result.status, 'modified')
+})
+
+test('parseStatusPorcelainV2Z status aggregation: a lone two-sided file (MD) → mixed', () => {
+  // One file, staged modify + worktree delete → contributes BOTH mod and del,
+  // so the repo resolves to mixed even though it is a single record.
+  const out = '1 MD N... 100644 100644 000000 a b two-sided.md\0'
+  const result = parseStatusPorcelainV2Z(out, '/repo')
+  assert.equal(result.status, 'mixed')
+  // Still emits a staged row + an unstaged row for the same path.
+  assert.equal(result.files.length, 2)
+})
+
+test('parseStatusPorcelainV2Z status aggregation: a lone new-then-edited file (AM) → added (not mixed)', () => {
+  // staged add + worktree modify of a NEW file stays added — the path is new.
+  const out = '1 AM N... 000000 100644 100644 0 b new-edited.md\0'
+  const result = parseStatusPorcelainV2Z(out, '/repo')
+  assert.equal(result.status, 'added')
 })
