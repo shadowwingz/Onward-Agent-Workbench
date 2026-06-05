@@ -17,6 +17,7 @@ import { SubpagePanelShell, type SubpagePanelShellState } from '../SubpageSwitch
 import { CodingAgentModal } from '../CodingAgentModal'
 import type { CodingAgentConfigInput, GitStateMirrorSnapshot, GitStateMirrorDelta, TerminalGitStatus } from '../../types/electron'
 import { BrowserPanel } from '../BrowserPanel/BrowserPanel'
+import { decideTaskNameAutoFollow } from './auto-follow-name'
 import { useSettings } from '../../contexts/SettingsContext'
 import { useAppState } from '../../contexts/AppStateContext'
 import { DEFAULT_TERMINAL_FONT_SIZE, DEFAULT_TERMINAL_FONT_FAMILY } from '../../constants/terminal'
@@ -194,7 +195,7 @@ export const TerminalGrid = memo(function TerminalGrid({
   }))
 
   const { getTerminalStyle, getAutoFollowGitBranchForTaskName, setAutoFollowGitBranchForTaskName } = useSettings()
-  const { notifyTerminalGitInfo, state: appStateForLayout } = useAppState()
+  const { notifyTerminalGitInfo, getTerminalNameState, state: appStateForLayout } = useAppState()
   const currentAutoFollowEnabled = getAutoFollowGitBranchForTaskName()
   // Stable refs so auto-follow logic running inside callbacks always reads the
   // freshest values instead of capturing stale closures.
@@ -1105,6 +1106,11 @@ export const TerminalGrid = memo(function TerminalGrid({
   // being clobbered by the main-process git watcher poll cycle.
   const terminalInfoOverridesRef = useRef<Map<string, Partial<TerminalGitInfo>>>(new Map())
 
+  // Tasks whose auto-follow has already seen its first post-mount git-info
+  // evaluation. The hydration barrier (see auto-follow-name.ts) uses this so the
+  // boot-time sync cannot overwrite a customName that was just loaded from disk.
+  const initialAutoFollowDoneRef = useRef<Set<string>>(new Set())
+
   const mergeOverride = useCallback((terminalId: string, info: TerminalGitInfo): TerminalGitInfo => {
     const override = terminalInfoOverridesRef.current.get(terminalId)
     if (!override) return info
@@ -1143,91 +1149,83 @@ export const TerminalGrid = memo(function TerminalGrid({
       branch: effective.branch ?? null
     })
     // Auto-follow side-effect: drive the customName based on the new Git info.
-    // Rule (only runs when autoFollowGitBranchForTaskName is on):
-    //   (a) manual override active in same repo → leave alone
-    //   (b) manual override active but cwd has moved to a different repo →
-    //       clear it and adopt the new branch (or null if no branch)
-    //   (c) no active manual override → keep customName tracking the branch
+    // The keep / clear / adopt rules (plus the boot-time hydration barrier) live
+    // in the pure `decideTaskNameAutoFollow` so they are unit-testable; here we
+    // only map the decision onto trace breadcrumbs and the actual rename call.
     const visibleTerminal = visibleTerminalsRef.current.find(term => term.id === terminalId)
     const newRepoRoot = effective.repoRoot ?? null
     const newBranch = effective.branch ?? null
-    if (!autoFollowEnabledRef.current) {
-      perfTrace(PERF_TRACE_EVENT.RENDERER_TASK_NAME_RESOLVE, {
-        taskId: terminalId,
-        source: 'skipped-disabled',
-        autoFollow: false,
-        repoRoot: newRepoRoot,
-        branch: newBranch
-      })
-      return
-    }
-    if (!visibleTerminal) {
-      perfTrace(PERF_TRACE_EVENT.RENDERER_TASK_NAME_RESOLVE, {
-        taskId: terminalId,
-        source: 'fallback',
-        reason: 'not-visible',
-        autoFollow: true,
-        repoRoot: newRepoRoot,
-        branch: newBranch
-      })
-      return
-    }
-    const currentCustomName = visibleTerminal.customName ?? null
-    const currentManualRepoRoot = visibleTerminal.manualNameRepoRoot ?? null
+    // Read name + marker from the AUTHORITATIVE AppState (updated synchronously
+    // in the state updater), NOT from the one-render-cycle-behind visibleTerminals
+    // ref. A stale read here lets a git-info sync that lands right after a manual
+    // rename see marker=null, miss guard (a), and clobber the user's name. The
+    // visibleTerminal lookup above is kept only for the visibility check.
+    const { customName: currentCustomName, manualNameRepoRoot: currentManualRepoRoot } =
+      getTerminalNameState(terminalId)
+    // First git-info evaluation for this Task since it mounted? Drives the
+    // hydration barrier so the boot-time sync cannot clobber a customName that
+    // was just loaded from disk before its manual-override marker is honoured.
+    const isInitialPass = !initialAutoFollowDoneRef.current.has(terminalId)
+    if (visibleTerminal) initialAutoFollowDoneRef.current.add(terminalId)
 
-    if (currentManualRepoRoot != null && newRepoRoot != null && currentManualRepoRoot === newRepoRoot) {
-      // (a) manual override still in scope — leave it
-      perfTrace(PERF_TRACE_EVENT.RENDERER_TASK_NAME_RESOLVE, {
-        taskId: terminalId,
-        source: 'manual',
-        autoFollow: true,
-        repoRoot: newRepoRoot,
-        branch: newBranch,
-        customName: currentCustomName
-      })
-      return
-    }
-    if (currentManualRepoRoot != null && newRepoRoot != null && currentManualRepoRoot !== newRepoRoot) {
-      // (b) cwd moved to another repo — manual override expired
-      perfTrace(PERF_TRACE_EVENT.RENDERER_TASK_NAME_MANUAL_CLEAR, {
-        taskId: terminalId,
-        prevRepoRoot: currentManualRepoRoot,
-        newRepoRoot,
-        newBranch
-      })
-      perfTrace(PERF_TRACE_EVENT.RENDERER_TASK_NAME_RESOLVE, {
-        taskId: terminalId,
-        source: 'cleared-by-repo-switch',
-        autoFollow: true,
-        repoRoot: newRepoRoot,
-        branch: newBranch
-      })
-      onTerminalAutoRenameRef.current(terminalId, newBranch)
-      return
-    }
-    if (newBranch != null && newBranch !== currentCustomName) {
-      // (c) auto-track branch
-      perfTrace(PERF_TRACE_EVENT.RENDERER_TASK_NAME_RESOLVE, {
-        taskId: terminalId,
-        source: 'auto-branch',
-        autoFollow: true,
-        repoRoot: newRepoRoot,
-        branch: newBranch,
-        customName: currentCustomName
-      })
-      onTerminalAutoRenameRef.current(terminalId, newBranch)
-      return
-    }
-    perfTrace(PERF_TRACE_EVENT.RENDERER_TASK_NAME_RESOLVE, {
-      taskId: terminalId,
-      source: 'fallback',
-      reason: 'no-change',
-      autoFollow: true,
-      repoRoot: newRepoRoot,
-      branch: newBranch,
-      customName: currentCustomName
+    const decision = decideTaskNameAutoFollow({
+      autoFollowEnabled: autoFollowEnabledRef.current,
+      terminalVisible: Boolean(visibleTerminal),
+      currentCustomName,
+      currentManualRepoRoot,
+      newRepoRoot,
+      newBranch,
+      isInitialPass
     })
-  }, [mergeOverride, notifyTerminalGitInfo, onPersistTerminalCwd])
+
+    switch (decision.source) {
+      case 'skipped-disabled':
+        perfTrace(PERF_TRACE_EVENT.RENDERER_TASK_NAME_RESOLVE, {
+          taskId: terminalId, source: 'skipped-disabled', autoFollow: false, repoRoot: newRepoRoot, branch: newBranch
+        })
+        break
+      case 'not-visible':
+        perfTrace(PERF_TRACE_EVENT.RENDERER_TASK_NAME_RESOLVE, {
+          taskId: terminalId, source: 'fallback', reason: 'not-visible', autoFollow: true, repoRoot: newRepoRoot, branch: newBranch
+        })
+        break
+      case 'manual':
+        perfTrace(PERF_TRACE_EVENT.RENDERER_TASK_NAME_RESOLVE, {
+          taskId: terminalId, source: 'manual', autoFollow: true, repoRoot: newRepoRoot, branch: newBranch, customName: currentCustomName
+        })
+        break
+      case 'cleared-by-repo-switch':
+        perfTrace(PERF_TRACE_EVENT.RENDERER_TASK_NAME_MANUAL_CLEAR, {
+          taskId: terminalId, prevRepoRoot: currentManualRepoRoot, newRepoRoot, newBranch
+        })
+        perfTrace(PERF_TRACE_EVENT.RENDERER_TASK_NAME_RESOLVE, {
+          taskId: terminalId, source: 'cleared-by-repo-switch', autoFollow: true, repoRoot: newRepoRoot, branch: newBranch
+        })
+        break
+      case 'skipped-initial-hydration':
+        // Hydration barrier engaged: a just-loaded customName was protected from
+        // the boot-time branch sync. Breadcrumb for the "renames reverted after
+        // restart" bug class.
+        perfTrace(PERF_TRACE_EVENT.RENDERER_TASK_NAME_RESOLVE, {
+          taskId: terminalId, source: 'skipped-initial-hydration', autoFollow: true, repoRoot: newRepoRoot, branch: newBranch, customName: currentCustomName
+        })
+        break
+      case 'auto-branch':
+        perfTrace(PERF_TRACE_EVENT.RENDERER_TASK_NAME_RESOLVE, {
+          taskId: terminalId, source: 'auto-branch', autoFollow: true, repoRoot: newRepoRoot, branch: newBranch, customName: currentCustomName
+        })
+        break
+      case 'no-change':
+        perfTrace(PERF_TRACE_EVENT.RENDERER_TASK_NAME_RESOLVE, {
+          taskId: terminalId, source: 'fallback', reason: 'no-change', autoFollow: true, repoRoot: newRepoRoot, branch: newBranch, customName: currentCustomName
+        })
+        break
+    }
+
+    if (decision.rename) {
+      onTerminalAutoRenameRef.current(terminalId, decision.branch)
+    }
+  }, [mergeOverride, notifyTerminalGitInfo, onPersistTerminalCwd, getTerminalNameState])
 
   const setTerminalStatus = useCallback((terminalId: string, status: TerminalSessionStatus) => {
     setTerminalStatuses(prev => {
@@ -1980,6 +1978,15 @@ export const TerminalGrid = memo(function TerminalGrid({
         if (!resolved) return null
         const term = visibleTerminalsRef.current.find((t) => t.id === resolved)
         return term?.manualNameRepoRoot ?? null
+      },
+      resetAutoFollowInitialPass: (terminalId) => {
+        // Autotest hook: forget that this Task has already had its first
+        // post-mount git-info evaluation, so the NEXT setTerminalGitInfoOverride
+        // re-enters the hydration barrier path exactly as a fresh boot would.
+        const resolved = resolveTerminalId(terminalId)
+        if (!resolved) return false
+        initialAutoFollowDoneRef.current.delete(resolved)
+        return true
       }
     }
 

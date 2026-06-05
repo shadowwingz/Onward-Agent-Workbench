@@ -68,6 +68,7 @@ import { testChangeLog } from './test-change-log'
 import { testFeedback } from './test-feedback'
 import { testFeedbackUi } from './test-feedback-ui'
 import { testFeedbackPersistenceSeed, testFeedbackPersistenceVerify } from './test-feedback-persistence'
+import { testTerminalRenameRestartSurvivalSeed, testTerminalRenameRestartSurvivalVerify } from './test-terminal-rename-restart-survival'
 import { testTelemetry } from './test-telemetry'
 import { testPerformanceTrace } from './test-performance-trace'
 import { testSubpageViewstateRestore } from './test-subpage-viewstate-restore'
@@ -239,6 +240,20 @@ export async function runAllTests(ctx: AutotestContext): Promise<void> {
       log('phase0.17:begin')
       const results = await testFeedbackPersistenceVerify(ctx)
       collectSuiteResults('FeedbackPersistenceVerify', results)
+      await sleep(200)
+    }
+
+    if (!ctx.cancelled() && suiteFilter === 'terminal-rename-restart-survival-seed') {
+      log('phase0.18:begin')
+      const results = await testTerminalRenameRestartSurvivalSeed(ctx)
+      collectSuiteResults('TerminalRenameRestartSurvivalSeed', results)
+      await sleep(200)
+    }
+
+    if (!ctx.cancelled() && suiteFilter === 'terminal-rename-restart-survival-verify') {
+      log('phase0.19:begin')
+      const results = await testTerminalRenameRestartSurvivalVerify(ctx)
+      collectSuiteResults('TerminalRenameRestartSurvivalVerify', results)
       await sleep(200)
     }
 

@@ -5,6 +5,7 @@
 
 import React, { createContext, useContext, useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import type { AppState, TabState, GlobalPrompt, LocalPrompt, EditorDraft, ProjectEditorState, PromptCleanupConfig, PromptSchedule, UIPreferences, PersistedTerminalState } from '../types/tab.d.ts'
+import { findTerminalNameState, type TerminalNameState } from '../utils/terminal-name-state.ts'
 import type { Prompt } from '../types/electron.d.ts'
 import type { CustomLayoutPreset } from '../types/prompt'
 import { normalizeProjectCwd as normalizeProjectCwdImpl } from '../utils/pathNormalize'
@@ -358,6 +359,14 @@ interface AppStateContextValue {
   notifyTerminalGitInfo: (terminalId: string, info: { repoRoot: string | null; branch: string | null }) => void
   getTerminalRepoRoot: (terminalId: string) => string | null
   getTerminalBranch: (terminalId: string) => string | null
+  /**
+   * Authoritative, lag-free read of a Task's customName + manualNameRepoRoot
+   * straight from the current AppState (not the one-render-cycle-behind
+   * visibleTerminals copy). Auto-follow MUST use this so a git-info sync that
+   * arrives right after a manual rename cannot read a stale null marker and
+   * clobber the user's name.
+   */
+  getTerminalNameState: (terminalId: string) => TerminalNameState
   /**
    * Atomic write of customName + manualNameRepoRoot for a terminal.
    * Pass `manualNameRepoRoot: <repoRoot>` to mark a manual override scoped to
@@ -852,6 +861,14 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
 
   const getTerminalBranch = useCallback((terminalId: string): string | null => {
     return terminalGitInfoRef.current.get(terminalId)?.branch ?? null
+  }, [])
+
+  // Reads from stateRef.current (updated synchronously inside the state updater),
+  // so it reflects a just-applied rename immediately — unlike the visibleTerminals
+  // ref, which only catches up on the next render's effect. This closes the
+  // window where auto-follow could clobber a freshly-stamped manual override.
+  const getTerminalNameState = useCallback((terminalId: string): TerminalNameState => {
+    return findTerminalNameState(stateRef.current.tabs, terminalId)
   }, [])
 
   const setTerminalCustomName = useCallback(
@@ -1666,6 +1683,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     notifyTerminalGitInfo,
     getTerminalRepoRoot,
     getTerminalBranch,
+    getTerminalNameState,
     setTerminalCustomName,
     addPrompt,
     addPinnedPrompt,
@@ -1704,7 +1722,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
     createTab, closeTab, switchTab, renameTab,
     updateActiveTab, updateTabById, updateEditorDraftForTab, updatePromptEditorHeightForTab, setTerminalLastCwd,
     reorderTabs, canCreateTab,
-    notifyTerminalGitInfo, getTerminalRepoRoot, getTerminalBranch, setTerminalCustomName,
+    notifyTerminalGitInfo, getTerminalRepoRoot, getTerminalBranch, getTerminalNameState, setTerminalCustomName,
     addPrompt, addPinnedPrompt, updatePrompt, deletePrompt,
     pinPrompt, unpinPrompt, reorderPinnedPrompts,
     touchPromptLastUsed, cleanupPrompts, updatePromptCleanup, importPrompts,

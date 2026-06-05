@@ -848,6 +848,11 @@ export interface TerminalDebugApi {
   setAutoFollowGitBranchForTaskName: (enabled: boolean) => void
   /** Read the persisted manualNameRepoRoot for a terminal. */
   getTerminalManualNameRepoRoot: (terminalId?: string) => string | null
+  /**
+   * Autotest-only: clear the "first post-mount git-info pass done" flag for a
+   * Task so the next git-info override re-enters the boot hydration barrier.
+   */
+  resetAutoFollowInitialPass: (terminalId?: string) => boolean
   simulateTitleSingleClick: (terminalId?: string) => boolean
   simulateTitleDoubleClick: (terminalId?: string) => boolean
   /**

@@ -10,6 +10,7 @@ import { appStateWorkerClient } from './app-state-worker-client'
 import { performanceTrace } from './performance-trace'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 import { resolveExistingTerminalCwd } from './terminal-cwd-validation'
+import { normalizePersistedTerminals, type PersistedTerminalState } from './persisted-terminal'
 
 /**
  * Prompt data structure
@@ -47,15 +48,6 @@ interface EditorDraft {
   content: string
   height: number
   savedAt: number
-}
-
-/**
- * Persisted terminal state
- */
-interface PersistedTerminalState {
-  id: string
-  customName: string | null
-  lastCwd: string | null
 }
 
 /**
@@ -497,6 +489,8 @@ class AppStateStorage {
         id: t.id,
         // Extract custom name from title (or null if "Agent N" format)
         customName: /^Agent \d+$/.test(t.title) ? null : t.title,
+        // Legacy terminal-config predates the manual-rename marker.
+        manualNameRepoRoot: null,
         lastCwd: null
       }))
 
@@ -712,37 +706,13 @@ class AppStateStorage {
   }
 
   /**
-   * Legacy terminal data (for migration)
+   * Normalise persisted terminal data (and migrate the legacy `title` format).
+   * Delegates to the pure, electron-free `normalizePersistedTerminals` so the
+   * `manualNameRepoRoot` round-trip is locked by a Node unit test and cannot be
+   * silently re-stripped here.
    */
   private migrateTerminalData(rawTerminals: unknown): PersistedTerminalState[] {
-    if (!Array.isArray(rawTerminals)) return []
-
-    return rawTerminals.map((t: { id?: string; title?: string; customName?: string | null; lastCwd?: string | null }) => {
-      const id = t.id ?? ''
-      const lastCwd = resolveExistingTerminalCwd(t.lastCwd)
-
-      // If there is already a customName field, use it directly
-      if ('customName' in t && t.customName !== undefined) {
-        return { id, customName: t.customName, lastCwd }
-      }
-
-      // Extract custom name from old format title
-      if (t.title) {
-        // Check if it is in "Agent N: xxx" format
-        const match = t.title.match(/^Agent \d+: (.+)$/)
-        if (match) {
-          return { id, customName: match[1], lastCwd }
-        }
-        // Check if it is in "Agent N" format (no custom name)
-        if (/^Agent \d+$/.test(t.title)) {
-          return { id, customName: null, lastCwd }
-        }
-        // Otherwise the entire title is a custom name
-        return { id, customName: t.title, lastCwd }
-      }
-
-      return { id, customName: null, lastCwd }
-    })
+    return normalizePersistedTerminals(rawTerminals)
   }
 
   /**

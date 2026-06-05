@@ -311,6 +311,12 @@ export interface EditorDraft {
 export interface PersistedTerminalState {
   id: string
   customName: string | null
+  /**
+   * Repo root in scope when the user last manually renamed this Task. Marks the
+   * customName as a manual override so auto-follow does not overwrite it. MUST
+   * round-trip across persistence — see persisted-terminal.ts.
+   */
+  manualNameRepoRoot: string | null
   lastCwd: string | null
 }
 

@@ -135,6 +135,7 @@ SCRIPTS: List[str] = [
     "test/autotest/run-render-corruption-stress-autotest.sh",
     "test/autotest/run-task-layout-autotest.sh",
     "test/autotest/run-terminal-title-rename-autotest.sh",
+    "test/autotest/run-terminal-rename-restart-survival-autotest.sh",
     "test/autotest/run-trace-infra-self-check-autotest.sh",
     "test/autotest/run-perf-trace-rotation-autotest.sh",
     "test/autotest/run-unittest-suite-autotest.sh",

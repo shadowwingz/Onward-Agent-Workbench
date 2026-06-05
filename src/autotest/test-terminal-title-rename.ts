@@ -872,6 +872,55 @@ export async function testTerminalTitleRename(ctx: AutotestContext): Promise<Tes
     api.setTerminalGitInfoOverride(terminalId, null)
   }
 
+  // ================= TTM-33: boot hydration barrier protects a loaded name with a null marker =================
+  // Renderer-layer reproduction of the auto-update-restart regression: a Task
+  // whose customName is set but whose manualNameRepoRoot is null (e.g. a name
+  // restored from disk before its repoRoot resolved) must NOT be clobbered by
+  // the FIRST git-info sync after mount. Without the hydration barrier, auto-
+  // follow branch (c) would overwrite the user's name with the live branch.
+  await resetState()
+  api.setAutoFollowGitBranchForTaskName(true)
+  // Stamp a customName while repoRoot is unresolved → marker is null.
+  api.setTerminalGitInfoOverride(terminalId, { repoRoot: null, branch: null })
+  await sleep(40)
+  api.openTitleMenu(terminalId)
+  await sleep(20)
+  api.clickTitleMenuItem('rename', terminalId)
+  await sleep(20)
+  api.finishInlineRename('ttm33-loaded-name')
+  await sleep(80)
+  const ttm33NameStamped = api.getTerminalCustomName(terminalId)
+  const ttm33MarkerNull = api.getTerminalManualNameRepoRoot(terminalId)
+  // Simulate a fresh boot for this Task: forget its first-pass flag, then push
+  // the first git-info sync carrying a real repo + a different branch.
+  api.resetAutoFollowInitialPass(terminalId)
+  api.setTerminalGitInfoOverride(terminalId, { repoRoot: '/ttm/repo33', branch: 'ttm33-branch' })
+  await sleep(80)
+  const ttm33NameAfterBoot = api.getTerminalCustomName(terminalId)
+  record(
+    'TTM-33-hydration-barrier-protects-loaded-name',
+    ttm33NameStamped === 'ttm33-loaded-name'
+      && ttm33MarkerNull === null
+      && ttm33NameAfterBoot === 'ttm33-loaded-name',
+    { ttm33NameStamped, ttm33MarkerNull, ttm33NameAfterBoot }
+  )
+
+  // ================= TTM-34: barrier is one-shot — a later real branch switch IS honoured =================
+  // After the initial post-mount pass, a genuine branch change still drives
+  // auto-follow (no manual override in scope), so the barrier cannot freeze a
+  // name forever.
+  api.setTerminalGitInfoOverride(terminalId, { repoRoot: '/ttm/repo33', branch: 'ttm34-next' })
+  const ttm34Followed = await waitFor(
+    'ttm34-auto-after-barrier',
+    () => api.getTerminalCustomName(terminalId) === 'ttm34-next',
+    1500,
+    40
+  )
+  record('TTM-34-auto-follow-resumes-after-barrier', ttm34Followed === true, {
+    customName: api.getTerminalCustomName(terminalId)
+  })
+  api.setTerminalGitInfoOverride(terminalId, null)
+
   await resetState()
   log('terminal-title-rename:complete', { total: results.length })
 
