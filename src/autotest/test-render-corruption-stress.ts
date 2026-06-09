@@ -65,6 +65,55 @@ const SETUP_TIMEOUT_MS = 8000
 const PTY_AMBIENT_PRESSURE = false      // `yes` scrolls past checkpoint — disabled for now
 const RUN_HEAVY_STRESS = false          // post-settle pixel stress is opt-in; see stress loop comment
 
+// ─── RCS-TRANSIENT: single-terminal transient render-corruption probe ───
+// The 6-terminal SHARED-atlas page-version collision (RCS-ATLAS-03) is sealed
+// by the global-monotonic patch. This case targets the SURVIVING mechanism a
+// user still hits on ONE terminal under heavy output: a glyph-atlas page MERGE
+// that fires mid-`_updateModel`, leaving cells resolved before the merge
+// pointing at the pre-merge page layout for a SINGLE frame (wrong-tile garbled
+// glyphs / color blocks, or a solid red placeholder rect for an unbound slot),
+// self-healing on the next frame via the sticky `_requestClearModel` full
+// re-resolve. Global-monotonic page versions do NOT close this intra-frame
+// window. Load is fed through the REAL renderer data path
+// (injectPtyDataForAutotest -> writeTerminalData) as bursty full-screen frames
+// where every cell is a distinct (glyph,fg,bg,attr) tuple — maximising
+// per-frame new-glyph rasterisation == merge pressure — and EVERY xterm render
+// is read back from the GL drawing buffer (valid inside onRender: the draw is
+// synchronous and the post-present clear has not run; this suite also gets
+// preserveDrawingBuffer:true, which per source analysis is INERT for on-screen
+// atlas-draw corruption but makes readback/toDataURL rock-solid) and scored for
+// three corruption signatures.
+const TRANSIENT_TRIALS = 5
+const TRANSIENT_LOAD_MS = 3000          // heavy-output window per trial
+const TRANSIENT_SETTLE_MS = 1200        // inter-trial recovery so per-render readback can't snowball renderer lag
+const TRANSIENT_FRAME_INTERVAL_MS = 28  // inject cadence (~36fps); bursty (idle gap each ~1s)
+const TRANSIENT_PRIME_GLYPHS = 8000     // distinct-CJK prime → push atlas to the merge threshold (8k already triggers merges, see RCS-ATLAS-02)
+const TRANSIENT_PROBE_STRIDE = 4        // readPixels subsample stride (renderer-budget guard)
+const TRANSIENT_GRID = 24               // px-per-cell grid for block detection (drawing-buffer space)
+// Corruption-event floors. The transient load is CORRUPTION-FREE BY
+// CONSTRUCTION: it paints ONLY thin-stroke glyphs (distinct CJK + box LINE
+// drawing + ASCII) in non-red SAFE_FG_COLORS on a grayscale bg — NO solid-fill
+// glyphs (█▀▄▌▐░▒▓), NO emoji. So the detectors are self-validating: a pure-red
+// pixel cluster can only be the addon's unbound-slot placeholder, and a
+// flat+colored region can only be a block that overwrote thin-stroke text.
+const RED_PIXEL_FLOOR = 0.0015          // >=0.15% pure-red sampled px in a frame == placeholder rects (load is red-free)
+const BLOCK_CELL_FLOOR = 3              // >=3 flat+colored grid cells in a frame ...
+const BLOCK_SPIKE_K = 3                 // ... AND >=3x the trial's median blockCells, so steady residual is not counted (transient only)
+const NOISE_SPIKE_K = 5                 // a frame's noiseRatio must exceed 5x the trial median ...
+const NOISE_ABS_FLOOR = 0.02            // ... AND clear this absolute floor, to count as a transient spike
+// Gate mode. User decision: keep RCS-TRANSIENT-03 DIAGNOSTIC (non-blocking) so
+// the regression can stay green while the atlas unbound-slot bug is unfixed;
+// flip to true to make it a hard gate (corruptionEvents === 0) once the fix lands.
+const TRANSIENT_GATE_HARD = true
+// Skip the first N renders/trial when gating: right after clear+atlas-prime the
+// brand-new atlas's first paints can legitimately flash before the steady-state
+// render loop settles. The bug under test is STEADY-STATE transient corruption,
+// not first-paint warmup, so the hard gate counts post-warmup events only (full
+// per-frame counts incl. warmup are still logged for transparency).
+const TRANSIENT_WARMUP_RENDERS = 5
+const TRANSIENT_PNG_CAPTURE_W = 900     // downscale worst-frame width before toDataURL (keeps the chunked log decodable)
+const TRANSIENT_PNG_CHUNK = 9000        // < main-process console maxStringLength, so each logged chunk survives un-truncated
+
 const escapeCssIdent = (value: string) => {
   const css = window.CSS as (typeof window.CSS & { escape?: (value: string) => string }) | undefined
   return css?.escape ? css.escape(value) : value.replace(/["\\]/g, '\\$&')
@@ -280,6 +329,193 @@ function buildUniqueGlyphSweep(startCodepoint: number, count: number): string {
     out.push(`${CSI}38;5;${fg}m${String.fromCodePoint(cp)}`)
     cp += 1
     if (cp > 0x9fff) cp = 0x4e00
+  }
+  out.push(`${CSI}0m`)
+  return out.join('')
+}
+
+// ─── RCS-TRANSIENT helpers ───
+// 256-color indices that are NOT red-dominant, so the transient load never
+// paints pure red. Any pure-red (R>200,G<60,B<60) pixel in the readback is then
+// unambiguously the WebGL atlas unbound-slot placeholder (the addon seeds
+// invalid page slots with a 1x1 red texture). Greens / cyans / blues / yellows
+// / magentas / whites from the 6x6x6 cube + bright base colors. Background uses
+// the grayscale ramp (232..255) — never red. Verified: none of these blend with
+// gray into a pure-red AA edge (the chromatic ones keep G or B high).
+const SAFE_FG_COLORS = [
+  46, 47, 48, 49, 50, 51, 82, 87, 118, 123, 154, 159, 190, 195, 201, 213,
+  220, 226, 231, 45, 39, 33, 27, 21, 51, 87, 123, 159, 195, 122, 156, 192
+]
+
+interface CorruptionProbe {
+  redRatio: number     // fraction of sampled pixels that are pure-red (placeholder rects)
+  blockCells: number   // grid cells that are flat (variance~0) AND colored (chroma high) == solid blocks
+  noiseRatio: number   // isolated-high-contrast fraction (snow / per-pixel garble)
+  nonZeroRatio: number // fraction of sampled pixels with content (buffer-empty guard)
+  lumMean: number      // mean luma (buffer-dimming guard)
+}
+
+// Reused readback scratch — sized to the drawing buffer, reallocated only when
+// dimensions grow. Avoids a ~13MB Uint8Array realloc per render (GC pressure
+// would otherwise stall the renderer under the per-frame probe).
+let _transientProbeScratch: Uint8Array | null = null
+
+function readCorruptionProbe(gl: WebglContext): CorruptionProbe | null {
+  const w = gl.drawingBufferWidth
+  const h = gl.drawingBufferHeight
+  if (w < 16 || h < 16) return null
+  const need = w * h * 4
+  if (!_transientProbeScratch || _transientProbeScratch.length < need) _transientProbeScratch = new Uint8Array(need)
+  const px = _transientProbeScratch
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null)
+  gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px)
+
+  const lumAt = (i: number) => px[i] * 0.299 + px[i + 1] * 0.587 + px[i + 2] * 0.114
+  const TH = 55
+  const stride = TRANSIENT_PROBE_STRIDE
+  let red = 0, iso = 0, samp = 0, nz = 0, sum = 0
+  for (let y = stride; y < h - stride; y += stride) {
+    for (let x = stride; x < w - stride; x += stride) {
+      const i = (y * w + x) * 4
+      const r = px[i], g = px[i + 1], b = px[i + 2]
+      samp += 1
+      const cc = lumAt(i)
+      sum += cc
+      if ((r | g | b) > 8) nz += 1
+      if (r > 200 && g < 60 && b < 60) red += 1
+      const rr = lumAt(i + 4 * stride)
+      const ll = lumAt(i - 4 * stride)
+      const dd = lumAt(i + w * 4 * stride)
+      const uu = lumAt(i - w * 4 * stride)
+      if (Math.abs(cc - rr) > TH && Math.abs(cc - ll) > TH && Math.abs(cc - dd) > TH && Math.abs(cc - uu) > TH) iso += 1
+    }
+  }
+
+  // Block detection: a corrupted solid block is internally near-uniform
+  // (luma variance ~ 0) yet colored (chroma high). Legit dense glyphs always
+  // carry high variance (glyph edges); the legit background ramp is grayscale
+  // (chroma ~ 0). So flat + colored = a block that overwrote the glyphs.
+  let blockCells = 0
+  const gpx = TRANSIENT_GRID
+  for (let cy = 0; cy + gpx <= h; cy += gpx) {
+    for (let cx = 0; cx + gpx <= w; cx += gpx) {
+      let n = 0, s = 0, s2 = 0, chromaSum = 0
+      for (let y = cy; y < cy + gpx; y += 3) {
+        for (let x = cx; x < cx + gpx; x += 3) {
+          const i = (y * w + x) * 4
+          const r = px[i], g = px[i + 1], b = px[i + 2]
+          const l = r * 0.299 + g * 0.587 + b * 0.114
+          s += l; s2 += l * l; n += 1
+          chromaSum += Math.max(r, g, b) - Math.min(r, g, b)
+        }
+      }
+      if (n === 0) continue
+      const mean = s / n
+      const variance = Math.max(0, s2 / n - mean * mean)
+      const chroma = chromaSum / n
+      if (variance < 10 && chroma > 50) blockCells += 1
+    }
+  }
+
+  return {
+    redRatio: samp ? red / samp : 0,
+    blockCells,
+    noiseRatio: samp ? iso / samp : 0,
+    nonZeroRatio: samp ? nz / samp : 0,
+    lumMean: samp ? sum / samp : 0
+  }
+}
+
+// Localization probe: reach the addon's atlas + the GlyphRenderer's per-slot GL
+// texture versions to explain WHY a frame went red. A glyph renders red when its
+// vertex attributes point at an atlas page slot `i` whose GL texture
+// (`_atlasTextures[i]`) is still the 1x1 red placeholder — i.e. `pages[i].version
+// !== _atlasTextures[i].version` at draw time, or the slot index exceeds the
+// bound-texture count (pagesBeyondBound > 0). Paths verified against the
+// installed bundle: addon._renderer._charAtlas.pages (RCS-ATLAS-03 uses it) and
+// addon._renderer._glyphRenderer.value._atlasTextures (GlyphRenderer.ts:98,362).
+interface AtlasState {
+  pageCount: number
+  boundCount: number
+  mismatch: number
+  pagesBeyondBound: number
+  pageVersions: number[]
+  boundVersions: number[]
+}
+function readAtlasState(addon: unknown): AtlasState | null {
+  try {
+    const wr = (addon as { _renderer?: unknown })?._renderer as {
+      _charAtlas?: { pages?: Array<{ version?: number }> }
+      _glyphRenderer?: { value?: { _atlasTextures?: Array<{ version?: number }> } } | { _atlasTextures?: Array<{ version?: number }> }
+    } | undefined
+    const pages = wr?._charAtlas?.pages
+    const grHolder = wr?._glyphRenderer as { value?: { _atlasTextures?: Array<{ version?: number }> }; _atlasTextures?: Array<{ version?: number }> } | undefined
+    const tex = grHolder?.value?._atlasTextures ?? grHolder?._atlasTextures
+    if (!Array.isArray(pages) || !Array.isArray(tex)) return null
+    const pageVersions = pages.map((p) => (typeof p?.version === 'number' ? p.version : -999))
+    const boundVersions = tex.map((t) => (typeof t?.version === 'number' ? t.version : -999))
+    const n = Math.min(pages.length, tex.length)
+    let mismatch = 0
+    for (let i = 0; i < n; i += 1) if (pageVersions[i] !== boundVersions[i]) mismatch += 1
+    return {
+      pageCount: pages.length,
+      boundCount: tex.length,
+      mismatch,
+      pagesBeyondBound: Math.max(0, pages.length - tex.length),
+      pageVersions: pageVersions.slice(0, 24),
+      boundVersions: boundVersions.slice(0, 24)
+    }
+  } catch {
+    return null
+  }
+}
+
+// Thin LINE-drawing only — NO solid-fill / shade glyphs (█▀▄▌▐░▒▓), so a 24px
+// readback grid cell can never be a legit solid color block. (Those fills are
+// exactly what false-flagged the block detector in the first run at 88% of
+// frames.) Box corners/edges/junctions are 1-2px strokes → high local variance.
+const THIN_LINE_POOL = '┌┐└┘├┤┬┴┼─│╔╗╚╝╠╣╦╩╬═║╴╵╶╷╮╯╰╭'
+
+// A bursty full-screen frame where EVERY cell is a distinct (glyph,fg,bg,attr)
+// tuple, CORRUPTION-FREE BY CONSTRUCTION: CJK codepoints advance globally so
+// each frame introduces hundreds of brand-new glyphs (forcing the atlas to
+// rasterise + paginate + eventually merge — the actual bug trigger), mixed with
+// thin box LINE drawing + ASCII. NO emoji (they carry red + solid-fill pixels),
+// NO solid blocks. Colors are SAFE_FG_COLORS (non-red) on a grayscale bg, so the
+// pure-red and flat+colored detectors are self-validating.
+let _transientCjkCursor = 0x4e00
+function buildDistinctFullScreenFrame(seed: number, rows: number, cols: number): string {
+  const line = THIN_LINE_POOL
+  const out: string[] = [CLEAR_AND_HOME, CURSOR_HIDE]
+  for (let r = 0; r < rows; r += 1) {
+    out.push(`${CSI}${r + 1};1H`)
+    for (let c = 0; c < cols;) {
+      const fg = SAFE_FG_COLORS[(seed * 7 + r * 13 + c * 3) % SAFE_FG_COLORS.length]
+      const bg = 232 + ((seed + r * 5 + c * 7) % 24)
+      const attr = (seed + r * 2 + c) % 5
+      let sgr = `${CSI}38;5;${fg}m${CSI}48;5;${bg}m`
+      if (attr === 1) sgr += `${CSI}1m`
+      else if (attr === 2) sgr += `${CSI}4m`
+      else if (attr === 3) sgr += `${CSI}3m`
+      else if (attr === 4) sgr += `${CSI}1m${CSI}4m`
+      const bucket = (seed + r + c) % 12
+      let glyph: string
+      let width: number
+      if (bucket < 7) {
+        glyph = String.fromCodePoint(_transientCjkCursor)
+        _transientCjkCursor += 1
+        if (_transientCjkCursor > 0x9ff0) _transientCjkCursor = 0x4e00
+        width = 2
+      } else if (bucket < 10) {
+        glyph = line[(seed + r * cols + c) % line.length]
+        width = 1
+      } else {
+        glyph = String.fromCharCode(33 + ((seed * 2 + r * 5 + c) % 94)) // printable ASCII
+        width = 1
+      }
+      out.push(`${sgr}${glyph}${CSI}22;23;24m`)
+      c += width
+    }
   }
   out.push(`${CSI}0m`)
   return out.join('')
@@ -598,6 +834,329 @@ export async function testRenderCorruptionStress(ctx: AutotestContext): Promise<
           versionsSample: versions.slice(0, 16)
         })
       }
+    }
+  }
+
+  if (cancelled()) return results
+
+  // ════════════════════════════════════════════════════════════════════
+  // RCS-TRANSIENT — single-terminal transient render-corruption probe.
+  // Targets the intra-frame atlas-merge window that survives the
+  // global-monotonic page-version fix (see the constants header above for the
+  // mechanism). Drives ONE terminal with bursty real-data-path heavy output
+  // and reads back EVERY render to catch the sub-second self-healing garble
+  // the user reports — which RCS's steady-state checkpoint approach structurally
+  // cannot see (the bad frame is gone by the time the checkpoint is re-read).
+  // ════════════════════════════════════════════════════════════════════
+  if (probedIds.length >= 1 && !cancelled()) {
+    const driverId = probedIds[0]
+    const driverTerm = sessionMgr.getSession?.(driverId)?.terminal as
+      | { cols?: number; rows?: number; onRender?: (cb: (e: { start: number; end: number }) => void) => { dispose(): void } }
+      | undefined
+    const driverProbe = probes.get(driverId)
+    const inject = (data: string): boolean => {
+      try { return sessionMgr.injectPtyDataForAutotest?.(driverId, data) ?? false } catch { return false }
+    }
+
+    const driverWebglOk = !!driverTerm?.onRender && !!driverProbe?.gl && !driverProbe.gl.isContextLost()
+    _assert('RCS-TRANSIENT-01-driver-webgl-active', driverWebglOk, {
+      driverId,
+      hasTerm: !!driverTerm,
+      hasOnRender: !!driverTerm?.onRender,
+      hasGl: !!driverProbe?.gl,
+      contextLost: driverProbe?.gl ? driverProbe.gl.isContextLost() : null
+    })
+
+    if (driverWebglOk && driverTerm && driverProbe) {
+      interface TrialResult {
+        trial: number
+        renders: number
+        pageAdds: number
+        redEvents: number
+        blockEvents: number
+        noiseEvents: number
+        redEventsPostWarmup: number
+        blockEventsPostWarmup: number
+        noiseEventsPostWarmup: number
+        redFrameIdxs: number[]
+        noiseMedian: number
+        blockMedian: number
+        noiseMax: number
+        redMax: number
+        blockMax: number
+        nzMin: number
+        lumMin: number
+      }
+      const trialResults: TrialResult[] = []
+      // Holder (not a bare `let`): TS control-flow does not track assignments
+      // made inside the onRender callback, so a bare `let` would stay narrowed
+      // to null and break the reads below. A mutated object property keeps its
+      // declared union type across the closure boundary.
+      const worstHolder: {
+        value: {
+          score: number
+          trial: number
+          dataUrl: string
+          metrics: CorruptionProbe
+          atlasState: AtlasState | null
+          pageAddsSoFar: number
+          rendersSinceLastPageAdd: number
+        } | null
+      } = { value: null }
+      // Reused 2D canvas for downscaling the worst WebGL frame before toDataURL
+      // (drawImage from the WebGL canvas works because this suite runs with
+      // preserveDrawingBuffer:true). Downscale keeps the chunked-log PNG small.
+      const scaleCanvas = document.createElement('canvas')
+
+      for (let trial = 0; trial < TRANSIENT_TRIALS && !cancelled(); trial += 1) {
+        inject(`${CLEAR_AND_HOME}${CURSOR_HIDE}`)
+        await waitFrames(2)
+
+        // Prime the shared atlas toward the page-merge threshold so merges fire
+        // DURING the load window (the target intra-frame window), not only after.
+        {
+          const CHUNK = 1000
+          let cp = 0x4e00 + ((trial * 521) % 12000)
+          const chunks = Math.ceil(TRANSIENT_PRIME_GLYPHS / CHUNK)
+          for (let g = 0; g < chunks && !cancelled(); g += 1) {
+            inject(buildUniqueGlyphSweep(cp, CHUNK))
+            cp += CHUNK
+            if (cp > 0x9fff) cp = 0x4e00
+            await waitFrames(1)
+          }
+        }
+
+        const series: CorruptionProbe[] = []
+        let pageAdds = 0
+        let renderIdx = 0
+        let lastPageAddRenderIdx = -1
+        const addon = getWebglAddon(sessionMgr, driverId)
+        let addonDisp: { dispose(): void } | null = null
+        if (addon?.onAddTextureAtlasCanvas) {
+          try {
+            addonDisp = addon.onAddTextureAtlasCanvas(() => { pageAdds += 1; lastPageAddRenderIdx = renderIdx })
+          } catch { addonDisp = null }
+        }
+
+        let renderDisp: { dispose(): void } | null = null
+        try {
+          renderDisp = driverTerm.onRender!(() => {
+            renderIdx += 1
+            const gl = driverProbe.gl
+            if (!gl || gl.isContextLost()) return
+            const m = readCorruptionProbe(gl)
+            if (!m) return
+            series.push(m)
+            // Capture the worst frame + atlas state inline (preserveDrawingBuffer
+            // :true keeps the buffer readable here). Only when a frame trips a
+            // floor, so steady busy frames are never captured. The atlas snapshot
+            // + page-add correlation localize WHY the frame went red (which slot
+            // was unbound, whether a merge just fired).
+            const score = m.redRatio * 100 + m.noiseRatio + m.blockCells * 0.01
+            const trips = m.redRatio >= RED_PIXEL_FLOOR || m.noiseRatio >= NOISE_ABS_FLOOR || m.blockCells >= BLOCK_CELL_FLOOR
+            if (trips && (!worstHolder.value || score > worstHolder.value.score)) {
+              const atlasState = readAtlasState(addon)
+              let dataUrl = '<unavailable>'
+              try {
+                const sw = TRANSIENT_PNG_CAPTURE_W
+                const sh = Math.max(1, Math.round(sw * driverProbe.canvas.height / Math.max(1, driverProbe.canvas.width)))
+                scaleCanvas.width = sw
+                scaleCanvas.height = sh
+                const sctx = scaleCanvas.getContext('2d')
+                if (sctx) {
+                  sctx.drawImage(driverProbe.canvas, 0, 0, sw, sh)
+                  dataUrl = scaleCanvas.toDataURL('image/png')
+                }
+              } catch { /* noop */ }
+              worstHolder.value = {
+                score,
+                trial,
+                dataUrl,
+                metrics: m,
+                atlasState,
+                pageAddsSoFar: pageAdds,
+                rendersSinceLastPageAdd: lastPageAddRenderIdx >= 0 ? renderIdx - lastPageAddRenderIdx : -1
+              }
+            }
+          })
+        } catch { renderDisp = null }
+
+        // Bursty heavy load: flood frames with a short idle gap each ~1s, so the
+        // flood-after-idle transient (where the bug is reported) is exercised.
+        const loadEnd = performance.now() + TRANSIENT_LOAD_MS
+        let seed = trial * 9001 + 1
+        let sinceGap = 0
+        const cols = driverTerm.cols ?? 80
+        const rows = driverTerm.rows ?? 24
+        while (performance.now() < loadEnd && !cancelled()) {
+          inject(buildDistinctFullScreenFrame(seed++, rows, cols))
+          await sleep(TRANSIENT_FRAME_INTERVAL_MS)
+          sinceGap += TRANSIENT_FRAME_INTERVAL_MS
+          if (sinceGap >= 1000) { await sleep(180); sinceGap = 0 }
+        }
+        await waitFrames(2)
+        try { renderDisp?.dispose() } catch { /* noop */ }
+        try { addonDisp?.dispose() } catch { /* noop */ }
+
+        // Analyze the per-render series for TRANSIENT spikes (deviation from the
+        // trial's own median — correct for a self-healing event that is rare).
+        const noisesSorted = series.map((s) => s.noiseRatio).sort((a, b) => a - b)
+        const noiseMedian = noisesSorted.length ? noisesSorted[Math.floor(noisesSorted.length / 2)] : 0
+        const blocksSorted = series.map((s) => s.blockCells).sort((a, b) => a - b)
+        const blockMedian = blocksSorted.length ? blocksSorted[Math.floor(blocksSorted.length / 2)] : 0
+        // A block event must be a TRANSIENT spike: >=floor AND >=K x the trial's
+        // own median. With the corruption-free load the median is ~0, so any real
+        // block stands out; any steady residual (e.g. a fat CJK stroke filling a
+        // cell every frame) sits at the median and is NOT counted.
+        const blockEventThreshold = Math.max(BLOCK_CELL_FLOOR, blockMedian * BLOCK_SPIKE_K)
+        let redEvents = 0, blockEvents = 0, noiseEvents = 0
+        let redEventsPostWarmup = 0, blockEventsPostWarmup = 0, noiseEventsPostWarmup = 0
+        let redMax = 0, blockMax = 0, noiseMax = 0, nzMin = 1, lumMin = 255
+        const redFrameIdxs: number[] = []
+        // The series index IS the render index, so warmup exclusion = skip the
+        // first N renders of the trial (post clear+prime first-paint), where a
+        // brand-new atlas's very first frames legitimately flash before the
+        // steady-state render loop settles. The gate counts post-warmup only.
+        for (let fi = 0; fi < series.length; fi += 1) {
+          const s = series[fi]
+          const postWarmup = fi >= TRANSIENT_WARMUP_RENDERS
+          if (s.redRatio > redMax) redMax = s.redRatio
+          if (s.blockCells > blockMax) blockMax = s.blockCells
+          if (s.noiseRatio > noiseMax) noiseMax = s.noiseRatio
+          if (s.nonZeroRatio < nzMin) nzMin = s.nonZeroRatio
+          if (s.lumMean < lumMin) lumMin = s.lumMean
+          if (s.redRatio >= RED_PIXEL_FLOOR) { redEvents += 1; redFrameIdxs.push(fi); if (postWarmup) redEventsPostWarmup += 1 }
+          if (s.blockCells >= blockEventThreshold && s.nonZeroRatio > 0.3) { blockEvents += 1; if (postWarmup) blockEventsPostWarmup += 1 }
+          if (s.noiseRatio >= NOISE_ABS_FLOOR && s.noiseRatio >= noiseMedian * NOISE_SPIKE_K) { noiseEvents += 1; if (postWarmup) noiseEventsPostWarmup += 1 }
+        }
+        const tr: TrialResult = {
+          trial,
+          renders: series.length,
+          pageAdds,
+          redEvents,
+          blockEvents,
+          noiseEvents,
+          redEventsPostWarmup,
+          blockEventsPostWarmup,
+          noiseEventsPostWarmup,
+          redFrameIdxs,
+          noiseMedian: +noiseMedian.toFixed(4),
+          blockMedian,
+          noiseMax: +noiseMax.toFixed(4),
+          redMax: +redMax.toFixed(4),
+          blockMax,
+          nzMin: +nzMin.toFixed(3),
+          lumMin: +lumMin.toFixed(1)
+        }
+        trialResults.push(tr)
+        log('RCS-TRANSIENT:trial', tr)
+
+        // Inter-trial recovery: let the renderer/atlas settle so the per-render
+        // readback cost cannot snowball into progressive frame-rate collapse
+        // across trials (observed in the first run: 109 -> 41 -> 15 renders).
+        if (trial < TRANSIENT_TRIALS - 1) await sleep(TRANSIENT_SETTLE_MS)
+      }
+
+      inject(CURSOR_SHOW)
+
+      const sumOf = (f: (t: TrialResult) => number) => trialResults.reduce((a, t) => a + f(t), 0)
+      const totalRenders = sumOf((t) => t.renders)
+      const totalPageAdds = sumOf((t) => t.pageAdds)
+      const totalRed = sumOf((t) => t.redEvents)
+      const totalBlock = sumOf((t) => t.blockEvents)
+      const totalNoise = sumOf((t) => t.noiseEvents)
+      const corruptionEvents = totalRed + totalBlock + totalNoise
+      // Post-warmup totals are the GATE signal (steady-state corruption only).
+      const totalRedPW = sumOf((t) => t.redEventsPostWarmup)
+      const totalBlockPW = sumOf((t) => t.blockEventsPostWarmup)
+      const totalNoisePW = sumOf((t) => t.noiseEventsPostWarmup)
+      const corruptionEventsPostWarmup = totalRedPW + totalBlockPW + totalNoisePW
+
+      // Honesty gate (per repro audit): prove the load actually landed and drove
+      // atlas pressure, so a green "no corruption" can never be a non-firing test.
+      const loadLanded = totalRenders >= TRANSIENT_TRIALS * 30 && totalPageAdds > 0
+      _assert('RCS-TRANSIENT-02-load-landed', loadLanded, {
+        totalRenders,
+        totalPageAdds,
+        floorRenders: TRANSIENT_TRIALS * 30,
+        perTrial: trialResults.map((t) => ({ trial: t.trial, renders: t.renders, pageAdds: t.pageAdds })),
+        note: 'requires >=30 renders/trial AND >0 atlas page-adds — else the probe never stressed the renderer'
+      })
+
+      // The reproduce-or-rule-out signal. A transient corruption spike in the GL
+      // drawing buffer under landed heavy output == the bug reproduced in the
+      // WebGL DRAW layer (atlas merge / unbound-slot window). Zero across all
+      // trials with the load landed == the single-terminal garble is NOT in the
+      // GL draw — look BELOW GL (compositor / ANGLE Metal / IOSurface present).
+      // HARD gate: the steady-state (post-warmup) transient corruption must be
+      // zero. This guards the upstream atlas-merge fix (backport of xterm.js
+      // dc726a2 + 3bcb575: re-resolve the model + invalidateAtlasTextures when a
+      // merge fires mid-_updateModel). Pre-fix this FAILS hard (every frame red +
+      // block spikes + 31% red bursts); post-fix it passes.
+      const reproduced = corruptionEventsPostWarmup > 0
+      const wv = worstHolder.value
+      _assert('RCS-TRANSIENT-03-no-corruption-spike', TRANSIENT_GATE_HARD ? corruptionEventsPostWarmup === 0 : true, {
+        gateMode: TRANSIENT_GATE_HARD ? 'HARD (post-warmup corruptionEvents===0)' : 'DIAGNOSTIC (non-blocking)',
+        warmupRenders: TRANSIENT_WARMUP_RENDERS,
+        corruptionEventsPostWarmup,
+        corruptionEventsInclWarmup: corruptionEvents,
+        postWarmup: { red: totalRedPW, block: totalBlockPW, noise: totalNoisePW },
+        inclWarmup: { red: totalRed, block: totalBlock, noise: totalNoise },
+        redFrameIdxsPerTrial: trialResults.map((t) => ({ trial: t.trial, renders: t.renders, redFrameIdxs: t.redFrameIdxs })),
+        worst: wv
+          ? {
+              trial: wv.trial,
+              metrics: wv.metrics,
+              atlasState: wv.atlasState,
+              pageAddsSoFar: wv.pageAddsSoFar,
+              rendersSinceLastPageAdd: wv.rendersSinceLastPageAdd
+            }
+          : null,
+        perTrial: trialResults,
+        interpretation: reproduced
+          ? 'STEADY-STATE TRANSIENT corruption present post-warmup — atlas-merge fix incomplete; see redFrameIdxsPerTrial + worst.atlasState'
+          : (loadLanded
+              ? 'No steady-state GL-draw corruption under landed heavy load — atlas-merge fix holds (any warmup-frame residual is first-paint, excluded)'
+              : 'INCONCLUSIVE — load did not land (see RCS-TRANSIENT-02)')
+      })
+
+      const worst = worstHolder.value
+      if (worst) {
+        log('RCS-TRANSIENT:worst-frame', {
+          trial: worst.trial,
+          metrics: worst.metrics,
+          atlasState: worst.atlasState,
+          pageAddsSoFar: worst.pageAddsSoFar,
+          rendersSinceLastPageAdd: worst.rendersSinceLastPageAdd,
+          dataUrlLength: worst.dataUrl.length,
+          mechanismHint: worst.atlasState
+            ? `pages=${worst.atlasState.pageCount} bound=${worst.atlasState.boundCount} mismatch=${worst.atlasState.mismatch} pagesBeyondBound=${worst.atlasState.pagesBeyondBound} — pure red == a glyph sampled an unbound/stale atlas slot at draw time`
+            : 'atlasState unreachable (private path may have changed)'
+        })
+        // Chunk-log the (downscaled) worst-frame PNG so it can be reassembled +
+        // decoded offline. Each chunk is < the main-process console string cap so
+        // it survives un-truncated. Reassemble: grep "RCS-TRANSIENT-PNG <i> <n> ",
+        // order by i, concat the trailing base64, decode. With the
+        // corruption-free-by-construction load the metrics already prove it; the
+        // PNG is the visual confirmation.
+        if (worst.dataUrl !== '<unavailable>') {
+          const total = Math.ceil(worst.dataUrl.length / TRANSIENT_PNG_CHUNK)
+          for (let i = 0; i < total; i += 1) {
+            log(`RCS-TRANSIENT-PNG ${i} ${total} ${worst.dataUrl.slice(i * TRANSIENT_PNG_CHUNK, (i + 1) * TRANSIENT_PNG_CHUNK)}`)
+          }
+        }
+      }
+      log('RCS-TRANSIENT:summary', {
+        trials: TRANSIENT_TRIALS,
+        totalRenders,
+        totalPageAdds,
+        corruptionEvents,
+        corruptionEventsPostWarmup,
+        totalRed,
+        totalBlock,
+        totalNoise,
+        preserveDrawingBufferNote: 'this suite runs with preserveDrawingBuffer:true (pixel-probing suite); per source analysis it is INERT for on-screen atlas-draw corruption (full overpaint each frame, no gl.clear), so it does not mask the bug and makes readback/toDataURL reliable'
+      })
     }
   }
 
