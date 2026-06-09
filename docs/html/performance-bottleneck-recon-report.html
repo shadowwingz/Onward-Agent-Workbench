@@ -24,9 +24,9 @@ Onward 性能瓶颈数据摸底报告 — 由 Phase 0「先量测」数据侦察
     font-synthesis:none;
   }
   *{box-sizing:border-box}
-  html{scroll-behavior:smooth}
+  html{scroll-behavior:auto}
   body{
-    margin:0;background:var(--bg);color:var(--ink);
+    margin:0;padding-left:280px;background:var(--bg);color:var(--ink);
     font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
     line-height:1.65;font-size:15px;-webkit-font-smoothing:antialiased;
   }
@@ -115,11 +115,21 @@ Onward 性能瓶颈数据摸底报告 — 由 Phase 0「先量测」数据侦察
   footer{padding:30px 0 50px;color:var(--ink-faint);font-size:13px}
   footer .wrap > div{margin:4px 0}
 
-  .toc{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px}
-  .toc a{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:6px 12px;font-size:13px;color:var(--ink-dim)}
-  .toc a:hover{border-color:var(--accent);color:var(--ink);text-decoration:none}
-  .toc .grp{font-size:12px;color:var(--ink-faint);align-self:center;margin:0 2px 0 6px;font-weight:700;letter-spacing:.5px}
-  .toc a.planlink{background:#1a2230;border-color:#2f3b4d}
+  .toc-sidebar{
+    position:fixed;inset:0 auto 0 0;width:280px;z-index:20;
+    background:#0b1018;border-right:1px solid var(--border);
+    padding:22px 18px 28px;overflow-y:auto;
+  }
+  .toc-title{font-size:14px;font-weight:800;color:var(--ink);margin:0 0 12px;line-height:1.35}
+  .toc-sub{font-size:12px;color:var(--ink-faint);margin:0 0 18px;line-height:1.45}
+  .toc-group{font-size:11px;color:var(--ink-faint);font-weight:800;letter-spacing:.8px;text-transform:uppercase;margin:18px 0 7px}
+  .toc-sidebar a{
+    display:flex;gap:8px;align-items:baseline;color:var(--ink-dim);
+    border-radius:7px;padding:6px 8px;font-size:13px;line-height:1.35;
+  }
+  .toc-sidebar a:hover,.toc-sidebar a.active{background:var(--accent-soft);color:var(--ink);text-decoration:none}
+  .toc-sidebar a.active{box-shadow:inset 3px 0 0 var(--accent)}
+  .toc-sidebar .idx{color:var(--accent);font-variant-numeric:tabular-nums;min-width:28px}
 
   ol.tight{margin:8px 0;padding-left:22px}
   ol.tight li{margin:6px 0;color:var(--ink-dim);font-size:14px}
@@ -134,9 +144,41 @@ Onward 性能瓶颈数据摸底报告 — 由 Phase 0「先量测」数据侦察
   .dod{color:var(--low);font-weight:600}
   .gain{font-weight:700}
   .gain-l{color:var(--high)} .gain-m{color:var(--med)} .gain-s{color:var(--ink-faint)}
+
+  @media (max-width:980px){
+    body{padding-left:0}
+    .toc-sidebar{display:none}
+    .wrap{padding:0 18px}
+    .hero h1{font-size:24px}
+  }
 </style>
 </head>
 <body>
+
+<nav class="toc-sidebar" aria-label="文档目录">
+  <div class="toc-title">Onward 性能优化报告</div>
+  <div class="toc-sub">点击目录项会即时跳转；滚动时自动标记当前章节。</div>
+  <div class="toc-group">摸底</div>
+  <a href="#tldr"><span class="idx">①</span><span>核心结论</span></a>
+  <a href="#method"><span class="idx">②</span><span>方法与口径</span></a>
+  <a href="#heatmap"><span class="idx">③</span><span>风险热力图</span></a>
+  <a href="#latency"><span class="idx">④</span><span>真实延迟实测</span></a>
+  <a href="#surfaces"><span class="idx">⑤</span><span>逐 surface 硬指标</span></a>
+  <a href="#infra"><span class="idx">⑥</span><span>基础设施缺口</span></a>
+  <a href="#next"><span class="idx">⑦</span><span>优先级与下一步</span></a>
+  <div class="toc-group">方案</div>
+  <a href="#plan-intro"><span class="idx">§0</span><span>总览 / 决策</span></a>
+  <a href="#plan-1"><span class="idx">§1</span><span>现状基线</span></a>
+  <a href="#plan-2"><span class="idx">§2</span><span>缺口矩阵</span></a>
+  <a href="#plan-3"><span class="idx">§3</span><span>Phase 0</span></a>
+  <a href="#plan-456"><span class="idx">§4–6</span><span>三块基建</span></a>
+  <a href="#plan-7"><span class="idx">§7</span><span>卸载 / 暖启</span></a>
+  <a href="#plan-8"><span class="idx">§8</span><span>缓存张力</span></a>
+  <a href="#plan-9"><span class="idx">§9</span><span>路线图</span></a>
+  <a href="#plan-10"><span class="idx">§10</span><span>跨平台矩阵</span></a>
+  <a href="#plan-1112"><span class="idx">§11–12</span><span>决策 / 引用</span></a>
+  <a href="#doc-meta"><span class="idx">Meta</span><span>文档元信息</span></a>
+</nav>
 
 <header class="hero">
   <div class="wrap">
@@ -151,27 +193,6 @@ Onward 性能瓶颈数据摸底报告 — 由 Phase 0「先量测」数据侦察
       <span><b>摸底日期</b> <span class="mono">2026-06-02</span></span>
       <span><b>方案状态</b> <span class="mono">PROPOSAL · 2026-06-01</span></span>
       <span><b>数据来源</b> 9-agent 静态量测 + 6 个真实延迟 autotest</span>
-    </div>
-    <div class="toc">
-      <span class="grp">摸底</span>
-      <a href="#tldr">① 核心结论</a>
-      <a href="#method">② 方法与口径</a>
-      <a href="#heatmap">③ 风险热力图</a>
-      <a href="#latency">④ 真实延迟实测</a>
-      <a href="#surfaces">⑤ 逐 surface 硬指标</a>
-      <a href="#infra">⑥ 基础设施缺口</a>
-      <a href="#next">⑦ 优先级与下一步</a>
-      <span class="grp">方案</span>
-      <a class="planlink" href="#plan-intro">§0 总览/决策</a>
-      <a class="planlink" href="#plan-1">§1 现状基线</a>
-      <a class="planlink" href="#plan-2">§2 缺口矩阵</a>
-      <a class="planlink" href="#plan-3">§3 Phase 0</a>
-      <a class="planlink" href="#plan-456">§4–6 三块基建</a>
-      <a class="planlink" href="#plan-7">§7 卸载/暖启</a>
-      <a class="planlink" href="#plan-8">§8 缓存张力</a>
-      <a class="planlink" href="#plan-9">§9 路线图</a>
-      <a class="planlink" href="#plan-10">§10 跨平台</a>
-      <a class="planlink" href="#plan-1112">§11–12 决策/引用</a>
     </div>
   </div>
 </header>
@@ -793,6 +814,29 @@ Onward 性能瓶颈数据摸底报告 — 由 Phase 0「先量测」数据侦察
   </div>
 </section>
 
+<section id="doc-meta">
+  <div class="wrap">
+    <h2><span class="num">Meta</span> 文档元信息 · 更新历史</h2>
+    <div class="tbl-wrap"><table>
+      <tbody>
+        <tr><th>生成分支</th><td><code>master</code></td></tr>
+        <tr><th>来源分支</th><td><code>20260529-feat-dev1</code></td></tr>
+        <tr><th>应用版本</th><td><code>2.0.1</code></td></tr>
+        <tr><th>反映提交</th><td><code>5cd1581</code>，即合并 <code>20260529-feat-dev1</code> 后的文档内容，并在本次协调中对齐仓库 HTML 文档规范。</td></tr>
+        <tr><th>文档版本</th><td><code>v2</code></td></tr>
+      </tbody>
+    </table></div>
+    <p class="lead" style="margin:12px 0 8px">追加式更新历史：后续修订只在表格末尾追加新行，不重写或删除既往记录。</p>
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>版本</th><th>日期</th><th>分支</th><th>变更摘要</th></tr></thead>
+      <tbody>
+        <tr><td><b>v1</b></td><td>2026-06-02</td><td><code>20260529-feat-dev1</code></td><td>生成性能瓶颈摸底报告和总体方案合订版。</td></tr>
+        <tr><td><b>v2</b></td><td>2026-06-09</td><td><code>master</code></td><td>合并时补齐左侧固定目录、即时跳转、当前章节高亮和文档元信息。</td></tr>
+      </tbody>
+    </table></div>
+  </div>
+</section>
+
 <footer>
   <div class="wrap">
     <div><b>本合订文档</b> · 上半部=数据摸底(Phase 0 产物),下半部=总体方案全文(§0–§12,源自 <code>docs/performance-optimization-master-plan.md</code>,简体中文化、保留英文技术标识符)。</div>
@@ -802,5 +846,38 @@ Onward 性能瓶颈数据摸底报告 — 由 Phase 0「先量测」数据侦察
   </div>
 </footer>
 
+<script>
+(() => {
+  const links = Array.from(document.querySelectorAll('.toc-sidebar a[href^="#"]'));
+  const sections = links
+    .map((link) => document.querySelector(link.getAttribute('href')))
+    .filter(Boolean);
+  const setActive = (id) => {
+    links.forEach((link) => {
+      link.classList.toggle('active', link.getAttribute('href') === `#${id}`);
+    });
+  };
+  if ('IntersectionObserver' in window) {
+    const observer = new IntersectionObserver((entries) => {
+      const visible = entries
+        .filter((entry) => entry.isIntersecting)
+        .sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
+      if (visible?.target?.id) {
+        setActive(visible.target.id);
+      }
+    }, { rootMargin: '-20% 0px -65% 0px', threshold: [0, 0.25, 0.5, 1] });
+    sections.forEach((section) => observer.observe(section));
+  }
+  links.forEach((link) => {
+    link.addEventListener('click', () => {
+      const id = link.getAttribute('href').slice(1);
+      window.setTimeout(() => setActive(id), 0);
+    });
+  });
+  if (sections[0]?.id) {
+    setActive(sections[0].id);
+  }
+})();
+</script>
 </body>
 </html>
