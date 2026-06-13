@@ -1,0 +1,35 @@
+name: Build Linux
+
+on:
+  workflow_dispatch:        # 手动触发,先保证能跑通
+  push:
+    tags: ['v*']            # 后续打 tag 自动构建
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - run: corepack enable   # 按 packageManager 字段自动装 pnpm@10.29.3
+
+      - run: pnpm install --frozen-lockfile
+        env:
+          HUSKY: '0'                           # 跳过 husky 钩子
+          ELECTRON_MIRROR: 'https://npmmirror.com/mirrors/electron/'  # 国内加速,可去掉
+
+      - run: pnpm dist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: onward-linux
+          path: |
+            release/*.AppImage
+            release/*.deb
+          if-no-files-found: error
