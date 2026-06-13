@@ -22,7 +22,7 @@ jobs:
           HUSKY: '0'                           # 跳过 husky 钩子
           ELECTRON_MIRROR: 'https://npmmirror.com/mirrors/electron/'  # 国内加速,可去掉
 
-      - run: pnpm dist
+      - run: pnpm dist --publish never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
