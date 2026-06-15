@@ -99,8 +99,20 @@ export function resolveMirrorWatcherRoot(state: MirrorState | null): string | nu
  * .git event filter used by the worker watcher.
  *
  * Worktree files such as Cargo.lock, pnpm-lock.yaml, and yarn.lock are real
- * project inputs and must trigger recompute. Only transient files inside
- * .git/ are filtered.
+ * project inputs and must trigger recompute. Only transient files inside a
+ * `.git/` directory are filtered.
+ *
+ * IMPORTANT — nested (submodule) `.git/` dirs: the watcher is recursive over the
+ * parent worktree, which CONTAINS each submodule's working tree (and, for a
+ * classic-layout submodule, its real `.git/` directory at
+ * `<submodule>/.git/...`). Any git activity inside a submodule — including the
+ * USER's own git commands and our own (even read-only) probes — churns the
+ * submodule's `.git/` (e.g. `index.lock` create/delete). Recognising ONLY the
+ * top-level `.git/` let `<sub>/.git/index.lock` fall through as a "worktree
+ * change", firing a recompute → diff-cache invalidation storm (observed on
+ * Windows: every click cleared the renderer body cache). So we classify the
+ * subpath after the LAST `.git/` segment, applying the same rules whether the
+ * `.git/` is top-level or a nested submodule dir.
  */
 export function classifyEventPath(eventPath: string, watchedRoot: string): {
   drop: boolean
@@ -112,28 +124,59 @@ export function classifyEventPath(eventPath: string, watchedRoot: string): {
     ? normEvent.slice(normWatched.length + 1)
     : normEvent
 
-  if (rel === '.git' || rel.startsWith('.git/')) {
-    if (rel.endsWith('.lock')) return { drop: true, reason: 'lockfile' }
-    if (/(?:^|\/)\.tmp_/.test(rel)) return { drop: true, reason: 'tmpfile' }
-    if (/~\d+$/.test(rel)) return { drop: true, reason: 'tmpfile' }
-    if (rel.startsWith('.git/objects/')) return { drop: true, reason: 'gitObjects' }
+  // The `.git` ENTRY itself (top-level dir node, or a submodule's gitfile/dir
+  // node) is internal noise.
+  if (rel === '.git' || rel.endsWith('/.git')) {
+    return { drop: true, reason: 'gitInternal' }
+  }
+
+  // Subpath after the LAST `.git/` segment — handles top-level (`.git/...`) AND
+  // nested submodule (`a/b/.git/...`, even submodule-in-submodule) git dirs.
+  const lastGit = rel.lastIndexOf('/.git/')
+  const sub = rel.startsWith('.git/')
+    ? rel.slice('.git/'.length)
+    : (lastGit >= 0 ? rel.slice(lastGit + '/.git/'.length) : null)
+
+  if (sub !== null) {
+    if (sub.endsWith('.lock')) return { drop: true, reason: 'lockfile' }
+    if (/(?:^|\/)\.tmp_/.test(sub)) return { drop: true, reason: 'tmpfile' }
+    if (/~\d+$/.test(sub)) return { drop: true, reason: 'tmpfile' }
+    if (sub.startsWith('objects/')) return { drop: true, reason: 'gitObjects' }
     if (
-      rel === '.git/HEAD' ||
-      rel === '.git/ORIG_HEAD' ||
-      rel === '.git/MERGE_HEAD' ||
-      rel === '.git/CHERRY_PICK_HEAD' ||
-      rel === '.git/REBASE_HEAD' ||
-      rel === '.git/index' ||
-      rel === '.git/packed-refs' ||
-      rel === '.git/config' ||
-      rel.startsWith('.git/refs/') ||
-      rel === '.git/logs/HEAD' ||
-      rel.startsWith('.git/logs/refs/') ||
-      rel.startsWith('.git/rebase-')
+      sub === 'HEAD' ||
+      sub === 'ORIG_HEAD' ||
+      sub === 'MERGE_HEAD' ||
+      sub === 'CHERRY_PICK_HEAD' ||
+      sub === 'REBASE_HEAD' ||
+      sub === 'index' ||
+      sub === 'packed-refs' ||
+      sub === 'config' ||
+      sub.startsWith('refs/') ||
+      sub === 'logs/HEAD' ||
+      sub.startsWith('logs/refs/') ||
+      sub.startsWith('rebase-')
     ) {
       return { drop: false, reason: 'allowed' }
     }
     return { drop: true, reason: 'gitInternal' }
+  }
+
+  // Worktree-level atomic-save temp files. Many tools write a file by creating a
+  // sibling temp, fsync'ing it, then renaming it over the target (write-temp-
+  // then-rename). The temp churns the watcher even though the meaningful event
+  // is the final rename to the REAL file (which fires its own allowed event and
+  // still triggers a recompute). Observed on kar-qemu: a background process
+  // rewriting `tools/kar_air_control.py` produced 11 events from
+  // `kar_air_control.py.tmp.<pid>.<hash>` temps. Dropping these temp artifacts
+  // avoids a redundant recompute per atomic save without losing the real change.
+  const leaf = rel.slice(rel.lastIndexOf('/') + 1)
+  // `.tmp.<pid>.<hash>` (write-file-atomic / similar atomic writers):
+  // e.g. foo.py.tmp.7432.3fe8206c1a01. The `.tmp.` infix is an unambiguous temp
+  // marker, so this is safe against real files (config.tmp.json, foo.tmp, and
+  // version-like names do NOT match). A broader `.<pid>.<hash>` form was
+  // deliberately NOT added — it risks matching legitimate dotted data files.
+  if (/\.tmp\.\d+\.[0-9a-f]{4,}$/i.test(leaf)) {
+    return { drop: true, reason: 'tmpfile' }
   }
 
   return { drop: false, reason: 'allowed' }
@@ -317,6 +360,7 @@ export function computeMirrorDelta(prev: MirrorState | null, next: MirrorState):
     out.repoRoot = next.repoRoot
     out.repoName = next.repoName
     out.branch = next.branch
+    out.branchOid = next.branchOid
     out.status = next.status
     out.files = next.files
     out.repos = next.repos
@@ -327,6 +371,7 @@ export function computeMirrorDelta(prev: MirrorState | null, next: MirrorState):
   if (prev.repoRoot !== next.repoRoot) out.repoRoot = next.repoRoot
   if (prev.repoName !== next.repoName) out.repoName = next.repoName
   if (prev.branch !== next.branch) out.branch = next.branch
+  if (prev.branchOid !== next.branchOid) out.branchOid = next.branchOid
   if (prev.status !== next.status) out.status = next.status
   if (prev.submodulesLoading !== next.submodulesLoading) out.submodulesLoading = next.submodulesLoading
   if (!sameFileList(prev.files, next.files)) out.files = next.files

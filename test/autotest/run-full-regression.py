@@ -57,10 +57,17 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import List, Optional
+
+# Live-progress heartbeat: while a runner produces NO output for this many
+# seconds, the orchestrator emits a "still running" pulse so a hung / silently-
+# stuck runner is visible in real time (instead of looking dead). Chatty runners
+# never trigger it; it only fires during genuine output gaps.
+HEARTBEAT_SEC = 30
 
 # Force UTF-8 output so runner logs containing Unicode characters (e.g. ANSI
 # escape sequences or non-ASCII identifiers) do not crash the orchestrator on
@@ -91,6 +98,7 @@ SCRIPTS: List[str] = [
     "test/autotest/run-git-state-mirror-latency-autotest.sh",
     "test/autotest/run-git-diff-subdir-autotest.sh",
     "test/autotest/run-git-diff-submodules-autotest.sh",
+    "test/autotest/run-repo-prewarm-autotest.sh",
     "test/autotest/run-git-history-multi-terminal-scope-autotest.sh",
     "test/autotest/run-git-nested-submodules-autotest.sh",
     "test/autotest/run-global-search-autotest.sh",
@@ -159,9 +167,33 @@ UPDATE_E2E_SCRIPTS: List["tuple[str, str]"] = [
 ]
 
 PER_SCRIPT_TIMEOUT_SEC = 180
-# Per-script timeout overrides for runners whose end-to-end flow legitimately
-# exceeds the 180s default. Add entries here (not by patching the runner) so
-# the orchestrator's authority remains the single source of truth.
+
+# ---------------------------------------------------------------------------
+# Per-runner time budget (the "no test case over 5 minutes" rule).
+#
+# Every runner MUST complete within RUNNER_BUDGET_SEC. This is a DESIGN ceiling,
+# not just a timeout: a suite that needs longer is doing too much in one process
+# and must be SPLIT into multiple sub-5-minute runners (one logical group each),
+# never given a bigger timeout. The orchestrator MONITORS every runner's wall
+# time, and any runner whose elapsed time exceeds this budget is flagged
+# OVER-BUDGET in the duration audit + summary.json (`over_budget`) so it triggers
+# a split review — see the ow_full_regression_test skill § "5-minute budget".
+#
+# Note on EDR/anti-malware hosts: process spawns are taxed 1.3-12.9s, so a
+# well-designed suite can still blow the budget on such a host. The audit FLAGS
+# rather than hard-fails for this reason; the budget is enforced at AUTHORING
+# time (keep each suite small) and verified on a healthy host / CI.
+RUNNER_BUDGET_SEC = 300
+
+# Per-script timeout overrides for runners whose end-to-end flow exceeds the 180s
+# default. Add entries here (not by patching the runner) so the orchestrator's
+# authority remains the single source of truth.
+#
+# HARD RULE: a new override MUST be <= RUNNER_BUDGET_SEC (300s). Any value ABOVE
+# 300 is an OVER-BUDGET BACKLOG entry — a suite that violates the 5-minute rule
+# and is pending a SPLIT into smaller runners. Such entries are listed at startup
+# as "over-budget backlog" so they stay visible until split. Do NOT add new
+# >300s entries; split the suite instead.
 PER_SCRIPT_TIMEOUT_OVERRIDES_SEC = {
     # GitDiff staleness + submodule walks through 46 distinct GDS-* cases.
     # Git operations are slow on Windows; individual steps can exceed 15s.
@@ -190,6 +222,11 @@ PER_SCRIPT_TIMEOUT_OVERRIDES_SEC = {
     # ~10-20s per failure-injection pass, 180s is far below the bottom of
     # the distribution.
     "test/autotest/run-git-state-mirror-latency-autotest.sh": 1500,
+    # Repo prewarm WIRING suite: a single app launch + ~35s dwell to let the
+    # default terminal attach and fire the prewarm trigger event, then a trace
+    # assertion. EDR-independent (the event fires before any git spawn), but the
+    # app start itself can be slow on EDR-throttled hosts — give it headroom.
+    "test/autotest/run-repo-prewarm-autotest.sh": 180,
 }
 INTER_SCRIPT_SLEEP_SEC = 2
 
@@ -204,6 +241,10 @@ class RunResult:
     elapsed_sec: float
     log_file: str
     note: str = ""
+    # True when elapsed_sec exceeded RUNNER_BUDGET_SEC (the 5-min design ceiling).
+    # Independent of pass/fail: a PASS that ran 6 min is still over budget and
+    # must be split. Surfaced in the duration audit + summary.json.
+    over_budget: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -442,12 +483,38 @@ def run_one(
             errors="replace",
         )
         assert proc.stdout is not None
+        # Heartbeat: a daemon thread that, during any gap with NO runner output
+        # >= HEARTBEAT_SEC, prints a "still running (Ns, no output for Ms)" pulse
+        # so a silently-stuck runner is visible live. The lock serializes writes
+        # so the pulse never interleaves mid-line with the streamed output.
+        io_lock = threading.Lock()
+        last_output = time.monotonic()
+        stop_hb = threading.Event()
+        stem = Path(script).stem
+
+        def heartbeat() -> None:
+            while not stop_hb.wait(HEARTBEAT_SEC):
+                now = time.monotonic()
+                silent = now - last_output
+                if silent >= HEARTBEAT_SEC:
+                    pulse = (f"  … {stem} still running "
+                             f"{now - start:.0f}s (no output for {silent:.0f}s; timeout {timeout_sec}s)\n")
+                    with io_lock:
+                        sys.stdout.write(pulse)
+                        sys.stdout.flush()
+                        summary_fh.write(pulse)
+                        summary_fh.flush()
+
+        hb_thread = threading.Thread(target=heartbeat, daemon=True)
+        hb_thread.start()
         try:
             for line in proc.stdout:
-                sys.stdout.write(line)
-                sys.stdout.flush()
-                log_fh.write(line)
-                summary_fh.write(line)
+                with io_lock:
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
+                    log_fh.write(line)
+                    summary_fh.write(line)
+                last_output = time.monotonic()
             rc = proc.wait()
         except KeyboardInterrupt:
             proc.terminate()
@@ -456,6 +523,9 @@ def run_one(
             except subprocess.TimeoutExpired:
                 proc.kill()
             raise
+        finally:
+            stop_hb.set()
+            hb_thread.join(timeout=2)
     finally:
         log_fh.close()
 
@@ -696,10 +766,22 @@ def main() -> int:
     emit(f"App name: {app_name}")
     emit(f"App binary: {app_bin}")
     emit(f"Output dir: {out_dir}")
-    emit(f"Per-script timeout: {PER_SCRIPT_TIMEOUT_SEC}s default, inter-script sleep: {INTER_SCRIPT_SLEEP_SEC}s")
+    emit(f"Per-script timeout: {PER_SCRIPT_TIMEOUT_SEC}s default, "
+         f"5-min budget: {RUNNER_BUDGET_SEC}s, inter-script sleep: {INTER_SCRIPT_SLEEP_SEC}s")
     if PER_SCRIPT_TIMEOUT_OVERRIDES_SEC:
         emit("Per-script timeout overrides:")
         for script, timeout_sec in sorted(PER_SCRIPT_TIMEOUT_OVERRIDES_SEC.items()):
+            emit(f"  {script}: {timeout_sec}s")
+    # Surface the over-budget backlog up front: any configured override above the
+    # 5-min budget is a suite that violates the rule and is pending a SPLIT.
+    backlog = sorted(
+        ((s, t) for s, t in PER_SCRIPT_TIMEOUT_OVERRIDES_SEC.items() if t > RUNNER_BUDGET_SEC),
+        key=lambda x: x[1], reverse=True,
+    )
+    if backlog:
+        emit(f"⚠ OVER-BUDGET BACKLOG: {len(backlog)} runner(s) have a timeout above the "
+             f"{RUNNER_BUDGET_SEC}s budget and MUST be split into sub-5-min runners:")
+        for script, timeout_sec in backlog:
             emit(f"  {script}: {timeout_sec}s")
     emit(f"Bash: {bash}")
     emit(f"Node: {node}")
@@ -724,9 +806,12 @@ def main() -> int:
     interrupted = False
 
     try:
-        for script in scripts:
+        total = len(scripts)
+        for idx, script in enumerate(scripts, 1):
+            timeout_sec = PER_SCRIPT_TIMEOUT_OVERRIDES_SEC.get(script, PER_SCRIPT_TIMEOUT_SEC)
+            over = "  ⚠ over 5-min budget" if timeout_sec > RUNNER_BUDGET_SEC else ""
             emit("")
-            emit(f"=== RUN {script} ===")
+            emit(f"=== RUN [{idx}/{total}] {script} (timeout {timeout_sec}s){over} ===")
 
             # Skip git-diff-submodules cleanly if the fixture generation failed.
             if (
@@ -783,6 +868,7 @@ def main() -> int:
                 ))
                 break
 
+            over_budget = elapsed > RUNNER_BUDGET_SEC
             if rc == 0:
                 status = "PASS"
                 emit(f"PASS {script} ({elapsed:.0f}s)")
@@ -794,10 +880,18 @@ def main() -> int:
                 status = "FAIL"
                 emit(f"FAIL {script} (exit={rc}, {elapsed:.0f}s)")
 
+            # 5-minute budget check (the "no test case over 5 min" rule): flag
+            # the instant a runner overruns, so a slow suite is visible inline,
+            # not just in the end-of-run audit.
+            if over_budget:
+                emit(f"  ⚠ OVER 5-MIN BUDGET: {script} ran {elapsed:.0f}s "
+                     f"(> {RUNNER_BUDGET_SEC}s) — split this suite into smaller runners.")
+
             results.append(RunResult(
                 script=script, status=status, exit_code=rc,
                 elapsed_sec=round(elapsed, 1),
                 log_file=str(log_path.relative_to(out_dir)),
+                over_budget=over_budget,
             ))
 
             kill_app(app_name)
@@ -829,6 +923,26 @@ def main() -> int:
             if r.status in ("FAIL", "TIMEOUT"):
                 tag = "TIMEOUT" if r.status == "TIMEOUT" else f"exit={r.exit_code}"
                 emit(f"  {r.script} ({tag})")
+
+    # ---- Elapsed-time monitor + 5-minute budget check (the "no test case over
+    # 5 min" rule). The duration audit lists every runner slowest-first so slow
+    # suites are always visible; the over-budget list is the split-review trigger.
+    ran = [r for r in results if r.status != "SKIP"]
+    over_budget_results = [r for r in ran if r.over_budget]
+    if ran:
+        emit("")
+        emit(f"=== DURATION AUDIT (slowest first; 5-min budget = {RUNNER_BUDGET_SEC}s) ===")
+        for r in sorted(ran, key=lambda x: x.elapsed_sec, reverse=True):
+            flag = "  ⚠ OVER BUDGET" if r.over_budget else ""
+            emit(f"  {r.elapsed_sec:7.0f}s  {r.status:7s} {Path(r.script).stem}{flag}")
+    if over_budget_results:
+        emit("")
+        emit(f"⚠ OVER 5-MIN BUDGET: {len(over_budget_results)} runner(s) exceeded "
+             f"{RUNNER_BUDGET_SEC}s and MUST be split into smaller sub-5-min runners "
+             "(see the ow_full_regression_test skill § '5-minute budget'):")
+        for r in sorted(over_budget_results, key=lambda x: x.elapsed_sec, reverse=True):
+            emit(f"  {r.elapsed_sec:7.0f}s  {r.script}")
+
     if interrupted:
         emit("Run was interrupted before completion.")
     emit("")
@@ -847,6 +961,11 @@ def main() -> int:
         "failed": failed,
         "skipped": skipped,
         "errored": errored,
+        "budget_sec": RUNNER_BUDGET_SEC,
+        "over_budget": [
+            {"script": r.script, "elapsed_sec": r.elapsed_sec, "status": r.status}
+            for r in sorted(over_budget_results, key=lambda x: x.elapsed_sec, reverse=True)
+        ],
         "results": [asdict(r) for r in results],
     }, indent=2) + "\n", encoding="utf-8")
 

@@ -26,6 +26,16 @@ if [[ -z "${APP_BIN:-}" || ! -x "$APP_BIN" ]]; then
   exit 1
 fi
 
+# Portable Python interpreter: macOS/Linux ship `python3`, Windows ships the `py`
+# launcher (Git Bash has no `python3`). Resolve once so the result-parsing steps
+# below run on every platform (the bare `python3` here failed full regression on
+# Windows with `python3: command not found`).
+PYBIN="$(command -v python3 || command -v py || command -v python || true)"
+if [[ -z "$PYBIN" ]]; then
+  echo "ERROR: no Python interpreter found (need python3 / py / python on PATH)" >&2
+  exit 1
+fi
+
 echo "Preparing prompt input longtail fixture..."
 node "$ROOT_DIR/test/autotest/prepare-prompt-input-longtail-fixture.mjs"
 
@@ -129,7 +139,7 @@ tail -n 180 "$LOG_FILE" | awk -v marker="$MARKER" '
 ' || true
 echo
 
-if ! python3 - "$LOG_FILE" "$MARKER" "$RESULT_FILE" <<'PY'
+if ! "$PYBIN" - "$LOG_FILE" "$MARKER" "$RESULT_FILE" <<'PY'
 import json
 import sys
 
@@ -190,7 +200,7 @@ echo "  Log:    $LOG_FILE"
 echo "  Result: $RESULT_FILE"
 echo
 echo "=== Longtail summary ==="
-python3 - "$RESULT_FILE" <<'PY'
+"$PYBIN" - "$RESULT_FILE" <<'PY'
 import json
 import sys
 

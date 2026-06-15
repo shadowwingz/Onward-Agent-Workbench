@@ -27,6 +27,7 @@ import assert from 'node:assert/strict'
 
 import {
   buildCacheKey,
+  parseCacheKey,
   createFetchFileContentWithCache,
   type FetchFileContentDeps,
   type ContentCacheFile,
@@ -631,4 +632,35 @@ test('e2e: in-flight worker result after invalidation is returned but not stored
   assert.equal(secondResult.modifiedContent, 'fresh-content')
   assert.equal(secondResult.cacheInfo?.state, 'miss')
   assert.equal(deps.workerCalls.length, 1, 'stale in-flight result must not become a later cache hit')
+})
+
+// ---------------------------------------------------------------------------
+// parseCacheKey — inverse of buildCacheKey (content-cache revalidation #1)
+// ---------------------------------------------------------------------------
+
+test('parseCacheKey round-trips buildCacheKey for every changeType variant', () => {
+  const files: ContentCacheFile[] = [
+    { filename: 'new.txt', status: '?', originalFilename: undefined, changeType: 'untracked', isSubmoduleEntry: false },
+    { filename: 'feature.ts', status: 'A', originalFilename: undefined, changeType: 'staged', isSubmoduleEntry: false },
+    { filename: 'src/a.c', status: 'M', originalFilename: undefined, changeType: 'unstaged', isSubmoduleEntry: false },
+    { filename: 'to.ts', status: 'R', originalFilename: 'from.ts', changeType: 'staged', isSubmoduleEntry: false }
+  ]
+  for (const f of files) {
+    const parsed = parseCacheKey(buildCacheKey(f))
+    assert.equal(parsed.changeType, f.changeType)
+    assert.equal(parsed.status, f.status)
+    assert.equal(parsed.filename, f.filename)
+    assert.equal(parsed.originalFilename, f.originalFilename ?? '')
+  }
+})
+
+test('parseCacheKey recovers changeType + filename used by revalidation', () => {
+  const parsed = parseCacheKey('unstaged::M::::tools/kar_air_control.py')
+  assert.equal(parsed.changeType, 'unstaged')
+  assert.equal(parsed.filename, 'tools/kar_air_control.py')
+})
+
+test('parseCacheKey rejoins a filename that itself contains "::" (defensive)', () => {
+  const f: ContentCacheFile = { filename: 'weird::name.txt', status: 'M', originalFilename: undefined, changeType: 'unstaged', isSubmoduleEntry: false }
+  assert.equal(parseCacheKey(buildCacheKey(f)).filename, 'weird::name.txt')
 })

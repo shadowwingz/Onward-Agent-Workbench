@@ -13,6 +13,7 @@ import {
   getGitHistory,
   getGitHistoryDiff,
   getGitHistoryFileContent,
+  prewarmHistoryCommitDiffs,
   getGitRepoMeta,
   invalidateGitDiffCache,
   resolveRepoRoot,
@@ -37,6 +38,7 @@ type GitIpcWorkerMethod =
   | 'getHistory'
   | 'getHistoryDiff'
   | 'getHistoryFileContent'
+  | 'prewarmHistoryDiffs'
   | 'getFileContent'
   | 'saveFileContent'
   | 'stageFile'
@@ -89,11 +91,22 @@ async function dispatch(method: GitIpcWorkerMethod, payload: Record<string, unkn
     case 'getDiff':
       return await getGitDiff(cwd, payload.options as { scope?: 'root-only' | 'full'; force?: boolean } | undefined)
     case 'getHistory':
-      return await getGitHistory(cwd, Number(payload.limit) || undefined, Number(payload.skip) || undefined)
+      return await getGitHistory(
+        cwd,
+        Number(payload.limit) || undefined,
+        Number(payload.skip) || undefined,
+        typeof payload.branchOid === 'string' ? payload.branchOid : undefined
+      )
     case 'getHistoryDiff':
       return await getGitHistoryDiff(cwd, payload.options as GitHistoryDiffOptions)
     case 'getHistoryFileContent':
       return await getGitHistoryFileContent(cwd, payload.options as GitHistoryFileContentOptions)
+    case 'prewarmHistoryDiffs':
+      return await prewarmHistoryCommitDiffs(
+        cwd,
+        typeof payload.branchOid === 'string' ? payload.branchOid : undefined,
+        Number(payload.limit) || 50
+      )
     case 'getFileContent':
       return await getGitFileContent(
         cwd,
@@ -128,7 +141,16 @@ async function dispatch(method: GitIpcWorkerMethod, payload: Record<string, unkn
       return await updateGitIndexContent(cwd, stringPayload(payload, 'filename'), stringPayload(payload, 'content'))
     case 'warmDiffCache':
       try {
-        await getGitDiff(cwd, { scope: 'full' })
+        // Warm BOTH scopes the subpage-entry two-phase load asks for. The
+        // entry first requests `root-only` (fast first paint) and, when the
+        // repo has submodules, then `full`. Warming only `full` (the old
+        // behaviour) left the `root-only` cache key cold, so the very first
+        // paint still recomputed. Warm both so a subsequent open is a pure
+        // cache hit on both phases.
+        await Promise.all([
+          getGitDiff(cwd, { scope: 'root-only' }),
+          getGitDiff(cwd, { scope: 'full' })
+        ])
         return { success: true }
       } catch {
         return { success: false }

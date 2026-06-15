@@ -11,7 +11,7 @@ $ErrorActionPreference = 'Stop'
 $RepoRoot = if ($env:REPO_ROOT) { $env:REPO_ROOT } else { (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path }
 . (Join-Path $RepoRoot 'test\autotest\Resolve-DevAppBin.ps1')
 
-$AppBin = if ($args.Count -ge 1 -and $args[0]) { $args[0] } else { Resolve-DevAppBin -RepoRoot $RepoRoot }
+$AppBin = if ($args.Count -ge 1 -and $args[0]) { $args[0] } else { Resolve-DevAppBin -RootDir $RepoRoot }
 $LogFile = if ($args.Count -ge 2 -and $args[1]) { $args[1] } else { Join-Path $RepoRoot 'traces\test-logs\git-state-mirror-latency-autotest.log' }
 
 $LogDir = Split-Path -Parent $LogFile
@@ -51,7 +51,11 @@ try {
   $ManifestPath = Join-Path $FixtureTmp 'manifest.json'
   $manifest = Get-Content (Join-Path $FixtureSrc 'manifest.json') | ConvertFrom-Json
   $manifest | Add-Member -NotePropertyName tempRoot -NotePropertyValue $FixtureTmp -Force
-  $manifest | ConvertTo-Json -Depth 5 | Set-Content -Path $ManifestPath -Encoding UTF8
+  $manifestJson = $manifest | ConvertTo-Json -Depth 5
+  # Windows PowerShell 5.1's `Set-Content -Encoding UTF8` prepends a UTF-8 BOM,
+  # which Node's JSON.parse rejects (-> GSM-00 'manifest absent or unparseable').
+  # Write UTF-8 WITHOUT a BOM so the autotest TS can parse it on every platform.
+  [System.IO.File]::WriteAllText($ManifestPath, $manifestJson, (New-Object System.Text.UTF8Encoding $false))
 
   if (Test-Path $LogFile) { Remove-Item $LogFile -Force }
 
@@ -65,6 +69,11 @@ try {
     "  Log:            $LogFile"
     ''
   ) | Add-Content -Path $LogFile
+
+  # Per-pass watchdog: ONWARD_AUTOTEST_EXIT=1 makes the suite exit on its own,
+  # but EDR-slow git can stretch a pass; kill if it overruns so the runner can't
+  # hang. Generous because each pass drives many real git ops on a fixture repo.
+  $PassTimeoutSec = if ($env:GSM_PASS_TIMEOUT_SEC) { [int]$env:GSM_PASS_TIMEOUT_SEC } else { 300 }
 
   function Invoke-GsmPass {
     param(
@@ -92,7 +101,20 @@ try {
       Set-Item -Path "Env:\$FailureEnvName" -Value '1'
     }
 
-    & $AppBin *>> $LogFile
+    # A native WINDOWS-subsystem (GUI) Electron exe detaches from the console when
+    # launched via '&', so '& $AppBin *>> $LogFile' captures NOTHING (the prior
+    # bug: zero GSM markers in the log). Start-Process -RedirectStandard* forces a
+    # pipe even for a GUI app (parity with the working repo-prewarm .ps1 runner).
+    $passOut = Join-Path $UserDataDir 'pass-stdout.log'
+    $passErr = Join-Path $UserDataDir 'pass-stderr.log'
+    $proc = Start-Process -FilePath $AppBin -PassThru -RedirectStandardOutput $passOut -RedirectStandardError $passErr
+    $exited = $proc.WaitForExit($PassTimeoutSec * 1000)
+    if (-not $exited) {
+      Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+      Add-Content -Path $LogFile -Value "(pass '$Label' exceeded ${PassTimeoutSec}s watchdog and was killed)"
+    }
+    Get-Content $passOut -ErrorAction SilentlyContinue | Add-Content -Path $LogFile
+    Get-Content $passErr -ErrorAction SilentlyContinue | Add-Content -Path $LogFile
   }
 
   Invoke-GsmPass -Label 'baseline'

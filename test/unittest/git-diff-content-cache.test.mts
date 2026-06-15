@@ -62,6 +62,28 @@ test('single-file cap rejects oversized values without disturbing the bucket', (
   assert.equal(cache.get('/p', 'huge.ts'), null)
 })
 
+test('default maxProjects is 24 (P1: sized above kar-qemu submodule bucket count)', () => {
+  // Construct with NO options so the class defaults apply. 24 buckets keeps a
+  // nested-submodule superproject's per-repoRoot buckets resident through one
+  // Diff open instead of thrashing them out. Locking the constant here means a
+  // future "tidy the default back down to 8" regresses the kar-qemu fix loudly.
+  const cache = new GitDiffContentCache<DummyValue>()
+  assert.equal(cache.inspectStats().maxProjects, 24)
+})
+
+test('default cache retains a 24th project bucket and evicts only the 25th', () => {
+  const cache = new GitDiffContentCache<DummyValue>()
+  for (let i = 1; i <= 24; i += 1) cache.put(`/p${i}`, 'f', { payload: 'x' }, 1)
+  assert.equal(cache.inspectStats().projects.length, 24, 'all 24 buckets resident at the ceiling')
+  // Do NOT get('/p1') before the 25th put — a get reorders the LRU queue and
+  // would move /p1 off the tail, masking the eviction we are asserting. /p1 is
+  // the oldest untouched bucket, so it is the tail victim.
+  cache.put('/p25', 'f', { payload: 'x' }, 1) // 25th project → tail (/p1) evicts
+  assert.equal(cache.inspectStats().projects.length, 24)
+  assert.equal(cache.get('/p1', 'f'), null, '/p1 evicted as the queue tail on the 25th project')
+  assert.ok(cache.get('/p2', 'f'), '/p2 (next-oldest) survives the eviction')
+})
+
 test('project queue evicts the tail past maxProjects', () => {
   const { cache } = makeCache({ maxProjects: 2 })
   cache.put('/p1', 'a.ts', { payload: '1a' }, 50)
@@ -190,4 +212,89 @@ test('overwriting an existing entry replaces, does not double-count bytes', () =
   assert.equal(stats.projects.length, 1)
   assert.equal(stats.projects[0].entries, 1)
   assert.deepEqual(cache.get('/p', 'a.ts'), { payload: 'v2' })
+})
+
+// ---------------------------------------------------------------------------
+// revalidateProject — scoped eviction (kar-qemu content-cache thrash fix #1)
+// ---------------------------------------------------------------------------
+
+test('revalidateProject evicts ONLY entries the predicate marks stale; keeps the rest', () => {
+  const { cache } = makeCache()
+  cache.put('/p', 'changed.py', { payload: 'C' }, 100, 'tok-old')
+  cache.put('/p', 'kept.html', { payload: 'H' }, 100, 'tok-stable')
+  cache.put('/p', 'kept2.json', { payload: 'J' }, 100, 'tok-stable')
+
+  const res = cache.revalidateProject('/p', (key) => key === 'changed.py')
+  assert.deepEqual(res, { kept: 2, evicted: 1 })
+  assert.equal(cache.get('/p', 'changed.py'), null, 'stale entry evicted')
+  assert.deepEqual(cache.get('/p', 'kept.html'), { payload: 'H' }, 'unrelated entry stays warm')
+  assert.deepEqual(cache.get('/p', 'kept2.json'), { payload: 'J' }, 'unrelated entry stays warm')
+})
+
+test('revalidateProject passes the stored staleToken to the predicate', () => {
+  const { cache } = makeCache()
+  cache.put('/p', 'a', { payload: 'A' }, 10, 'mtime:1')
+  cache.put('/p', 'b', { payload: 'B' }, 10, undefined)
+  const seen: Array<[string, string | undefined]> = []
+  cache.revalidateProject('/p', (key, token) => { seen.push([key, token]); return token === undefined })
+  assert.deepEqual(seen.sort(), [['a', 'mtime:1'], ['b', undefined]])
+  assert.equal(cache.get('/p', 'b'), null, 'undefined-token entry evicted by predicate')
+  assert.deepEqual(cache.get('/p', 'a'), { payload: 'A' }, 'fresh entry kept')
+})
+
+test('revalidateProject bumps the project generation only when something was evicted', () => {
+  const { cache } = makeCache()
+  cache.put('/p', 'a', { payload: 'A' }, 10, 't')
+  cache.put('/p', 'b', { payload: 'B' }, 10, 't')
+  const gen0 = cache.getProjectGeneration('/p')
+  // No eviction -> generation unchanged (in-flight fetches not needlessly invalidated).
+  cache.revalidateProject('/p', () => false)
+  assert.equal(cache.getProjectGeneration('/p'), gen0, 'no-op revalidation keeps generation')
+  // Eviction -> generation bumps (protects in-flight fetches of the evicted file).
+  cache.revalidateProject('/p', (key) => key === 'a')
+  assert.notEqual(cache.getProjectGeneration('/p'), gen0, 'eviction bumps generation')
+})
+
+test('revalidateProject deletes the bucket when every entry is evicted', () => {
+  const { cache } = makeCache()
+  cache.put('/p', 'a', { payload: 'A' }, 10, 't')
+  cache.put('/p', 'b', { payload: 'B' }, 10, 't')
+  const res = cache.revalidateProject('/p', () => true)
+  assert.deepEqual(res, { kept: 0, evicted: 2 })
+  assert.equal(cache.getProjectEntryCount('/p'), 0)
+  assert.equal(cache.hasProject('/p'), false, 'emptied bucket removed')
+})
+
+test('revalidateProject on an absent project is a no-op', () => {
+  const { cache } = makeCache()
+  assert.deepEqual(cache.revalidateProject('/missing', () => true), { kept: 0, evicted: 0 })
+})
+
+test('getProjectEntryCount reflects puts and evictions', () => {
+  const { cache } = makeCache()
+  assert.equal(cache.getProjectEntryCount('/p'), 0)
+  cache.put('/p', 'a', { payload: 'A' }, 10, 't')
+  cache.put('/p', 'b', { payload: 'B' }, 10, 't')
+  assert.equal(cache.getProjectEntryCount('/p'), 2)
+  cache.invalidateEntry('/p', 'a')
+  assert.equal(cache.getProjectEntryCount('/p'), 1)
+})
+
+test('getProjectKeys lists resident keys (powers the async revalidator pre-stat)', () => {
+  // P6: the scoped revalidator snapshots keys, pre-computes fresh stat tokens
+  // off the main thread, then runs the sync predicate against the map. This is
+  // the enumeration it relies on.
+  const { cache } = makeCache()
+  cache.put('/p', 'a.ts', { payload: 'A' }, 10, 't')
+  cache.put('/p', 'b.ts', { payload: 'B' }, 10, 't')
+  assert.deepEqual(cache.getProjectKeys('/p').sort(), ['a.ts', 'b.ts'])
+  assert.deepEqual(cache.getProjectKeys('/missing'), [], 'unknown project → empty key list')
+})
+
+test('put without a staleToken stores undefined (back-compat with non-revalidating callers)', () => {
+  const { cache } = makeCache()
+  cache.put('/p', 'a', { payload: 'A' }, 10) // no token arg
+  const seen: Array<string | undefined> = []
+  cache.revalidateProject('/p', (_key, token) => { seen.push(token); return false })
+  assert.deepEqual(seen, [undefined])
 })

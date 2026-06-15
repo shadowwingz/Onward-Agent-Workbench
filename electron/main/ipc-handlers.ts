@@ -31,6 +31,7 @@ import type {
   GitHistoryFileContentOptions
 } from './git-utils'
 import { gitIpcWorkerClient } from './git-ipc-worker-client'
+import { RepoPrewarmCoordinator } from './git-repo-prewarm'
 import {
   readProjectFile,
   readProjectFileChunk,
@@ -508,9 +509,74 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   // terminal to the Authority Worker for its current cwd and emits
   // GIT_TERMINAL_INFO purely on event triggers (mirror-update / cwd-
   // change). No periodic polling anywhere.
+  // Repo prewarm coordinator (prewarm-on-cwd-switch, decisions ⑥/⑦). Front-runs
+  // the Git Diff list + per-file content (and, P4, the History caches) the
+  // moment the bridge resolves a NEW cwd, so opening Diff / History only reads
+  // warm caches. Injected into the bridge so the trigger fires on attach only;
+  // dedup (lastPrewarmedCwds) + the low-priority lanes live in the coordinator.
+  //
+  // attachDelayMs: how long the prewarm waits after a cwd attach before warming,
+  //   so a foreground open in that window wins the worker (yield-to-foreground).
+  const REPO_PREWARM_ATTACH_DELAY_MS = 2500
+  // Grace window after a cwd is abandoned (no live terminal) before its wasted
+  // background precompute burst is cancelled. A quick A→B→A return within this
+  // window aborts the cancel, so rapid switching does not discard half-warmed
+  // work; past it, the abandoned burst stops competing for EDR git spawns.
+  const REPO_PREWARM_DETACH_GRACE_MS = 2500
+  const repoPrewarmCoordinator = new RepoPrewarmCoordinator({
+    // Yield-to-foreground delay: the moment a terminal attaches, an imminent
+    // foreground Diff/History open must win the (EDR-taxed) worker and populate
+    // the request cache FIRST. Without this, the open coalesces onto the
+    // low-priority background warm and inherits its slow timing. The prewarm
+    // fires this long after attach, by which point the foreground open has
+    // cached its result and the prewarm is a cheap cache-hit / no-op.
+    attachDelayMs: REPO_PREWARM_ATTACH_DELAY_MS,
+    detachGraceMs: REPO_PREWARM_DETACH_GRACE_MS,
+    warmDiffList: (cwd) => gitIpcWorkerClient.warmDiffCache(cwd),
+    kickContentPrecompute: (project) => gitDiffPrecomputeScheduler.onProjectInvalidated(project),
+    // Abandoned-cwd cancel (burst lane only): cancelProject bumps the burst
+    // generation so any in-flight precompute for the left cwd aborts; the
+    // diff-list warm is untouched. Frees the EDR git-spawn budget for the cwd
+    // the user landed on (the "boost latest" lever on a spawn-bound host).
+    cancelContentPrecompute: (project) => { gitDiffPrecomputeScheduler.cancelProject(project) },
+    // History prewarm (decision ⑦ + git-op aggregation A2): warm the L8 list
+    // first page (one `git log`), then the L9 commit-diff set for that whole
+    // page in a SINGLE `git log --raw --numstat` spawn (replacing the old N×2
+    // per-commit `git diff` spawns — the dominant History-prewarm EDR tax). Both
+    // run in the low `::history-precompute` lane; the batch keys each commit
+    // exactly as the renderer's single-commit click does, so a click is an L9 HIT.
+    prewarmHistory: async (cwd, repoRoot, branchOid) => {
+      const startedMs = Date.now()
+      const list = await gitIpcWorkerClient.getHistory(cwd, 50, 0, branchOid, true)
+      if (!list?.success) return
+      const batch = await gitIpcWorkerClient.prewarmHistoryDiffs(cwd, branchOid, 50).catch(() => ({ warmed: 0 }))
+      performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_PREWARM_HISTORY_DONE, {
+        cwd, repoRoot, branchOid, commitsWarmed: batch.warmed, durationMs: Date.now() - startedMs
+      })
+    },
+    trace: (event, payload) => performanceTrace.record(event, payload)
+  })
+
+  // ONWARD_DISABLE_REPO_PREWARM=1 turns off the prewarm-on-cwd-switch coordinator
+  // entirely (the bridge gets no prewarm hooks), reverting to the pre-prewarm
+  // behaviour (Diff/History warmed lazily on open + the renderer-fallback warm).
+  // For A/B isolation when diagnosing whether the prewarm competes with a
+  // foreground open on EDR-throttled hosts. Read once at handler setup.
+  const repoPrewarmDisabled = process.env.ONWARD_DISABLE_REPO_PREWARM === '1'
+  if (repoPrewarmDisabled) {
+    console.log('[git-repo-prewarm] disabled (ONWARD_DISABLE_REPO_PREWARM=1)')
+  }
   gitWatchManager = new TerminalGitInfoBridge((terminalId, info) => {
     if (mainWindow.isDestroyed()) return
     mainWindow.webContents.send(IPC.GIT_TERMINAL_INFO, terminalId, info)
+  }, repoPrewarmDisabled ? undefined : {
+    // Attach (new cwd) → warm Diff (once/cwd) + History (once/cwd::branchOid).
+    onCwdAttached: (req) => { void repoPrewarmCoordinator.prewarm(req) },
+    // Mirror update → History re-warm only when branchOid moved (dedup no-op otherwise).
+    onMirrorUpdated: (req) => { void repoPrewarmCoordinator.prewarmHistory(req) },
+    // cwd left (no other live terminal) → grace-windowed cancel of its abandoned
+    // background precompute so rapid switching stops burning EDR git spawns.
+    onCwdDetached: (cwd) => { repoPrewarmCoordinator.onCwdDetached(cwd) }
   })
   fileWatchManager = new FileWatchManager(mainWindow)
   imageWatchManager = new ImageWatchManager(mainWindow)
@@ -1717,7 +1783,11 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
 
   // Get Git history list
   ipcMain.handle(IPC.GIT_GET_HISTORY, async (_, cwd: string, options?: { limit?: number; skip?: number }) => {
-    return await gitIpcWorkerClient.getHistory(cwd, options?.limit, options?.skip)
+    // Inject branchOid from the GitStateMirror snapshot (no extra git spawn) as
+    // the L8 list cache's freshness key, so a prewarmed first page is a HIT and
+    // a new commit (branchOid moved) structurally misses → fresh recompute.
+    const branchOid = gitStateMirrorRouter.getLatest(cwd)?.branchOid
+    return await gitIpcWorkerClient.getHistory(cwd, options?.limit, options?.skip, branchOid)
   })
 
   // Get Git history diff (range + file)
@@ -1849,7 +1919,16 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
 
   // Background diff cache warming — pre-compute diff so opening the panel is instant
   ipcMain.handle(IPC.GIT_WARM_DIFF_CACHE, async (_, cwd: string) => {
-    return await gitIpcWorkerClient.warmDiffCache(cwd)
+    const result = await gitIpcWorkerClient.warmDiffCache(cwd)
+    // warmDiffCache only warms the LIST caches (request + single-repo) inside
+    // the worker. Also kick the per-file content precompute so the user's FIRST
+    // click lands on a warm body cache instead of a cold `git show`/`cat-file`
+    // (multi-second on EDR-throttled Windows). The scheduler debounces and runs
+    // in the low-priority lane, so this is safe to fire on every warm.
+    if (result?.success && cwd) {
+      gitDiffPrecomputeScheduler.onProjectInvalidated(cwd)
+    }
+    return result
   })
 
   // Project editor handlers

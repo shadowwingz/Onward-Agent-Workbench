@@ -14,7 +14,29 @@ import { join } from 'node:path'
 import { promisify } from 'node:util'
 
 import { parseStatusPorcelainV2Z } from '../../electron/main/git-porcelain-parse.ts'
-import { buildMirrorChangeFingerprint } from '../../electron/main/git-state-mirror-change-fingerprint.ts'
+import {
+  buildMirrorChangeFingerprint,
+  formatStatTokenForFingerprint
+} from '../../electron/main/git-state-mirror-change-fingerprint.ts'
+
+// --- ctime-exclusion invariant (the Windows invalidation-storm root cause) ---
+test('formatStatTokenForFingerprint excludes ctime: a ctime-only change does not flip the token', () => {
+  const base = { mtimeNs: 1000n, size: 42n, mode: 33188n }
+  // Same content (mtime/size/mode) but a different ctime — what an NTFS
+  // metadata touch (AV/EDR/Search) produces. Must hash identically.
+  const ctimeTouched = { ...base, ctimeNs: 9999n } as unknown as { mtimeNs: bigint; size: bigint; mode: bigint }
+  assert.equal(
+    formatStatTokenForFingerprint(base),
+    formatStatTokenForFingerprint(ctimeTouched),
+    'ctime-only change must NOT change the fingerprint token'
+  )
+})
+
+test('formatStatTokenForFingerprint still reacts to a real edit (mtime/size change)', () => {
+  const base = { mtimeNs: 1000n, size: 42n, mode: 33188n }
+  assert.notEqual(formatStatTokenForFingerprint(base), formatStatTokenForFingerprint({ ...base, mtimeNs: 1001n }), 'mtime change must flip token')
+  assert.notEqual(formatStatTokenForFingerprint(base), formatStatTokenForFingerprint({ ...base, size: 43n }), 'size change must flip token')
+})
 
 const execFileAsync = promisify(execFile)
 

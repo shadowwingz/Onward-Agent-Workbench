@@ -61,12 +61,24 @@ fi
 # bridged through the existing debug API) and walks repos relative to its
 # `tempRoot` field.
 MANIFEST_PATH="$FIXTURE_TMP/manifest.json"
+# Hand NATIVE (forward-slash Windows) paths to native-node and the Electron app.
+# Through Git Bash on Windows, $FIXTURE_SRC / $FIXTURE_TMP are MSYS paths
+# (/d/Users/...); native node resolves those against the CWD drive
+# (-> D:\d\Users\... -> ENOENT), which is exactly what sank this suite in full
+# regression. `cygpath -m` yields `D:/Users/...` — JS-string-safe (no backslash
+# escapes) AND accepted by native Windows node/Electron. cygpath is absent on
+# macOS/Linux, so to_native is a no-op pass-through there. Bash filesystem ops
+# above keep using the MSYS variants; only node/app consumers get the native form.
+to_native() { if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s' "$1"; fi; }
+FIXTURE_SRC_N="$(to_native "$FIXTURE_SRC")"
+FIXTURE_TMP_N="$(to_native "$FIXTURE_TMP")"
+MANIFEST_PATH_N="$(to_native "$MANIFEST_PATH")"
 node -e "
   const { readFileSync, writeFileSync } = require('fs')
-  const src = require('path').join('$FIXTURE_SRC', 'manifest.json')
+  const src = require('path').join('$FIXTURE_SRC_N', 'manifest.json')
   const m = JSON.parse(readFileSync(src, 'utf8'))
-  m.tempRoot = '$FIXTURE_TMP'
-  writeFileSync('$MANIFEST_PATH', JSON.stringify(m, null, 2))
+  m.tempRoot = '$FIXTURE_TMP_N'
+  writeFileSync('$MANIFEST_PATH_N', JSON.stringify(m, null, 2))
 "
 
 rm -f "$LOG_FILE"
@@ -98,8 +110,8 @@ run_pass() {
     ONWARD_USER_DATA_DIR="$user_data_dir" \
     ONWARD_AUTOTEST=1 \
     ONWARD_AUTOTEST_SUITE=git-state-mirror-latency \
-    ONWARD_AUTOTEST_CWD="$FIXTURE_TMP/repo-A" \
-    ONWARD_AUTOTEST_FIXTURE_EXTRA="$MANIFEST_PATH" \
+    ONWARD_AUTOTEST_CWD="$(to_native "$FIXTURE_TMP/repo-A")" \
+    ONWARD_AUTOTEST_FIXTURE_EXTRA="$MANIFEST_PATH_N" \
     ONWARD_AUTOTEST_EXIT=1 \
     "$@" \
     "$APP_BIN" >> "$LOG_FILE" 2>&1 || true

@@ -432,6 +432,7 @@ export interface GitDiffResult {
 export interface GitDiffLoadOptions {
   scope?: 'root-only' | 'full'
   force?: boolean
+  background?: boolean
 }
 
 export interface GitCommitInfo {
@@ -537,6 +538,7 @@ export interface GitFileContentRequestOptions {
   force?: boolean
   missReason?: GitDiffContentCacheMissReason
   allowLargeFile?: boolean
+  priority?: 'high' | 'normal' | 'low'
 }
 
 export interface GitFileContentResult {

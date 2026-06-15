@@ -290,6 +290,9 @@ export const TerminalGrid = memo(function TerminalGrid({
   const latestFocusRequestRef = useRef<TerminalFocusRequest | null>(focusRequest)
   const lastHandledFocusTokenRef = useRef<number | null>(null)
   const warmDiffTimerRef = useRef<number | null>(null)
+  // repoRoots already warmed at least once this session — used to fire the FIRST
+  // warm on the leading edge (immediately) and apply the debounce only to re-warms.
+  const warmedReposRef = useRef<Set<string>>(new Set())
 
   // Git Diff Viewer Status
   const [gitDiffOpen, setGitDiffOpen] = useState(false)
@@ -1271,11 +1274,24 @@ export const TerminalGrid = memo(function TerminalGrid({
 
       // Background diff cache warming: when git state changes and diff panel is not open,
       // proactively compute diff so opening the panel is near-instant.
-      if (info?.repoRoot && !gitDiffOpen) {
-        if (warmDiffTimerRef.current) clearTimeout(warmDiffTimerRef.current)
-        warmDiffTimerRef.current = window.setTimeout(() => {
-          void window.electronAPI.git.warmDiffCache(info.repoRoot!)
-        }, 2000)
+      const repoRoot = info?.repoRoot
+      if (repoRoot && !gitDiffOpen) {
+        if (!warmedReposRef.current.has(repoRoot)) {
+          // Leading edge: the FIRST time we see a repo (e.g. a terminal just
+          // spawned in-project), warm immediately so a user who opens Git Diff
+          // right away already finds a warm cache — don't make them wait out a
+          // 2s debounce on top of the cold compute.
+          warmedReposRef.current.add(repoRoot)
+          void window.electronAPI.git.warmDiffCache(repoRoot)
+        } else {
+          // Subsequent state changes: debounce re-warms so rapid churn does not
+          // queue a warm per event (the warm is also in-flight-deduped + runs in
+          // the low-priority ::diff-precompute lane, so this is just politeness).
+          if (warmDiffTimerRef.current) clearTimeout(warmDiffTimerRef.current)
+          warmDiffTimerRef.current = window.setTimeout(() => {
+            void window.electronAPI.git.warmDiffCache(repoRoot)
+          }, 2000)
+        }
       }
     })
     return () => {

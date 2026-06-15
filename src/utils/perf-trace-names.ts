@@ -291,6 +291,48 @@ export const PERF_TRACE_EVENT = {
   MAIN_GIT_DIFF_PRECOMPUTE_SKIP_TOO_LARGE: 'main:git.diff.precompute.skip-too-large',
   RENDERER_SUBPAGE_FRESHNESS_CHECK: 'renderer:subpage.freshness-check',
 
+  // ───────── Main — repo prewarm coordinator (prewarm-on-cwd-switch, decision ⑥/⑦) ─────────
+  // Fired when TerminalGitInfoBridge resolves a NEW cwd and the prewarm
+  // coordinator front-runs the Git Diff + History work the UI would otherwise
+  // pay on open. `triggered` = a prewarm started (lifecycle entry; carries the
+  // dedup reason attach/cwd-change/renderer-fallback); `skipped-dedup` = the cwd
+  // was already prewarmed this session (lastPrewarmedCwds Set hit — the branch a
+  // "why didn't my repo re-warm?" report needs); `history-done` = the History
+  // list + commit-diff prewarm finished (duration-bearing, ph='X'). All
+  // off-hot-path → diagnostic coverage, not perf.
+  MAIN_GIT_PREWARM_REPO_TRIGGERED: 'main:git.prewarm.repo-triggered',
+  MAIN_GIT_PREWARM_REPO_SKIPPED_DEDUP: 'main:git.prewarm.repo-skipped-dedup',
+  MAIN_GIT_PREWARM_HISTORY_DONE: 'main:git.prewarm.history-done',
+  // A cwd was abandoned (no live terminal) past the grace window, so its wasted
+  // background content-precompute burst was cancelled to free the EDR git-spawn
+  // budget for the cwd the user actually landed on. Off-hot-path → diagnostic.
+  MAIN_GIT_PREWARM_DETACH_CANCELLED: 'main:git.prewarm.detach-cancelled',
+
+  // ───────── Main — History list (L8) + commit-diff (L9) request caches ─────────
+  // L8 list cache keyed `repoRoot::branchOid::limit::skip` (invalidated when a
+  // new commit moves branchOid). L9 commit-diff cache keyed `repoRoot::commitOid`
+  // (immutable — a commit's diff never changes, so it only evicts on capacity).
+  // hit/miss let a user trace show whether History open was a cache hit or paid
+  // the multi-spawn `git log` / `git show` on EDR-throttled hosts.
+  MAIN_GIT_HISTORY_LIST_CACHE_HIT: 'main:git.history.list-cache.hit',
+  MAIN_GIT_HISTORY_LIST_CACHE_MISS: 'main:git.history.list-cache.miss',
+  MAIN_GIT_HISTORY_COMMIT_DIFF_CACHE_HIT: 'main:git.history.commit-diff-cache.hit',
+  MAIN_GIT_HISTORY_COMMIT_DIFF_CACHE_MISS: 'main:git.history.commit-diff-cache.miss',
+
+  // ───────── Main/worker — long-running `git cat-file --batch` (Phase A) ─────────
+  // Diagnostic breadcrumbs for the file-content read path. The batch eliminates
+  // the per-read spawn (EDR tax) on win32 + darwin; these events let a
+  // user-attached trace answer "was the fast path used, or did it fall back?":
+  //   - spawned: a repo's long-running process was created (lifecycle entry; the
+  //     one-time per-repo spawn cost lives here).
+  //   - process-exited: the process died/exited (lifecycle exit; next read respawns).
+  //   - fallback: a read could not use the batch and degraded to per-call
+  //     `cat-file -s` + `cat-file blob` (recovery branch — the silent-perf-regression
+  //     signal a bug report needs). All ph='i' (instantaneous).
+  MAIN_GIT_CATFILE_BATCH_SPAWNED: 'main:git.cat-file-batch.spawned',
+  MAIN_GIT_CATFILE_BATCH_PROCESS_EXITED: 'main:git.cat-file-batch.process-exited',
+  MAIN_GIT_CATFILE_BATCH_FALLBACK: 'main:git.cat-file-batch.fallback',
+
   // ───────── Main process — Git Repository Snapshot Service ─────────
   // Lesson #13 follow-up: the read-side surface (Diff / History / Editor
   // scope / Quick Open) had three independent code paths that each carried
@@ -411,6 +453,19 @@ export const PERF_TRACE_EVENT = {
   // green-badge-with-untracked-file bug).
   WORKER_GIT_STATE_MIRROR_RECONCILE_TICK: 'worker:git-state-mirror.reconcile-tick',
   WORKER_GIT_STATE_MIRROR_RECONCILE_FOUND_DRIFT: 'worker:git-state-mirror.reconcile-found-drift',
+  // Adaptive backoff engaged: the last `git status` was slow enough (EDR spawn
+  // tax) that the next heartbeat gap is stretched to lastStatusMs × factor
+  // (capped) instead of the base 1 s/3 s — pinning the git-spawn duty cycle so
+  // the heartbeat can't run status back-to-back and starve the foreground Diff.
+  // Off the hot path: fires at most once per reconcile COMPLETION (a rate the
+  // backoff itself reduces), only when the gap actually stretched past base.
+  WORKER_GIT_STATE_MIRROR_RECONCILE_BACKOFF: 'worker:git-state-mirror.reconcile-backoff',
+  // Emitted once per watcher subscribe: how many parcel ignore globs were
+  // derived from the repo's .gitignore directory patterns (kar-qemu emulator
+  // storm suppression). globCount=0 means no .gitignore dirs were converted
+  // (watcher behaves as before); a non-zero count should correlate with a drop
+  // in watcher-fire/recompute-status-done for that repo.
+  WORKER_GIT_STATE_MIRROR_GITIGNORE_GLOBS: 'worker:git-state-mirror.gitignore-globs',
   MAIN_GIT_STATE_MIRROR_FANOUT: 'main:git-state-mirror.fanout',
   MAIN_GIT_STATE_MIRROR_WORKER_SHUTDOWN: 'main:git-state-mirror.worker-shutdown',
   // Teardown-quiesce diagnostics (the @parcel/watcher worker-teardown SIGABRT fix).

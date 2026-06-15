@@ -17,7 +17,13 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 REPO_ROOT="${REPO_ROOT:-$ROOT_DIR}"
-LOG_FILE="${1:-$REPO_ROOT/traces/test-logs/shell-integration-cwd.log}"
+# Orchestrator arg contract (parity with every other runner): $1 = APP_BIN,
+# $2 = LOG_FILE. This suite drives Electron-as-node (ELECTRON_RUN_AS_NODE=1) and
+# does NOT use the packaged app, so it ignores $1 — but it MUST read the log path
+# from $2, not $1. Reading $1 made LOG_FILE the app binary path, and the `rm -f
+# "$LOG_FILE"` + log redirect below then DESTROYED the dev app exe, spuriously
+# failing every app-launching runner that ran after this one in a full regression.
+LOG_FILE="${2:-$REPO_ROOT/traces/test-logs/shell-integration-cwd.log}"
 TEST_SRC="$ROOT_DIR/test/autotest/test-shell-integration-cwd.mjs"
 
 mkdir -p "$(dirname "$LOG_FILE")"

@@ -118,6 +118,64 @@ host-appropriate command.
 
 ---
 
+## Per-runner 5-minute budget (the "no test case over 5 min" rule)
+
+Every runner MUST complete within **5 minutes** (`RUNNER_BUDGET_SEC = 300`
+in `run-full-regression.py`). This is a **design ceiling**, not just a
+timeout: a suite that needs longer is doing too much in one process and
+**must be SPLIT into multiple sub-5-minute runners** — never given a
+bigger timeout.
+
+### What the orchestrator does (monitor + check — already wired)
+
+1. **Elapsed-time monitor.** Every runner's wall time is recorded
+   (`elapsed_sec` per result) and printed slowest-first in a
+   **`DURATION AUDIT`** block at the end of every run.
+2. **Over-budget check (the >5-min trigger).** Any runner whose elapsed
+   time exceeds 300 s is flagged `⚠ OVER 5-MIN BUDGET` inline (the moment
+   it overruns) AND collected into an **`OVER 5-MIN BUDGET`** review list
+   + `summary.json`'s top-level `over_budget` array. That flag is the
+   signal to SPLIT the suite — it is not a pass/fail change (a PASS that
+   ran 6 min is still over budget and still must be split).
+3. **Over-budget backlog at startup.** Any `PER_SCRIPT_TIMEOUT_OVERRIDES_SEC`
+   value above 300 s is listed up front as `⚠ OVER-BUDGET BACKLOG` — a
+   suite already known to violate the rule and pending a split. **Do not
+   add new >300 s overrides; split the suite instead.**
+
+The check **flags, it does not hard-fail** — on an EDR / anti-malware host
+every process spawn is taxed 1.3–12.9 s, so a well-designed suite can still
+overrun there. The budget is enforced at **authoring time** (keep each
+suite small) and verified on a healthy host / CI; the flag surfaces suites
+to review.
+
+### Authoring rule (applies to every new / amended runner)
+
+- Design each runner to finish well under 300 s on a healthy host.
+- If a suite's cases collectively approach 5 min, **split by logical
+  group** into multiple `run-<suite>-<group>-autotest.sh` runners, each
+  registered in `SCRIPTS` and indexed in `test/README.md` § 2. Splitting
+  by group (not by arbitrary case count) keeps each runner's fixture /
+  setup coherent and its failure attributable.
+- A runner that must temporarily exceed the budget gets an override **with
+  a `# TODO(split): ...` comment naming the planned split** — it is
+  backlog, not a permanent exemption.
+
+### When the check triggers (over-budget runner observed)
+
+Treat it as a **split task**, not a timeout bump:
+1. Read the suite's case list; group the cases by fixture / subsystem.
+2. Create one sub-5-min runner per group (+ `SCRIPTS` + README § 2 rows).
+3. Remove the over-budget override once every split runner is under 300 s.
+4. Verify each new runner with `--build --only run-<suite>-<group>`.
+
+Current over-budget backlog (split targets), worst-first — keep this list
+in sync with `PER_SCRIPT_TIMEOUT_OVERRIDES_SEC`:
+`run-git-state-mirror-latency` (1500 s; split the 3 passes), `run-pdf-epub-full`
+(1200 s), `run-pdf-epub-preview` (900 s), `run-git-diff-staleness-and-submodule`
+(600 s), `run-prompt-input-longtail` (360 s).
+
+---
+
 ## Mode A — Test mode (default)
 
 The user wants to run the regression and see what state the codebase
@@ -170,8 +228,13 @@ Windows suite by hand to "simulate" the flag, and never silently include
 the macOS suite either.
 
 A full pass typically takes 25–70 minutes (≈ 5–10 min build + 20–60
-min runners). Run it in the background when feasible so the rest of
-the conversation stays usable. If `pnpm dist:dev` itself fails — or a
+min runners). **Run it in the FOREGROUND with live output** so the user
+can watch which case is running and spot a stall — have them run it via
+the `!` prefix (`! py test/autotest/run-full-regression.py --build`); the
+orchestrator streams every runner + key step + a silent-runner heartbeat
+live into the conversation. See *Running with live progress* below for why
+the `!` prefix (not a background Bash call) is the mechanism. If
+`pnpm dist:dev` itself fails — or a
 runner can't launch the app — the orchestrator stops before (or
 mid-way through) the runner list. That is an **environment / toolchain
 failure**, not a test result: first work the *Environment self-heal*
@@ -578,16 +641,50 @@ and require an explicit "yes, clean" before invoking the script.
 
 ---
 
-## When the run is large
+## Running with live progress (foreground via `!`, NOT background)
 
-For a full pass (≈ 5–10 min build + up to ~1 h of runners), launch
-in the background so the conversation remains usable while the
-runner works:
+A full pass is long (≈ 5–10 min build + 20–60 min runners), so it is
+tempting to background it — **don't, when the user wants to watch.**
+Backgrounding sends the orchestrator's live output to a hidden task file,
+so the user can't see which case is running or why it stalled. That is the
+exact "卡住了都不知道原因" problem.
 
-```bash
-python3 test/autotest/run-full-regression.py --build
+The orchestrator **already streams live** (no extra flag): it prints
+`=== RUN [n/total] <suite> (timeout Ns) ===`, then each runner's output
+line-by-line (flushed per line — every `[AutoTest] PASS/FAIL` and key
+step), plus a `… <suite> still running Ns (no output for Ms)` **heartbeat**
+during any output gap so a hung / silently-stuck runner is visible in real
+time. The chain is fully live: runner →(stdio inherit) run-with-timeout
+→(pipe) orchestrator →(flush per line) console.
+
+The goal is to get that live stream into the **user's terminal**. The Bash
+tool cannot: its foreground mode has a **10-minute hard cap** (far under the
+run) and returns output only at the end, while its background mode hides
+output in a file. The mechanism that streams a long-running command live
+into the conversation is the **`!` prefix**.
+
+**So: run the regression in the foreground via `!`.** Suggest this verbatim
+and let the user run it — it executes in their session and the
+orchestrator's live output lands directly in the conversation:
+
+```
+! py test/autotest/run-full-regression.py --build        # Windows
+! python3 test/autotest/run-full-regression.py --build   # macOS/Linux
 ```
 
-Use the orchestrator's per-runner `PASS / FAIL` lines to track
-progress. Do not poll aggressively; check back when the background
-task finishes.
+They will see, live: the per-runner `[n/total]` header, the streamed key
+steps, the heartbeat for silent runners, and the final `DURATION AUDIT` +
+over-budget list. (Add `--only run-<suite>` / `--skip run-<suite>` exactly
+as in Mode A.)
+
+**Do NOT** instead run it as a background Bash call when the user wants to
+observe, and do NOT `tail -f` / poll a backgrounded run's log (it races the
+writer and wastes context) — the live `!` stream IS the progress view. This
+foreground-`!` rule is the regression-specific refinement of CLAUDE.md's
+general background-and-notify test-execution loop: that loop optimises for
+the Agent driving one runner unattended; this optimises for the **user
+watching the whole suite live**, which is what they asked for.
+
+If the user explicitly wants it driven unattended (not watching), the Agent
+MAY background it and report counts at the end — but the default for a
+user-invoked regression is the foreground `!` run.

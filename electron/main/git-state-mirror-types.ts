@@ -43,6 +43,16 @@ export interface MirrorState {
   repoName: string | null
   /** Current branch name, or null on detached HEAD / non-repo. */
   branch: string | null
+  /**
+   * Full HEAD object id (`# branch.oid` from porcelain v2 `--branch`). Third
+   * freshness signal, orthogonal to `changeFingerprint` (which tracks the
+   * working tree): branchOid moves on commit / amend / checkout, so the
+   * History list cache (keyed `repoRoot::branchOid::limit::skip`) and the
+   * prewarm commit set invalidate the moment a new commit lands — without an
+   * extra git spawn, since it is parsed from the same status call. Undefined
+   * on non-repo / unknown state.
+   */
+  branchOid?: string
   /** Status colour bucket — drives the terminal-grid-branch--{status} className. */
   status: TerminalGitStatus | null
   /** File list (unstaged + staged + untracked). Empty array when clean. */

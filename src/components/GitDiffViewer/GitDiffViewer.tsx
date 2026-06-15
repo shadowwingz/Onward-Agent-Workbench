@@ -2833,17 +2833,16 @@ export function GitDiffViewer({
       const initialResult = await window.electronAPI.git.getDiff(cwd, { scope: initialScope, force: Boolean(options?.force) })
       if (loadTokenRef.current !== currentToken) return
 
-      // When submodules are still loading, defer UI update to avoid an
-      // intermediate flash (placeholder → root-only list → full list).
-      // Instead, show placeholder until the full result arrives.
-      const deferForSubmodules = stagedLoad && initialResult.success && initialResult.submodulesLoading
-      if (!deferForSubmodules) {
-        applyLoadedDiffResult(initialResult, cwd, previousSelection)
-      } else {
-        // Expose the nested repository outline while suppressing the partial
-        // root-only file list until the full recursive diff is ready.
-        setDiffResult({ ...initialResult, files: [] })
-      }
+      // Submodule two-stage DECOUPLE (prewarm-cache audit fix #3): paint the
+      // fast root-only superproject file list IMMEDIATELY instead of suppressing
+      // it behind the slowest submodule. Previously, when submodules were still
+      // resolving, the root-only files were hidden (empty list) until the full
+      // recursive diff landed — so a nested-submodule repo (kar-qemu: an 8-10 s
+      // submodule walk) blocked the superproject's own changed files from
+      // painting for seconds. Now root-only renders in ~ms and the full pass
+      // merges in-place when ready; the root-only files stay visible/clickable
+      // throughout.
+      applyLoadedDiffResult(initialResult, cwd, previousSelection)
       debugLog('diff:load:done', {
         cwd: initialResult.cwd || cwd,
         token: currentToken,
@@ -2851,27 +2850,23 @@ export function GitDiffViewer({
         success: initialResult.success,
         fileCount: initialResult.files?.length ?? 0,
         duration: Math.round(performance.now() - start),
-        submodulesLoading: Boolean(initialResult.submodulesLoading),
-        deferred: deferForSubmodules
+        submodulesLoading: Boolean(initialResult.submodulesLoading)
+      })
+      markDiffLoadedForTiming('initial-load', {
+        cwd: initialResult.cwd || cwd,
+        stage: initialScope,
+        fileCount: initialResult.files?.length ?? 0,
+        durationMs: Math.round(performance.now() - start)
       })
 
-      if (!deferForSubmodules) {
-        markDiffLoadedForTiming('initial-load', {
-          cwd: initialResult.cwd || cwd,
-          stage: initialScope,
-          fileCount: initialResult.files?.length ?? 0,
-          durationMs: Math.round(performance.now() - start)
-        })
-      }
-
-      if (deferForSubmodules) {
+      // Second stage: the root-only pass reported submodules still resolving →
+      // fetch the full recursive diff and merge it in-place (root-only files
+      // remain on screen the whole time).
+      const needsFullPass = stagedLoad && initialResult.success && Boolean(initialResult.submodulesLoading)
+      if (needsFullPass) {
         const fullResult = await window.electronAPI.git.getDiff(cwd, { scope: 'full', force: Boolean(options?.force) })
         if (loadTokenRef.current !== currentToken) return
-        applyLoadedDiffResult(
-          fullResult,
-          cwd,
-          previousSelection
-        )
+        applyLoadedDiffResult(fullResult, cwd, previousSelection)
         markDiffLoadedForTiming('full-submodule-load', {
           cwd: fullResult.cwd || cwd,
           stage: 'full',
@@ -3025,7 +3020,22 @@ export function GitDiffViewer({
     if (isOpen) {
       const reset = resetDiffOnNextLoadRef.current
       resetDiffOnNextLoadRef.current = false
-      loadDiff({ reset, force: reset })
+      // Serve the BACKGROUND-warmed list cache WITHOUT force so the panel paints
+      // instantly (~ms) instead of paying a multi-second cold recompute on the
+      // visible path — the whole point of warmDiffCache + the event-invalidated
+      // (long-TTL) request cache.
+      //
+      // Do NOT fire an unconditional force-revalidate on open. A forced getDiff
+      // routes through the GIT_GET_DIFF handler's `invalidateContentCacheForProject`
+      // (ipc-handlers.ts), which WIPES every prewarmed per-file body for the
+      // project. On EDR-throttled Windows that made the user's first click
+      // cold-miss right after the warm had filled the content cache (RC-2).
+      // Freshness is watcher-driven instead: the `onDiffCacheInvalidated`
+      // subscription below fires a silent force reload whenever a REAL mutation
+      // lands (mtime change), which covers "subpage entry shows fresh data"
+      // (GDS-08) — including the open-panel refresh path — without the
+      // self-inflicted prewarm wipe on every open.
+      loadDiff({ reset, force: false })
     }
   }, [isOpen, loadDiff])
 
@@ -3495,7 +3505,14 @@ export function GitDiffViewer({
         const requestOptions = {
           force,
           missReason: cacheMissReasonForLoad(force, reason),
-          allowLargeFile: allowedLargeFileKeysRef.current.has(fileKey)
+          allowLargeFile: allowedLargeFileKeysRef.current.has(fileKey),
+          // Audit fix #2 (decision ⑧a): the background whole-list prefetch runs
+          // in the LOW git-runtime lane so a foreground select / refresh /
+          // auto-refresh (priority omitted → 'high' in the worker client) always
+          // preempts it. Previously the prefetch defaulted to 'high' and tied
+          // with the user's click, so the selected file queued behind the whole
+          // prefetch burst (measured 18-29 s first-click latency on EDR hosts).
+          ...(reason === 'prefetch' ? { priority: 'low' as const } : {})
         }
         let result: GitFileContentResult = await window.electronAPI.git.getFileContent(activeCwd, requestFile, file.repoRoot, requestOptions)
         if (result.requiresLargeFileConfirmation) {
