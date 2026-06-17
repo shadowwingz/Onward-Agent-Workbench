@@ -93,6 +93,7 @@ SCRIPTS: List[str] = [
     "test/autotest/run-git-diff-identical-blob-autotest.sh",
     "test/autotest/run-git-diff-recursive-submodules-autotest.sh",
     "test/autotest/run-git-diff-staleness-and-submodule-autotest.sh",
+    "test/autotest/run-git-diff-nested-gitlink-autotest.sh",
     "test/autotest/run-git-large-file-confirmation-autotest.sh",
     "test/autotest/run-git-state-mirror-quit-autotest.sh",
     "test/autotest/run-git-state-mirror-latency-autotest.sh",
@@ -199,6 +200,10 @@ PER_SCRIPT_TIMEOUT_OVERRIDES_SEC = {
     # Git operations are slow on Windows; individual steps can exceed 15s.
     # Measured: test was at 317s during a sleep and was killed at 360s.
     "test/autotest/run-git-diff-staleness-and-submodule-autotest.sh": 600,
+    # Nested-gitlink (no .gitmodules) suite: one app session + 3 IPC calls over a
+    # tiny 1-parent + 2-gitlink fixture. Kept deliberately small/fast (NOT amended
+    # into the 600s staleness suite); the 150s in-app watchdog caps a hang.
+    "test/autotest/run-git-diff-nested-gitlink-autotest.sh": 180,
     # GitDiff click-latency suite measures multi-trial first-click vs
     # cache-warm latencies; needs more headroom than 180s allows.
     "test/autotest/run-git-diff-click-latency-autotest.sh": 300,

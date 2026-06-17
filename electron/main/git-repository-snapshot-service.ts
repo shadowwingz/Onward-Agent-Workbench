@@ -91,6 +91,7 @@ import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 
 import {
   getGitRepoMeta,
+  listGitlinkRelPaths,
   type GitSubmoduleInfo
 } from './git-utils'
 
@@ -289,7 +290,31 @@ export async function captureGitRepositorySnapshot(cwd: string): Promise<GitRepo
   }
 
   const repoRoot = meta.repoRoot
-  const submodules = await collectSubmoduleSnapshotsFromDisk(repoRoot)
+  // Read the index's gitlink (mode 160000) set with ONE `git ls-files -s`, then
+  // fold it into the pure-fs discovery. This surfaces nested repos the parent
+  // tracks as a gitlink but never declared in `.gitmodules` (e.g. a `git add`-ed
+  // nested repo) — the class the `.gitmodules`-only walk was structurally blind
+  // to. Declared paths win on overlap, so a normal submodule does not double.
+  // The single process amortizes against this service's no-TTL cache: it re-runs
+  // only when a capture re-runs, never on a cache hit. A failure degrades to []
+  // → discovery falls back to `.gitmodules`-only (today's behavior).
+  const gitlinkRelPaths = await listGitlinkRelPaths(repoRoot, meta.gitExecutable)
+  const submodules = await collectSubmoduleSnapshotsFromDisk(repoRoot, {
+    extraGitlinkPaths: gitlinkRelPaths
+  })
+  const undeclaredGitlinkCount = submodules.filter((s) => !s.declaredInGitmodules).length
+  if (undeclaredGitlinkCount > 0) {
+    // Diagnostic breadcrumb: a bug report's trace shows whether undeclared
+    // gitlinks were found for this repo (the winWatchRTOS-Build symptom class)
+    // and how the index candidate count compares — without re-running the bug.
+    performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_SNAPSHOT_GITLINK_DISCOVERED, {
+      cwd,
+      repoRoot,
+      undeclaredGitlinkCount,
+      gitlinkCandidateCount: gitlinkRelPaths.length,
+      submoduleCount: submodules.length
+    })
+  }
   return {
     cwd,
     resolvedRepoRoot: repoRoot,

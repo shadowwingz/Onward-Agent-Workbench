@@ -32,6 +32,7 @@ import { testGitDiffSubdir } from './test-git-diff-subdir'
 import { testGitDiffSubmodules } from './test-git-diff-submodules'
 import { testGitDiffRecursiveSubmodules } from './test-git-diff-recursive-submodules'
 import { testGitDiffStalenessAndSubmodule } from './test-git-diff-staleness-and-submodule'
+import { testGitDiffNestedGitlink } from './test-git-diff-nested-gitlink'
 import { testGitDiffClickLatency } from './test-git-diff-click-latency'
 import { testGitDiffIdenticalBlob } from './test-git-diff-identical-blob'
 import { testGitLargeFileConfirmation } from './test-git-large-file-confirmation'
@@ -603,6 +604,16 @@ export async function runAllTests(ctx: AutotestContext): Promise<void> {
       const results = await testGitDiffStalenessAndSubmodule(ctx)
       collectSuiteResults('GitDiffStalenessAndSubmodule', results)
       await ctx.reopenProjectEditor('phase5.49-cleanup')
+      await sleep(500)
+    }
+
+    if (!ctx.cancelled() && shouldRun('git-diff-nested-gitlink')) {
+      log('phase5.491:begin')
+      await ctx.reopenProjectEditor('phase5.491-setup')
+      await sleep(300)
+      const results = await testGitDiffNestedGitlink(ctx)
+      collectSuiteResults('GitDiffNestedGitlink', results)
+      await ctx.reopenProjectEditor('phase5.491-cleanup')
       await sleep(500)
     }
 

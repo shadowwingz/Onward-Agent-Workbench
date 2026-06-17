@@ -350,6 +350,15 @@ export const PERF_TRACE_EVENT = {
   MAIN_GIT_SNAPSHOT_CAPTURE: 'main:git.snapshot.capture',
   MAIN_GIT_SNAPSHOT_CACHE_HIT: 'main:git.snapshot.cache-hit',
   MAIN_GIT_SNAPSHOT_INVALIDATE: 'main:git.snapshot.invalidate',
+  // ph='i'. Emitted by captureGitRepositorySnapshot when the index's gitlink
+  // set (`git ls-files -s`, mode 160000) yields nested repos the parent tracks
+  // but never declared in `.gitmodules` — the no-`.gitmodules` gitlink class
+  // that Diff / History previously could not see (winWatchRTOS-Build symptom).
+  // payload = { cwd, repoRoot, undeclaredGitlinkCount, gitlinkCandidateCount,
+  // submoduleCount }. A bug report's trace then shows whether discovery reached
+  // and surfaced these repos without re-running the bug. Only fires when the
+  // count is > 0, so it is silent (zero cost) for the common no-gitlink repo.
+  MAIN_GIT_SNAPSHOT_GITLINK_DISCOVERED: 'main:git.snapshot.gitlink-discovered',
 
   // ───────── Renderer — Task name auto-follow Git branch ─────────
   // (a) RENDERER_TASK_NAME_RESOLVE: ph='i' instant marker emitted whenever

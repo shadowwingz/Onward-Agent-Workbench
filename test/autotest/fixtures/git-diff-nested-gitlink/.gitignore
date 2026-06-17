@@ -1,0 +1,3 @@
+# Generated fixture working trees (wipe-and-recreate per run). The builder
+# `create-nested-gitlink-fixture.mjs` regenerates this on every invocation.
+runtime/

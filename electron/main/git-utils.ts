@@ -20,6 +20,7 @@ import { GitDiffRequestCacheController } from './git-diff-request-cache'
 import { isMetaCacheEntryFresh } from './git-meta-cache-policy'
 import { extractGitSubcommand } from './git-exec-subcommand'
 import { parseGitLogRawNumstat, type ParsedDiffStatus } from './git-log-diff-parse'
+import { parseGitlinkPathsFromLsFilesZ } from './git-submodule-disk-discovery'
 import {
   EMPTY_TREE_HASH,
   buildHistoryCommitDiffCacheKey,
@@ -1049,6 +1050,43 @@ export async function detectSuperproject(cwd: string, gitExecutable: string): Pr
   } catch {
     superprojectCache.set(normalizedCwd, { value: null, at: Date.now() })
     return null
+  }
+}
+
+/**
+ * List the gitlink (mode `160000`) paths recorded in a repo's index — the
+ * git-AUTHORITATIVE set of nested repos, INCLUDING ones the repo never declared
+ * in `.gitmodules`. `git submodule status` is blind to those (it errors with
+ * "no submodule mapping found in .gitmodules"); `git ls-files -s` reads the
+ * index directly and is not. Paths are relative to `repoRoot`, forward-slash
+ * normalized (see {@link parseGitlinkPathsFromLsFilesZ}).
+ *
+ * Cost: exactly ONE git process. This is deliberately NOT a fork-storm — the
+ * old `submodule status --recursive` it complements forked ~15 shell helpers
+ * per call; `ls-files -s` is a single non-shell process. The snapshot service
+ * folds the result into its no-TTL cache, so this re-runs only when the
+ * structural capture itself does (a `.gitmodules` token change or a watcher
+ * fan-out), never on the cache-hit path. Failure (e.g. a transient git error
+ * or an output larger than {@link MAX_DIFF_OUTPUT}) degrades gracefully to `[]`
+ * — discovery falls back to `.gitmodules`-only, exactly today's behavior.
+ */
+export async function listGitlinkRelPaths(repoRoot: string, gitExecutable: string): Promise<string[]> {
+  const normalizedRoot = resolve(repoRoot)
+  try {
+    const { stdout } = await execFileAsync(
+      gitExecutable,
+      ['ls-files', '-s', '-z'],
+      { cwd: repoRoot, timeout: EXEC_TIMEOUT, env: getExecEnv(), maxBuffer: MAX_DIFF_OUTPUT },
+      {
+        repoKey: normalizedRoot,
+        priority: 'normal',
+        dedupeKey: `repo:gitlinks:${normalizedRoot}`,
+        label: 'git ls-files -s -z (gitlinks)'
+      }
+    )
+    return parseGitlinkPathsFromLsFilesZ(typeof stdout === 'string' ? stdout : stdout.toString('utf-8'))
+  } catch {
+    return []
   }
 }
 

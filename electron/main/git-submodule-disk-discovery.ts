@@ -76,6 +76,45 @@ export interface GitSubmoduleSnapshot {
 }
 
 /**
+ * Parse the gitlink (mode `160000`) paths out of `git ls-files -s -z` output.
+ *
+ * A gitlink is git's AUTHORITATIVE record of a nested repo — the parent's
+ * index stores it as a mode-`160000` entry whether or not the parent declares
+ * it in `.gitmodules`. `.gitmodules` is only secondary mapping metadata, so a
+ * repo can legally carry gitlinks with NO `.gitmodules` at all (`git add`-ing
+ * a nested repo without a remote produces exactly this). The `.gitmodules`-only
+ * discovery in {@link readGitmodulesSubmodulePaths} is therefore structurally
+ * blind to that class; reading the index closes the gap.
+ *
+ * This is a PURE string parse — it does NOT spawn git. The caller
+ * ({@link listGitlinkRelPaths} in `git-utils`) owns the single
+ * `git ls-files -s -z` process; this function just turns its stdout into paths.
+ * Keeping the parse here (next to the rest of the discovery math) lets the unit
+ * test lock it without an Electron build or a git process.
+ *
+ * `-z` makes records NUL-separated and leaves paths verbatim (no quoting, no
+ * CR/LF ambiguity). Each record is `<mode> <object> <stage>\t<path>`; we match
+ * on the `160000 ` mode prefix (cheap, no per-line split) and take everything
+ * after the TAB as the path, forward-slash normalized to match the rest of the
+ * read-side surface.
+ */
+export function parseGitlinkPathsFromLsFilesZ(stdout: string): string[] {
+  const paths: string[] = []
+  for (const record of stdout.split('\0')) {
+    if (!record) continue
+    // Mode is the first whitespace-delimited field; a gitlink is exactly
+    // `160000`. Anchor on the prefix so a path that merely CONTAINS "160000"
+    // (it lives after the TAB) can never be mistaken for a mode.
+    if (!record.startsWith('160000 ')) continue
+    const tab = record.indexOf('\t')
+    if (tab === -1) continue
+    const pathValue = record.slice(tab + 1).replace(/\\/g, '/')
+    if (pathValue) paths.push(pathValue)
+  }
+  return paths
+}
+
+/**
  * Parse the `path = ...` entries out of a repo's `.gitmodules`. Returns paths
  * relative to `repoRoot`, forward-slash normalized. Missing / unreadable
  * `.gitmodules` yields `[]`. Pure fs; no git.
@@ -123,9 +162,24 @@ export async function isGitWorktreeRoot(absPath: string): Promise<boolean> {
  * `path` is relative to the TOP `repoRoot` (matching the old
  * `submodule status --recursive` representation). Structural discovery costs
  * ZERO git processes.
+ *
+ * `options.extraGitlinkPaths` folds in gitlink (mode `160000`) paths the caller
+ * read from the index (`git ls-files -s`, see
+ * {@link parseGitlinkPathsFromLsFilesZ}) but that `.gitmodules` did NOT declare.
+ * This is how a nested repo the parent tracks as a gitlink with NO `.gitmodules`
+ * entry still becomes a discoverable repo. Each such path:
+ *   - is skipped if a `.gitmodules` entry already covered it (declared wins, so
+ *     a normal submodule keeps `declaredInGitmodules: true` and does not double);
+ *   - is emitted with `declaredInGitmodules: false`, `initialized` /
+ *     `isValidRepo` derived from `<path>/.git` exactly like declared ones;
+ *   - participates in the SAME depth / parentRoot second pass below, so a
+ *     gitlink nested under a declared submodule still nests correctly.
+ * Passing the list in (rather than spawning git here) keeps this module a pure
+ * fs LEAF — the single `ls-files` process lives in the caller.
  */
 export async function collectSubmoduleSnapshotsFromDisk(
-  repoRootRaw: string
+  repoRootRaw: string,
+  options?: { extraGitlinkPaths?: string[] }
 ): Promise<GitSubmoduleSnapshot[]> {
   // All emitted paths are forward-slash normalized, matching the rest of the
   // git read-side surface (`normalizeGitPath`). The diff path asserts repo
@@ -166,6 +220,31 @@ export async function collectSubmoduleSnapshotsFromDisk(
         stack.push({ repoAbs: absolutePath, topRelPrefix: topRelPath })
       }
     }
+  }
+
+  // Fold in gitlink paths the index reported but `.gitmodules` did not declare
+  // (the no-`.gitmodules` nested-repo class). `seen` already holds every
+  // declared path, so an overlap is skipped here and keeps its declared entry —
+  // declared wins, no duplication. We intentionally do NOT recurse into a
+  // gitlink-only repo's own index: `ls-files` ran against the TOP repo and only
+  // lists ITS gitlinks, so this stays a single-process, top-level discovery.
+  for (const rawRel of options?.extraGitlinkPaths ?? []) {
+    // Normalize to the same shape as declared paths: forward-slash, no trailing
+    // slash, so the `seen` de-dup and the depth prefix-match below both work.
+    const rel = rawRel.replace(/\\/g, '/').replace(/\/+$/, '')
+    if (!rel || seen.has(rel)) continue
+    seen.add(rel)
+    const absolutePath = resolve(repoRoot, rel).replace(/\\/g, '/')
+    const initialized = await isGitWorktreeRoot(absolutePath)
+    enriched.push({
+      path: rel,
+      absolutePath,
+      declaredInGitmodules: false,
+      initialized,
+      isValidRepo: initialized,
+      depth: 0,
+      parentRoot: repoRoot
+    })
   }
 
   // Stable order for fingerprint determinism (DFS order is stack-dependent).
