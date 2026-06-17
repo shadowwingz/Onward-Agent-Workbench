@@ -157,6 +157,11 @@ export interface GitDiffDebugApi {
   getCwd: () => string | null
   getRepoRoot: () => string | null
   isSubmodulesLoading: () => boolean
+  getSubmoduleLoadObservation: () => {
+    sawSubmodulesLoading: boolean
+    maxLoadingRepoCount: number
+    maxNestedLoadingRepoCount: number
+  }
   getTiming: () => {
     openRequestedAt: number | null
     shellShownAt: number | null

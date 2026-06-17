@@ -183,7 +183,31 @@ export async function testPerformanceTrace(ctx: AutotestContext): Promise<TestRe
 
   const flushStatus = await window.electronAPI.debug.flushPerfTrace()
   _assert('PT-08-flush-produced-file', Boolean(flushStatus.filePath) && flushStatus.eventCount > baselineStatus.eventCount, statusDetail(flushStatus))
-  _assert('PT-09-no-dropped-events', flushStatus.droppedEvents === 0, statusDetail(flushStatus))
+  // `droppedEvents` lumps together TWO very different things:
+  //   (a) EXPECTED rate-limit decimation — a high-frequency event (e.g.
+  //       `terminal.render.receive`, which fires per PTY data message and bursts
+  //       well past the per-name 100/sec cap when the echo command runs) that the
+  //       store deliberately decimates, recording a `trace-store:dropped-summary`
+  //       so the loss is visible, NOT silent. This is the rate limiter working.
+  //   (b) GENUINE data loss — the store was uninitialized or a chunk write failed,
+  //       so an event vanished with no accounting. THIS is the regression PT-09
+  //       must catch.
+  // The old assertion "global drops === 0" conflated the two and started failing
+  // the moment the off-renderer refactor added the fine-grained terminal-data
+  // trace events: an echo now bursts `terminal.render.receive` over the cap, so
+  // (a) is non-zero by design. Subtract the rate-limit decimation and assert that
+  // only the UNEXPLAINED remainder — genuine silent loss — is zero.
+  const droppedDelta = flushStatus.droppedEvents - baselineStatus.droppedEvents
+  const rateLimitedDelta =
+    Number(flushStatus.rateLimitedDropped ?? 0) - Number(baselineStatus.rateLimitedDropped ?? 0)
+  const unexplainedDrops = droppedDelta - rateLimitedDelta
+  _assert('PT-09-no-silent-event-loss', unexplainedDrops <= 0, {
+    ...statusDetail(flushStatus),
+    droppedDelta,
+    rateLimitedDelta,
+    unexplainedDrops,
+    baselineDropped: baselineStatus.droppedEvents
+  })
 
   log('performance-trace:file', {
     filePath: flushStatus.filePath,

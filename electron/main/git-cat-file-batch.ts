@@ -66,6 +66,10 @@ export interface CatFileBatchResult {
   largeFile: boolean
 }
 
+// Re-exported from the dependency-free module so callers (git-utils) keep a
+// single import site while the pure logic stays unit-testable in plain node.
+export { isMutableIndexRef } from './git-cat-file-ref'
+
 const NL = 0x0a // '\n'
 
 class RepoCatFileProcess {

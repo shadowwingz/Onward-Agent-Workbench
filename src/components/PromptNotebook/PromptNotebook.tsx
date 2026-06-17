@@ -502,16 +502,25 @@ export const PromptNotebook = memo(function PromptNotebook({
       },
       getPersistedEditorHeight: () => promptEditorHeight,
       setEditorContent: (content: string) => {
-        const textarea = document.querySelector(
-          '.prompt-notebook:not(.prompt-notebook-hidden) .prompt-editor-content'
-        ) as HTMLTextAreaElement | null
-        if (textarea) {
-          const prototype = Object.getPrototypeOf(textarea) as HTMLTextAreaElement
-          const valueSetter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set
-          valueSetter?.call(textarea, content)
-          textarea.dispatchEvent(new Event('input', { bubbles: true }))
-        }
-        editorContentRef.current = content
+        // Two things must happen for a send to durably see this content:
+        //  1. Drive the editor's REAL local-content state (PromptEditorWithAppend),
+        //     which syncs up to editorContent. Without this the editor's debounced
+        //     sync fires with its still-empty local content and re-clears
+        //     editorContent. The old synthetic-DOM-input approach did not reliably
+        //     fire the canvas/line editor's onChange, so the local content stayed ''.
+        //  2. Set the editorContent STATE — but deliberately NOT editorContentRef.
+        //     getEditorContent reads the ref (synced from editorContent on EVERY
+        //     render), so leaving the ref alone makes `editorReady` gate on the
+        //     COMMITTED state. Previously the ref was set synchronously here, so
+        //     editorReady passed BEFORE React committed the re-render, and the test
+        //     clicked send while the send-path callback (applySuccessSideEffects)
+        //     still closed over editorContent='' → it skipped the history add
+        //     (PL-05 createdPrompt: null). Gating on the commit hands the send a
+        //     fresh callback that sees the real content.
+        const control = (window as unknown as {
+          __onwardPromptEditorContentControl?: { setContent: (v: string) => void }
+        }).__onwardPromptEditorContentControl
+        control?.setContent(content)
         setEditorContent(content)
       },
       submitEditor: () => {
@@ -1626,6 +1635,32 @@ const PromptEditorWithAppend = memo(function PromptEditorWithAppend({
       setContent(editingPrompt.content)
     }
   }, [editingPrompt])
+
+  // Autotest-only: expose this editor's REAL local-content setter. The send path
+  // reads PromptNotebook.editorContent, which this component owns and syncs up
+  // (debounced below). The notebook debug API's setEditorContent used a synthetic
+  // DOM `input` event + a mirror ref; the input event does NOT reliably fire this
+  // editor's onChange (it renders differently in 'canvas' vs 'line' mode), so the
+  // local content stayed '' and the debounced sync OVERWROTE editorContent back to
+  // '' before the send read it (PL-05 createdPrompt: null). Driving setContent here
+  // injects into the true source so the value survives the sync. Autotest-gated, so
+  // it never registers in user builds.
+  useEffect(() => {
+    if (!window.electronAPI?.debug?.autotest) return
+    const control = {
+      setContent: (value: string) => {
+        hasMountedRef.current = true
+        setContent(value)
+      }
+    }
+    ;(window as unknown as { __onwardPromptEditorContentControl?: typeof control }).__onwardPromptEditorContentControl = control
+    return () => {
+      const w = window as unknown as { __onwardPromptEditorContentControl?: typeof control }
+      if (w.__onwardPromptEditorContentControl === control) {
+        delete w.__onwardPromptEditorContentControl
+      }
+    }
+  }, [])
 
   // Debounce parent notifications (content, title, draft) to avoid
   // re-rendering the entire PromptNotebook tree on every keystroke.

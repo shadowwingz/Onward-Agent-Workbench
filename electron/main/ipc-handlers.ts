@@ -5,7 +5,7 @@
 
 import { app, ipcMain, BrowserWindow, Menu, dialog, shell, clipboard } from 'electron'
 import { dirname, join, resolve, sep } from 'path'
-import { readFileSync, writeFileSync } from 'fs'
+import { readFileSync, writeFileSync, statSync } from 'fs'
 import { ptyManager, PtyOptions } from './pty-manager'
 import { TerminalGitInfoBridge } from './terminal-git-info-bridge'
 import { getPromptStorage, Prompt } from './prompt-storage'
@@ -1410,6 +1410,13 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
 
         const bundle = await createDiagnosticBundle({
           userDataDir,
+          // Scan the trace store's ACTUAL directory, not the userData/traces
+          // default. In autotest (and any ONWARD_REPO_ROOT-redirected) run the
+          // store writes chunks to <repoRoot>/traces/perf, so the default
+          // <userData>/traces is empty and the V10 bundle-marker (FB-DB-03) is
+          // never found. getDir() == <userData>/traces in prod, so this is a
+          // no-op there and a correctness fix under autotest.
+          traceDir: traceStore.getDir() ?? undefined,
           outputPath,
           appInfo: {
             version: appInfo.version,
@@ -2043,19 +2050,44 @@ export function registerIpcHandlers(mainWindow: BrowserWindow, options: Register
   })
 
   ipcMain.handle(IPC.PROJECT_CREATE_FILE, async (_, root: string, path: string, content: string) => {
-    return await createProjectFile(root, path, content)
+    const result = await createProjectFile(root, path, content)
+    // Direct-notify the renderer file index of this in-app create so Cmd+P sees
+    // it deterministically without waiting on the OS watcher (which delivers
+    // zero events on FSEvents-restricted hosts). createFile always creates a file.
+    if (result.success) projectTreeWatchManager?.notifyMutation(root, [path], [])
+    return result
   })
 
   ipcMain.handle(IPC.PROJECT_CREATE_FOLDER, async (_, root: string, path: string) => {
+    // A new folder adds no file to the index (folders are never Cmd+P hits;
+    // FIC-22), so there is nothing to notify here — files created inside it
+    // arrive via their own PROJECT_CREATE_FILE notifications.
     return await createProjectFolder(root, path)
   })
 
   ipcMain.handle(IPC.PROJECT_RENAME_PATH, async (_, root: string, oldPath: string, newPath: string) => {
-    return await renameProjectPath(root, oldPath, newPath)
+    const result = await renameProjectPath(root, oldPath, newPath)
+    if (result.success) {
+      // Only surface the new path as an index addition when it is a FILE; a
+      // folder rename just removes the old subtree (the renderer cascades prefix
+      // removals) and its contents re-enter via the watcher / manual refresh.
+      let newIsFile = false
+      try {
+        newIsFile = statSync(join(root, newPath)).isFile()
+      } catch {
+        newIsFile = false
+      }
+      projectTreeWatchManager?.notifyMutation(root, newIsFile ? [newPath] : [], [oldPath])
+    }
+    return result
   })
 
   ipcMain.handle(IPC.PROJECT_DELETE_PATH, async (_, root: string, path: string) => {
-    return await deleteProjectPath(root, path)
+    const result = await deleteProjectPath(root, path)
+    // Removal cascades prefix matches on the renderer, so deleting a folder also
+    // drops its indexed children.
+    if (result.success) projectTreeWatchManager?.notifyMutation(root, [], [path])
+    return result
   })
 
   ipcMain.handle(IPC.PROJECT_SQLITE_GET_SCHEMA, async (_, root: string, path: string) => {

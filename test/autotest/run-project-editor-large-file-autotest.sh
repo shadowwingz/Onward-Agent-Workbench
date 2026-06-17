@@ -33,6 +33,7 @@ ONWARD_AUTOTEST=1 \
 ONWARD_AUTOTEST_SUITE=project-editor-large-file \
 ONWARD_AUTOTEST_CWD="$ROOT_DIR" \
 ONWARD_AUTOTEST_EXIT=1 \
+ONWARD_AUTOTEST_REAL_FILE_CHOICE=1 \
 "$APP_BIN" > "$LOG_FILE" 2>&1 || true
 
 if grep -Eq "\[AutoTest\] FAIL|totalFailed: [1-9][0-9]*|FAIL AT-RT-no-runtime-errors" "$LOG_FILE"; then

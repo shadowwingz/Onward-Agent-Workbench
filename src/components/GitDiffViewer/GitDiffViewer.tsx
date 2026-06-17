@@ -63,6 +63,11 @@ import {
   type DiffViewMemory,
   type DiffViewMemoryEntry
 } from './diffViewMemory'
+import {
+  emptySubmoduleLoadObservation,
+  foldSubmoduleLoadObservation,
+  type SubmoduleLoadObservation
+} from './submoduleLoadObservation'
 import { resolveGitDiffSplitViewMode, type GitDiffSplitViewMode } from './diffSplitViewMode'
 import { GitDiffDebugPanel } from './GitDiffDebugPanel'
 import { LargeFileConfirmDialog } from '../LargeFileConfirmDialog/LargeFileConfirmDialog'
@@ -734,6 +739,7 @@ type GitDiffDebugApi = {
   getCwd: () => string | null
   getRepoRoot: () => string | null
   isSubmodulesLoading: () => boolean
+  getSubmoduleLoadObservation: () => SubmoduleLoadObservation
   getTiming: () => {
     openRequestedAt: number | null
     shellShownAt: number | null
@@ -1194,6 +1200,10 @@ export function GitDiffViewer({
   const [fileContents, setFileContents] = useState<Record<string, FileContentState>>({})
   const [largeFileConfirmState, setLargeFileConfirmState] = useState<LargeFileConfirmState | null>(null)
   const diffResultRef = useRef<GitDiffResult | null>(null)
+  // Latches whether the root-only outline was shown while submodules were still
+  // loading (DSM-03 / RSM-03). Captured at apply-time in applyLoadedDiffResult so
+  // the autotest reads a deterministic latch instead of racing the transient.
+  const submoduleLoadObservationRef = useRef<SubmoduleLoadObservation>(emptySubmoduleLoadObservation())
   const fileContentsRef = useRef<Record<string, FileContentState>>({})
   const largeFileConfirmRef = useRef<LargeFileConfirmState | null>(null)
   const allowedLargeFileKeysRef = useRef<Set<string>>(new Set())
@@ -2599,6 +2609,21 @@ export function GitDiffViewer({
     previousSelection: GitFileStatus | null
   ) => {
     setDiffResult(result)
+    // Latch the "outline visible while submodules loading" observation
+    // (DSM-03 / RSM-03): the root-only pass arrives with submodulesLoading:true
+    // + repos still loading; the settled full pass leaves the peak unchanged.
+    submoduleLoadObservationRef.current = foldSubmoduleLoadObservation(
+      submoduleLoadObservationRef.current,
+      result
+    )
+    if (result.submodulesLoading === true) {
+      perfTrace(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_SUBMODULE_OUTLINE_OBSERVED, {
+        terminalId,
+        maxLoadingRepoCount: submoduleLoadObservationRef.current.maxLoadingRepoCount,
+        maxNestedLoadingRepoCount: submoduleLoadObservationRef.current.maxNestedLoadingRepoCount,
+        fileCount: result.files?.length ?? 0
+      })
+    }
     lastDiffRef.current = {
       cwd: result.cwd || sourceCwd,
       originalCwd: sourceCwd,
@@ -2980,6 +3005,11 @@ export function GitDiffViewer({
       if (openingFromClosed) {
         suppressSelectionRestoreOnNextLoadRef.current = true
         suppressMemorySelectionRestoreUntilSelectionRef.current = true
+        // Fresh observation per OPEN (not per loadDiff) — re-loads within the
+        // same open (watcher refresh, force-refresh that skips the root-only
+        // stage) must not clear the latched "outline-while-loading" peak the
+        // initial staged load captured (DSM-03 / RSM-03).
+        submoduleLoadObservationRef.current = emptySubmoduleLoadObservation()
       }
       timingRef.current = {
         openRequestedAt,
@@ -3442,6 +3472,20 @@ export function GitDiffViewer({
         },
         durationMs: 0
       }
+      // Diagnostic: a selected file was served from the renderer's in-memory
+      // fileContents cache WITHOUT a fetch. Records the changeType + content
+      // lengths so a "Git Diff shows stale/base content for a staged entry"
+      // report (GDS-22/33) is root-causable — a staged hit whose modifiedLen
+      // equals its originalLen (both == HEAD/base length) is a stale-slot hit.
+      perfTrace(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_FILE_LOAD_MEMORY_HIT, {
+        terminalId,
+        fileKey,
+        filename: file.filename,
+        changeType: file.changeType,
+        reason,
+        originalLen: cached.originalContent?.length ?? -1,
+        modifiedLen: cached.modifiedContent?.length ?? -1
+      })
       syncCurrentDiffEditorModels(file, cached, reason)
       const editor = diffEditorRef.current
       if (editor) {
@@ -5560,6 +5604,7 @@ export function GitDiffViewer({
       getCwd: () => activeCwd || null,
       getRepoRoot: () => diffResult?.cwd || null,
       isSubmodulesLoading: () => Boolean(diffResult?.submodulesLoading),
+      getSubmoduleLoadObservation: () => ({ ...submoduleLoadObservationRef.current }),
       getTiming: () => {
         const timing = timingRef.current
         return {
@@ -6955,6 +7000,37 @@ export function GitDiffViewer({
           scrollTop: diffEditorRef.current?.getModifiedEditor().getScrollTop() ?? null,
           splitRatio: diffSplitRatioRef.current
         }
+      },
+      afterEnter: async (context) => {
+        // Restore the previously selected file ONLY when re-entering via a
+        // subpage switch (TerminalGrid passes the saved DiffSubpageSnapshot as
+        // restoredSnapshot; a fresh open passes null → stays blank, GDS-31). The
+        // open path suppresses auto-restore (openingFromClosed), so this explicit
+        // select overrides the blank for the switch-back case (SN-07 / CDP-06).
+        const snap = context.restoredSnapshot
+        const wantedPath = snap?.subpage === 'diff' ? snap.selectedFilePath : null
+        if (!wantedPath) {
+          perfTrace(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_SUBPAGE_RESTORE, {
+            terminalId, hadSnapshot: Boolean(snap), restoredFile: null,
+            fileFoundInList: false, fileCount: diffResultRef.current?.files?.length ?? 0
+          })
+          return
+        }
+        // The diff list may still be loading when the switch completes; poll
+        // briefly for the file to appear, then select it.
+        const deadline = Date.now() + 2500
+        let target: GitFileStatus | null = null
+        for (;;) {
+          const files = diffResultRef.current?.files ?? []
+          target = files.find((f) => f.filename === wantedPath || f.originalFilename === wantedPath) ?? null
+          if (target || Date.now() >= deadline) break
+          await new Promise((resolve) => setTimeout(resolve, 80))
+        }
+        if (target) handleFileSelect(target)
+        perfTrace(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_SUBPAGE_RESTORE, {
+          terminalId, hadSnapshot: true, restoredFile: wantedPath,
+          fileFoundInList: Boolean(target), fileCount: diffResultRef.current?.files?.length ?? 0
+        })
       }
     },
     workingDirectoryLabel: t('gitDiff.workingDirectory'),
@@ -6973,11 +7049,13 @@ export function GitDiffViewer({
     externalPanelActions,
     externalPanelMetaExtra,
     handleCwdDblClick,
+    handleFileSelect,
     handleSelectSubpage,
     persistCurrentDiffSplitRatio,
     selectedFileKey,
     t,
-    taskTitle
+    taskTitle,
+    terminalId
   ])
 
   useLayoutEffect(() => {

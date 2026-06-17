@@ -129,6 +129,16 @@ export const PERF_TRACE_EVENT = {
   MAIN_PROJECT_TREE_WATCH_EVENT: 'main:project-tree-watch.event',
   MAIN_PROJECT_TREE_WATCH_BATCH: 'main:project-tree-watch.batch',
   MAIN_PROJECT_TREE_WATCH_IGNORED_SUMMARY: 'main:project-tree-watch.ignored-summary',
+  // @parcel/watcher subscribe outcome (lifecycle entry + fallback branch). Off the
+  // hot path, but the primary breadcrumb for "Cmd+P never sees new files": shows
+  // whether the watcher subscribed (ok), failed to (failed), or was torn down by a
+  // stop() that raced subscribe() resolving (disposed-race).
+  MAIN_PROJECT_TREE_WATCH_SUBSCRIBE: 'main:project-tree-watch.subscribe',
+  // In-app mutation direct-notify (project.createFile/renamePath/deletePath →
+  // file index), bypassing the OS watcher so the app's own edits propagate even
+  // when the platform delivers zero native FS events. Breadcrumb for "Cmd+P
+  // missed a file I just created in-app".
+  MAIN_PROJECT_TREE_WATCH_INAPP_MUTATION: 'main:project-tree-watch.inapp-mutation',
 
   // ───────── Workers — app-state ─────────
   WORKER_APP_STATE_LATENCY: 'main:app-state-worker-latency',
@@ -496,6 +506,7 @@ export const PERF_TRACE_EVENT = {
   RENDERER_GIT_DIFF_HUNK_WIDGET_INSTALL: 'renderer:git-diff.hunk-widget-install',
   RENDERER_GIT_DIFF_BODY_PREFETCH: 'renderer:git-diff.body-prefetch',
   RENDERER_GIT_DIFF_FILE_LOAD: 'renderer:git-diff.file-load',
+  RENDERER_GIT_DIFF_FILE_LOAD_MEMORY_HIT: 'renderer:git-diff.file-load-memory-hit',
   RENDERER_GIT_DIFF_MODEL_SYNC: 'renderer:git-diff.model-sync',
   RENDERER_GIT_DIFF_BODY_RENDERED: 'renderer:git-diff.body-rendered',
   RENDERER_GIT_DIFF_CACHE_INVALIDATION: 'renderer:git-diff.cache-invalidation',
@@ -503,6 +514,9 @@ export const PERF_TRACE_EVENT = {
   RENDERER_GIT_DIFF_JUMP_TO_EDITOR: 'renderer:git-diff.jump-to-editor',
   RENDERER_GIT_DIFF_SPLIT_MODE_TOGGLE: 'renderer:git-diff.split-mode-toggle',
   RENDERER_GIT_DIFF_AUX_MIRROR_SUBSCRIPTION: 'renderer:git-diff.aux-mirror-subscription',
+  RENDERER_GIT_DIFF_SUBPAGE_RESTORE: 'renderer:git-diff.subpage-restore',
+  RENDERER_GIT_DIFF_SUBMODULE_OUTLINE_OBSERVED: 'renderer:git-diff.submodule-outline-observed',
+  RENDERER_CLIPBOARD_PATH_COPY: 'renderer:clipboard.path-copy',
   RENDERER_PROJECT_EDITOR_JUMP_TO_DIFF: 'renderer:project-editor.jump-to-diff',
 
   // ───────── Renderer — Git Diff click → paint phase chain ─────────

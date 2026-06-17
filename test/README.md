@@ -167,6 +167,7 @@ point at files under `test/unittest/`.
 | SQLite viewer (open `.db`, table list, paging) | `run-project-editor-sqlite` (PSQL-*) |
 | File index cache + Quick Open behaviour, including ignored `.git/index.lock` / `node_modules/.cache` watcher noise | `run-file-index-cache-ui` (FIC-01..26) |
 | File-index unit (cache eviction, dirty key tracking) | `test/unittest/file-index-cache.test.mts` (executed by `run-unittest-suite`) |
+| Project-tree watcher event classification (@parcel/watcher create/update→classify, delete→remove) | `test/unittest/project-tree-watch-classify.test.mts` (executed by `run-unittest-suite`) |
 | Editor auto-refresh on external file mutation | `run-file-watch` (FW-01..05) |
 | Global ripgrep search across project | `run-global-search` (GS-01..11) |
 | Working directory copy from terminal header | `run-working-directory-copy` (WDC-*) |
