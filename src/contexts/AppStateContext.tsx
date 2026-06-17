@@ -12,7 +12,7 @@ import { normalizeProjectCwd as normalizeProjectCwdImpl } from '../utils/pathNor
 import { perfTrace } from '../utils/perf-trace'
 import { migrateLayoutMode, DEFAULT_LAYOUT_MODE } from '../utils/layout-mode'
 import { isValidCustomLayoutCells } from '../utils/custom-layout-validator'
-import { normalizeTerminalCwdCandidate } from '../utils/terminal-cwd-osc'
+import { canonicalizeTerminalCwdForPersist } from '../utils/terminal-cwd-osc'
 import { appStateContentChanged } from '../utils/app-state-diff'
 
 export const normalizeProjectCwd = normalizeProjectCwdImpl
@@ -224,19 +224,31 @@ function normalizePromptEditorHeight(value: number | null | undefined): number {
   return Math.max(Math.round(value), MIN_PROMPT_EDITOR_HEIGHT)
 }
 
+function getPersistCwdPlatform(): string {
+  // Renderer: electronAPI exposes the host platform. Fall back to '' (no
+  // platform-specific rule) when unavailable so the canonicalizer still
+  // applies its platform-independent steps.
+  try {
+    return (typeof window !== 'undefined' && window.electronAPI?.platform) || ''
+  } catch {
+    return ''
+  }
+}
+
 function normalizePersistedTerminalCwd(value: string | null | undefined): string | null {
-  const validated = normalizeTerminalCwdCandidate(value)
-  if (validated === null) return null
-  // Canonicalize path separators to '/'. On Windows the terminal cwd reaches us
-  // from two sources with different conventions — OSC 7 (`file:///D:/...` → '/')
-  // and the main-process git watcher (native '\'). Persisting them verbatim made
-  // two TerminalGrid effects (the OSC-cwd persist at TerminalGrid.tsx:579 and the
-  // git-info persist via applyTerminalInfoUpdate) ping-pong `terminal.lastCwd`
-  // between 'D:/x' and 'D:\x' ~700×/s, defeating setTerminalLastCwd's idempotency
-  // check and pinning the renderer JS thread (idle ~8% CPU — Windows-only, since
-  // POSIX has no '\' variant). Forward slash matches normalizeProjectCwd and the
-  // OSC path, and is accepted by Git + the filesystem on all three platforms.
-  return normalizeProjectCwd(validated)
+  // The terminal cwd reaches us from two sources with different conventions and
+  // must converge on ONE string, or two TerminalGrid effects (the OSC-cwd persist
+  // at TerminalGrid.tsx:573/587 and the git-info persist via applyTerminalInfoUpdate)
+  // ping-pong `terminal.lastCwd`, defeating setTerminalLastCwd's idempotency check
+  // and pinning the renderer JS thread (idle-CPU storm — re-renders the whole tree
+  // thousands of times/sec). Known divergences both writers must be reconciled past:
+  //   • Windows: OSC 7 emits '/', the git watcher emits native '\'  ('D:/x' vs 'D:\x').
+  //   • macOS:   OSC 7 emits the user-facing path, the git watcher the realpath
+  //              ('/var/folders/…' vs '/private/var/folders/…'), and a '$TMPDIR'
+  //              ending in '/' yields a stray '//' from one source.
+  // canonicalizeTerminalCwdForPersist handles all of these (separator + duplicate
+  // slash + macOS firmlink + trailing slash). Pure + unit-tested.
+  return canonicalizeTerminalCwdForPersist(value, getPersistCwdPlatform())
 }
 
 function normalizePromptInputMode(value: unknown): 'canvas' | 'line' {

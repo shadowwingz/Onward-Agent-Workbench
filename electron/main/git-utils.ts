@@ -34,7 +34,7 @@ import { buildGitStatusPorcelainArgs } from './git-status-args'
 // Static circular import (git-cat-file-batch imports getReadonlyExecEnv back):
 // safe because both sides access the imported symbol only inside function
 // bodies, never at module-eval time (lesson #15).
-import { gitCatFileBatch } from './git-cat-file-batch'
+import { gitCatFileBatch, isMutableIndexRef } from './git-cat-file-batch'
 import {
   GIT_LARGE_FILE_CONFIRM_SIZE,
   gitLargeFileReadMaxBuffer,
@@ -1992,7 +1992,16 @@ export async function getGitDiff(cwd: string, options?: GitDiffLoadOptions): Pro
   // main-process non-IPC callers.
   wireGitDiffCacheInvalidatorOnce()
 
-  const cacheKey = getGitDiffRequestKey(cwd, options)
+  // Key the request cache by the RESOLVED repo root, not the caller's cwd.
+  // getGitDiff(<subdir>) resolves up to the repo root and returns the WHOLE-repo
+  // diff, so a subdir call and a root call yield the same result and MUST share
+  // one cache key — the same key the watcher-driven invalidation clears
+  // (invalidateGitDiffCache normalises the mutated path to the repo root). Keying
+  // by the raw subdir cwd left a subdir-entry cache that a root-level edit never
+  // invalidated, so a subdir-entry diff went stale (GDS-15). getGitRepoMeta caches
+  // a positive repoRoot permanently, so this adds no git spawn on the hot path.
+  const meta = await getGitRepoMeta(cwd)
+  const cacheKey = getGitDiffRequestKey(meta.repoRoot || cwd, options)
   const scope = options?.scope === 'root-only' ? 'root-only' : 'full'
   const force = Boolean(options?.force)
   return getGitDiffRequestCacheController().get(cacheKey, {
@@ -2710,12 +2719,21 @@ async function readGitFileByRef(
   let size: number | null = null
   let buffer: Buffer = Buffer.alloc(0)
   let resolvedByBatch = false
+  // The MUTABLE index (`:<path>` / `:0:<path>` …) must NOT be served by the
+  // long-running batch: a `git cat-file --batch` process caches the index in
+  // memory at first access, so after a `git add` / stage / partial-stage
+  // changes the index, the batch keeps returning the STALE startup index blob
+  // (confirmed by repro). That surfaced as staged diffs showing HEAD/base
+  // content on both sides (GDS-22/33). Only IMMUTABLE objects (HEAD:path,
+  // <commit>:path, blob oids) are safe for the batch; index refs fall through
+  // to the per-call path below, which re-reads the current index each time.
+  const mutableIndexRef = isMutableIndexRef(ref)
   // Phase A: long-running `git cat-file --batch` (one process per repo) — no
   // per-read process spawn, so the EDR per-spawn tax on file-content reads
   // (~1.3s/file) collapses to a pipe round-trip. Enabled only on win32 + darwin
   // (gitCatFileBatch.isSupportedPlatform()); other platforms (Linux) skip
   // straight to the per-call path below, where native spawns are cheap.
-  if (gitCatFileBatch.isSupportedPlatform()) {
+  if (gitCatFileBatch.isSupportedPlatform() && !mutableIndexRef) {
     try {
       const batch = await gitCatFileBatch.readObject(cwd, gitExecutable, ref, options)
       if (batch.largeFile) {

@@ -34,3 +34,7 @@ logs/
 # Full regression run outputs from test/autotest/run-full-regression.py.
 # Kept locally for inspection but never committed.
 test/full-regression-results/
+# Runtime artifact: zsh writes its history into the shell-integration ZDOTDIR
+# (pty-manager points ZDOTDIR at this committed config dir). The .zsh_* configs
+# are committed; the generated history file is per-run scratch, never committed.
+resources/shell-integration/zsh-zdotdir/.zsh_history

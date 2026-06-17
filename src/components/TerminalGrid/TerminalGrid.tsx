@@ -46,6 +46,7 @@ import {
   createSubpageStateMemory,
   type SubpageMemoryScope
 } from './subpageStateMemory'
+import { shouldRestoreSubpageOnEnter } from './subpageRestoreDecision'
 import {
   mergeMirrorAlias,
   mergeMirrorDeltaSnapshot,
@@ -1480,6 +1481,14 @@ export const TerminalGrid = memo(function TerminalGrid({
   }, [attemptFocusRequest, cancelPendingFocus])
 
   const adaptiveCollapseRef = useRef<ResizeObserver | null>(null)
+  // Breaks the ResizeObserver⇄layout feedback loop in the adaptive-header
+  // overflow check: `adaptiveAdjustingRef` is held across the frame while our own
+  // class mutations land so the resulting ResizeObserver callbacks are dropped
+  // (a self-induced resize must not re-run the check); `adaptiveCheckRafRef`
+  // coalesces genuine external resizes to one check per frame. Without this the
+  // check re-fired every frame and pinned a renderer Helper at ~165% idle CPU.
+  const adaptiveAdjustingRef = useRef(false)
+  const adaptiveCheckRafRef = useRef<number | null>(null)
 
   useLayoutEffect(() => {
     const wasHidden = prevHiddenForOverflowRef.current
@@ -1490,34 +1499,55 @@ export const TerminalGrid = memo(function TerminalGrid({
     if (!wrapper) return
 
     const checkOverflow = () => {
-      const cells = wrapper.querySelectorAll('.terminal-grid-cell')
-      cells.forEach((cell) => {
-        const headerLeft = cell.querySelector('.terminal-grid-header-left') as HTMLElement | null
-        if (!headerLeft) return
+      // Hold the guard across this frame so the ResizeObserver callbacks our own
+      // class mutations queue are dropped by scheduleOverflowCheck — otherwise the
+      // remove→re-add of `adaptive-force-collapsed` each pass re-triggers the
+      // observer and the check spins every frame (markdown-preview-cpu).
+      adaptiveAdjustingRef.current = true
+      try {
+        const cells = wrapper.querySelectorAll('.terminal-grid-cell')
+        cells.forEach((cell) => {
+          const headerLeft = cell.querySelector('.terminal-grid-header-left') as HTMLElement | null
+          if (!headerLeft) return
 
-        const cwdEl = headerLeft.querySelector('.terminal-grid-adaptive-cwd')
-        const repoEl = headerLeft.querySelector('.terminal-grid-adaptive-repo')
-        const branchEl = headerLeft.querySelector('.terminal-grid-branch')
+          const cwdEl = headerLeft.querySelector('.terminal-grid-adaptive-cwd')
+          const repoEl = headerLeft.querySelector('.terminal-grid-adaptive-repo')
+          const branchEl = headerLeft.querySelector('.terminal-grid-branch')
 
-        cwdEl?.classList.remove('adaptive-force-collapsed')
-        repoEl?.classList.remove('adaptive-force-collapsed')
-        branchEl?.classList.remove('branch-allow-shrink')
+          cwdEl?.classList.remove('adaptive-force-collapsed')
+          repoEl?.classList.remove('adaptive-force-collapsed')
+          branchEl?.classList.remove('branch-allow-shrink')
 
-        void headerLeft.offsetWidth
-
-        if (headerLeft.scrollWidth > headerLeft.clientWidth + 1) {
-          cwdEl?.classList.add('adaptive-force-collapsed')
           void headerLeft.offsetWidth
 
           if (headerLeft.scrollWidth > headerLeft.clientWidth + 1) {
-            repoEl?.classList.add('adaptive-force-collapsed')
+            cwdEl?.classList.add('adaptive-force-collapsed')
             void headerLeft.offsetWidth
 
             if (headerLeft.scrollWidth > headerLeft.clientWidth + 1) {
-              branchEl?.classList.add('branch-allow-shrink')
+              repoEl?.classList.add('adaptive-force-collapsed')
+              void headerLeft.offsetWidth
+
+              if (headerLeft.scrollWidth > headerLeft.clientWidth + 1) {
+                branchEl?.classList.add('branch-allow-shrink')
+              }
             }
           }
-        }
+        })
+      } finally {
+        // Release on the NEXT frame: the observer callbacks for this frame's
+        // mutations are delivered after layout (this frame) while the guard is
+        // still set, so they are dropped; a genuine later resize re-runs it.
+        requestAnimationFrame(() => { adaptiveAdjustingRef.current = false })
+      }
+    }
+
+    const scheduleOverflowCheck = () => {
+      // Drop self-induced resizes (guard) and coalesce real ones to one rAF.
+      if (adaptiveAdjustingRef.current || adaptiveCheckRafRef.current !== null) return
+      adaptiveCheckRafRef.current = requestAnimationFrame(() => {
+        adaptiveCheckRafRef.current = null
+        checkOverflow()
       })
     }
 
@@ -1528,7 +1558,7 @@ export const TerminalGrid = memo(function TerminalGrid({
       checkOverflow()
     }
 
-    const observer = new ResizeObserver(checkOverflow)
+    const observer = new ResizeObserver(scheduleOverflowCheck)
     adaptiveCollapseRef.current = observer
     const cells = wrapper.querySelectorAll('.terminal-grid-cell')
     cells.forEach((cell) => observer.observe(cell))
@@ -1536,6 +1566,10 @@ export const TerminalGrid = memo(function TerminalGrid({
     return () => {
       observer.disconnect()
       adaptiveCollapseRef.current = null
+      if (adaptiveCheckRafRef.current !== null) {
+        cancelAnimationFrame(adaptiveCheckRafRef.current)
+        adaptiveCheckRafRef.current = null
+      }
     }
   }, [editingId, hidden, terminalInfos, visibleTerminals])
 
@@ -2250,8 +2284,19 @@ export const TerminalGrid = memo(function TerminalGrid({
     const target = command.target
     if (!target) return
     const lifecycle = panelShellStatesRef.current[target]?.lifecycle
-    await lifecycle?.afterEnter?.({ command })
-  }, [])
+    const scope = resolveSubpageMemoryScope(command.terminalId, target)
+    // Restore the saved snapshot ONLY on a genuine cross-subpage switch (came
+    // FROM a different subpage). A fresh open or a same-subpage reopen must open
+    // blank (GDS-31), so clear any stale snapshot for this scope first. A switch
+    // preserves the snapshot saved on the way out, so switching back restores
+    // the prior selection (SN-07 / CDP-06).
+    const isGenuineSwitch = shouldRestoreSubpageOnEnter(command.from, target)
+    if (!isGenuineSwitch) {
+      subpageStateMemoryRef.current.clear(scope, target)
+    }
+    const stored = subpageStateMemoryRef.current.read(scope, target)
+    await lifecycle?.afterEnter?.({ command, restoredSnapshot: stored?.snapshot ?? null })
+  }, [resolveSubpageMemoryScope])
 
   const closeNonTargetSubpagesForRoute = useCallback((target: SubpageId | null) => {
     if (target !== 'diff') {

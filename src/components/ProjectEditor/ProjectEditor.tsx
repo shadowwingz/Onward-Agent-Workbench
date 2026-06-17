@@ -3785,8 +3785,10 @@ export function ProjectEditor({
       // Auto-select 'text' so navigation-marker .txt files (which may appear
       // binary on Windows due to UTF-16 LE output from the terminal) open
       // without user interaction.  The remember flag is false so the choice
-      // does not persist across test suites.
-      if (window.electronAPI?.debug?.autotest) {
+      // does not persist across test suites. A suite that explicitly TESTS the
+      // dialog (project-editor-large-file PLF-11..15) opts OUT via
+      // ONWARD_AUTOTEST_REAL_FILE_CHOICE=1 so it gets the real dialog.
+      if (window.electronAPI?.debug?.autotest && !window.electronAPI?.debug?.autotestRealFileChoice) {
         resolve({ mode: 'text', remember: false })
         return
       }

@@ -31,6 +31,9 @@ try {
   $env:ONWARD_AUTOTEST_SUITE = "project-editor-large-file"
   $env:ONWARD_AUTOTEST_CWD = $RootDir
   $env:ONWARD_AUTOTEST_EXIT = "1"
+  # Opt out of the autotest auto-text shortcut so PLF-11..15 get the real
+  # binary-choice dialog (.sh parity).
+  $env:ONWARD_AUTOTEST_REAL_FILE_CHOICE = "1"
 
   & $AppBin *> $LogFile
 

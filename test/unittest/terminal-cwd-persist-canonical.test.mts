@@ -6,46 +6,97 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { normalizeTerminalCwdCandidate } from '../../src/utils/terminal-cwd-osc.ts'
-import { normalizeProjectCwd } from '../../src/utils/pathNormalize.ts'
+import { canonicalizeTerminalCwdForPersist } from '../../src/utils/terminal-cwd-osc.ts'
 
-// Mirror of AppStateContext.normalizePersistedTerminalCwd: validate the cwd,
-// then canonicalize separators to '/'. This locks the convergence invariant
-// behind the Windows idle-CPU fix — without canonicalization the OSC writer
-// ('/') and the git-watcher writer ('\\') ping-pong terminal.lastCwd forever.
-function persistCanonical(value: string | null | undefined): string | null {
-  const validated = normalizeTerminalCwdCandidate(value)
-  return validated === null ? null : normalizeProjectCwd(validated)
-}
+// `canonicalizeTerminalCwdForPersist` IS the production canonicalizer that
+// AppStateContext.normalizePersistedTerminalCwd calls (no mirror — same code).
+// It locks the convergence invariant behind the idle-CPU fix: without it the
+// OSC writer and the git-watcher writer disagree on the persisted cwd string
+// and ping-pong terminal.lastCwd forever, re-rendering the whole tree.
+const win = (v: string | null | undefined) => canonicalizeTerminalCwdForPersist(v, 'win32')
+const mac = (v: string | null | undefined) => canonicalizeTerminalCwdForPersist(v, 'darwin')
+const linux = (v: string | null | undefined) => canonicalizeTerminalCwdForPersist(v, 'linux')
 
-test('persisted cwd converges: forward-slash and backslash forms map to ONE string', () => {
-  // The exact pair the production trace showed ping-ponging.
-  assert.equal(persistCanonical('D:/Users/Documents/Onward'), 'D:/Users/Documents/Onward')
-  assert.equal(persistCanonical('D:\\Users\\Documents\\Onward'), 'D:/Users/Documents/Onward')
-  assert.equal(
-    persistCanonical('D:/Users/Documents/Onward'),
-    persistCanonical('D:\\Users\\Documents\\Onward')
-  )
-  assert.equal(persistCanonical('E:/RTOS-stablity/x'), persistCanonical('E:\\RTOS-stablity\\x'))
+test('Windows: forward-slash and backslash forms converge to ONE string', () => {
+  // The exact pair the original production trace showed ping-ponging.
+  assert.equal(win('D:/Users/Documents/Onward'), 'D:/Users/Documents/Onward')
+  assert.equal(win('D:\\Users\\Documents\\Onward'), 'D:/Users/Documents/Onward')
+  assert.equal(win('D:/Users/Documents/Onward'), win('D:\\Users\\Documents\\Onward'))
+  assert.equal(win('E:/RTOS-stablity/x'), win('E:\\RTOS-stablity\\x'))
 })
 
-test('persisted cwd canonicalization is idempotent (no second-pass drift)', () => {
-  for (const input of ['D:\\Users\\80253146', 'D:/Users/80253146', 'C:\\a\\b\\c', '~/projects/repo', '/Users/x/repo']) {
-    const once = persistCanonical(input)
-    const twice = persistCanonical(once)
+test('Windows: a UNC leading "//" is preserved (not collapsed to "/")', () => {
+  assert.equal(win('\\\\server\\share\\proj'), '//server/share/proj')
+  assert.equal(win('//server/share/proj'), '//server/share/proj')
+})
+
+test('Windows: a drive root keeps its trailing slash', () => {
+  assert.equal(win('C:/'), 'C:/')
+  assert.equal(win('C:\\'), 'C:/')
+})
+
+test('macOS: /private firmlink and user-facing form converge to ONE string', () => {
+  // The exact macOS divergence: OSC 7 reports the user-facing path, the git
+  // watcher the realpath. Both are the SAME directory (synthetic firmlink).
+  assert.equal(mac('/private/var/folders/31/T/proj'), '/var/folders/31/T/proj')
+  assert.equal(mac('/var/folders/31/T/proj'), '/var/folders/31/T/proj')
+  assert.equal(mac('/private/var/folders/31/T/proj'), mac('/var/folders/31/T/proj'))
+  assert.equal(mac('/private/tmp/x'), '/tmp/x')
+  assert.equal(mac('/private/etc/y'), '/etc/y')
+  // Bare firmlink roots (no trailing segment) also reconcile.
+  assert.equal(mac('/private/var'), '/var')
+})
+
+test('macOS: a stray double slash from a $TMPDIR ending in "/" is collapsed', () => {
+  // mktemp -d "$TMPDIR/child" with $TMPDIR='/var/folders/.../T/' yields '…/T//child'.
+  assert.equal(mac('/var/folders/31/T//onward-fixture'), '/var/folders/31/T/onward-fixture')
+  assert.equal(
+    mac('/var/folders/31/T//onward-fixture'),
+    mac('/private/var/folders/31/T/onward-fixture')
+  )
+})
+
+test('macOS: does NOT strip /private from a real non-firmlink directory', () => {
+  // `/private/variant` must stay intact — only var/tmp/etc are firmlinks.
+  assert.equal(mac('/private/variant/x'), '/private/variant/x')
+  assert.equal(mac('/private/data/x'), '/private/data/x')
+})
+
+test('Linux: the macOS firmlink rule does NOT apply', () => {
+  // On Linux a real /private/var directory must be preserved verbatim.
+  assert.equal(linux('/private/var/x'), '/private/var/x')
+  assert.equal(linux('/var/x'), '/var/x')
+})
+
+test('canonicalization is idempotent (no second-pass drift), all platforms', () => {
+  const cases: Array<[(v: string | null | undefined) => string | null, string]> = [
+    [win, 'D:\\Users\\80253146'], [win, 'D:/Users/80253146'], [win, '\\\\srv\\sh\\c'],
+    [mac, '/private/var/folders/31/T//proj'], [mac, '/var/folders/31/T/proj/'],
+    [mac, '~/projects/repo'], [linux, '/private/var/x']
+  ]
+  for (const [fn, input] of cases) {
+    const once = fn(input)
+    const twice = fn(once)
     assert.equal(twice, once, `not idempotent for ${input}`)
     assert.ok(once === null || !once.includes('\\'), `still contains a backslash: ${once}`)
   }
 })
 
-test('persisted cwd keeps POSIX paths and home-relative paths intact', () => {
-  assert.equal(persistCanonical('/Users/example/repo'), '/Users/example/repo')
-  assert.equal(persistCanonical('~/Projects/repo'), '~/Projects/repo')
+test('trailing slash is stripped (but root "/" is kept)', () => {
+  assert.equal(mac('/Users/x/repo/'), '/Users/x/repo')
+  assert.equal(mac('/'), '/')
+  assert.equal(mac('~/Projects/repo/'), '~/Projects/repo')
 })
 
-test('persisted cwd rejects invalid candidates (unchanged validation contract)', () => {
-  assert.equal(persistCanonical('relative/path'), null)
-  assert.equal(persistCanonical('Claude is waiting for your input'), null)
-  assert.equal(persistCanonical(null), null)
-  assert.equal(persistCanonical(undefined), null)
+test('POSIX paths and home-relative paths stay intact', () => {
+  assert.equal(mac('/Users/example/repo'), '/Users/example/repo')
+  assert.equal(mac('~/Projects/repo'), '~/Projects/repo')
+  assert.equal(mac('~'), '~')
+})
+
+test('invalid candidates are rejected (unchanged validation contract)', () => {
+  assert.equal(mac('relative/path'), null)
+  assert.equal(mac('Claude is waiting for your input'), null)
+  assert.equal(mac(null), null)
+  assert.equal(mac(undefined), null)
 })

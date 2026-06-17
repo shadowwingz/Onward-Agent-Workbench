@@ -76,24 +76,25 @@ export async function testGitDiffRecursiveSubmodules(ctx: AutotestContext): Prom
     })
   }
 
-  // RSM-03: nested outline is visible before full load settles
+  // RSM-03: the NESTED (depth>0) outline is visible while submodule aggregation
+  // is still loading. Same sub-millisecond transient as DSM-03 — read the
+  // deterministic latch (captured at apply-time, persists through the full pass)
+  // instead of racing a poll on the instantaneous nested-loading state.
   if (!cancelled()) {
-    const outlineVisible = await waitFor('RSM-03-outline-visible', () => {
+    const nestedOutlineLatched = await waitFor('RSM-03-nested-outline-latched', () => {
       const api = getGitDiffApi()
       if (!api?.isOpen()) return false
-      if (!api.isSubmodulesLoading()) return false
-      const repos = api.getRepoList()
-      return repos.some((repo) => repo.loading && repo.depth > 0)
+      const obs = api.getSubmoduleLoadObservation?.()
+      return Boolean(obs && obs.maxNestedLoadingRepoCount > 0)
     }, LOAD_TIMEOUT_MS)
 
     const api = getGitDiffApi()
     const timing = api?.getTiming() ?? null
     const repos = api?.getRepoList() ?? []
-    _assert('RSM-03-nested-outline-visible-before-full-load', outlineVisible, {
-      outlineVisible,
-      submodulesLoading: api?.isSubmodulesLoading() ?? false,
-      repoCount: repos.length,
-      nestedLoadingCount: repos.filter((repo) => repo.loading && repo.depth > 0).length,
+    const observation = api?.getSubmoduleLoadObservation?.() ?? null
+    _assert('RSM-03-nested-outline-visible-before-full-load', nestedOutlineLatched, {
+      nestedOutlineLatched,
+      observation,
       maxSubmoduleDepth: repos.reduce((max, repo) => Math.max(max, repo.isSubmodule ? repo.depth : -1), -1),
       openToDiffLoadedMs: timing?.openToDiffLoadedMs ?? null,
       platform

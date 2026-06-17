@@ -48,7 +48,7 @@ if grep -q "\[AutoTest\] FAIL" "$LOG_FILE"; then
   exit 1
 fi
 
-if ! grep -q "PT-09-no-dropped-events" "$LOG_FILE"; then
+if ! grep -q "PT-09-no-silent-event-loss" "$LOG_FILE"; then
   echo "Missing PT-09 result; the test may not have executed correctly" >&2
   tail -n 40 "$LOG_FILE" >&2
   exit 1
@@ -57,9 +57,12 @@ fi
 # The log now emits: [PerfTrace] enabled format=ndjson-chunked dir=<dir> (<kind>)
 # Two-stage sed: first extract everything after 'dir=', then strip the
 # trailing ' (<kind>)' suffix.  Two passes avoids BRE greedy-match issues
-# across BSD (macOS) and GNU sed.
+# across BSD (macOS) and GNU sed.  The suffix regex MUST include the closing
+# paren — ' ([^)]*)$' — because the kind is wrapped '(userdata)'/'(repo)'; the
+# earlier ' ([^)]*$' (no closing ')') never matched, so the suffix survived and
+# the trailing '/<dir> (kind)' failed the directory check below.
 TRACE_DIR="$(sed -n 's/.*\[PerfTrace\] enabled format=ndjson-chunked dir=//p' "$LOG_FILE" | \
-  sed 's/ ([^)]*$//' | tail -n 1)"
+  sed 's/ ([^)]*)$//' | tail -n 1)"
 if [[ -z "$TRACE_DIR" || ! -d "$TRACE_DIR" ]]; then
   echo "Performance trace directory not found in log (expected [PerfTrace] enabled ...)" >&2
   tail -n 40 "$LOG_FILE" >&2

@@ -98,6 +98,10 @@ export interface PerformanceTraceStatus {
   filePath: string | null
   eventCount: number
   droppedEvents: number
+  // Of droppedEvents, the subset dropped by the per-name rate limiter (EXPECTED
+  // decimation of high-frequency events). droppedEvents - rateLimitedDropped is
+  // genuine store-failure loss.
+  rateLimitedDropped: number
 }
 
 export interface DebugApiTerminalWriteResult {
@@ -1047,6 +1051,7 @@ export interface DebugAPI {
   profile: boolean
   profileCwd: string | null
   autotest: boolean
+  autotestRealFileChoice: boolean
   autotestCwd: string | null
   autotestSuite: string | null
   autotestExit: boolean

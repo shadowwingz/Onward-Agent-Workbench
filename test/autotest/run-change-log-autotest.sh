@@ -36,7 +36,13 @@ node --test \
   "$ROOT_DIR/test/autotest/test-changelog-generation.mjs" \
   "$ROOT_DIR/test/autotest/test-changelog-manifest.mjs"
 
-TEMP_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/onward-change-log-autotest.XXXXXX")"
+# Strip any trailing slash from TMPDIR first: on macOS $TMPDIR ends in '/', so
+# "${TMPDIR}/onward-..." would form a '//' that, once exported as
+# ONWARD_CHANGELOG_ROOT, trips the production changelog path-traversal guard
+# (the normalized child no longer has the un-normalized parent as a prefix) and
+# makes readCurrentChangelog return success:false (CL-02/03/05/06).
+BASE_TMP="${TMPDIR:-/tmp}"; BASE_TMP="${BASE_TMP%/}"
+TEMP_ROOT="$(mktemp -d "$BASE_TMP/onward-change-log-autotest.XXXXXX")"
 TEMP_CHANGELOG="$TEMP_ROOT/changelog"
 TEMP_USER_DATA="$TEMP_ROOT/user-data"
 mkdir -p "$TEMP_CHANGELOG/en/daily" "$TEMP_USER_DATA"

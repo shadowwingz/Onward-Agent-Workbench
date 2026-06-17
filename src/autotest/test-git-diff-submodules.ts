@@ -75,24 +75,26 @@ export async function testGitDiffSubmodules(ctx: AutotestContext): Promise<TestR
     })
   }
 
-  // DSM-03: the repo outline is visible while submodule aggregation is still loading
+  // DSM-03: the repo outline is visible while submodule aggregation is still
+  // loading. That intermediate state is a sub-millisecond transient on a small
+  // fixture (root-only paints immediately, the full pass merges right after), so
+  // polling the instantaneous state races and misses it. Instead read the
+  // deterministic latch captured at apply-time, which PERSISTS through the full
+  // pass — even after loading settles, maxLoadingRepoCount stays > 0.
   if (!cancelled()) {
-    const outlineVisible = await waitFor('DSM-03-outline-visible', () => {
+    const outlineLatched = await waitFor('DSM-03-outline-latched', () => {
       const api = getGitDiffApi()
       if (!api?.isOpen()) return false
-      if (!api.isSubmodulesLoading()) return false
-      const repos = api.getRepoList()
-      return repos.some((repo) => repo.loading)
+      const obs = api.getSubmoduleLoadObservation?.()
+      return Boolean(obs && obs.maxLoadingRepoCount > 0)
     }, LOAD_TIMEOUT_MS)
 
     const api = getGitDiffApi()
     const timing = api?.getTiming() ?? null
-    const repos = api?.getRepoList() ?? []
-    _assert('DSM-03-outline-visible-before-full-load', outlineVisible, {
-      outlineVisible,
-      submodulesLoading: api?.isSubmodulesLoading() ?? false,
-      repoCount: repos.length,
-      loadingRepoCount: repos.filter((repo) => repo.loading).length,
+    const observation = api?.getSubmoduleLoadObservation?.() ?? null
+    _assert('DSM-03-outline-visible-before-full-load', outlineLatched, {
+      outlineLatched,
+      observation,
       fileCount: api?.getFileList().length ?? 0,
       openToDiffLoadedMs: timing?.openToDiffLoadedMs ?? null,
       platform
