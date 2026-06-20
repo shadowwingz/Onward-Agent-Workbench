@@ -20,10 +20,14 @@
 //   1. Per-project byte budget (default 100 MB). Smallest entries evict
 //      first — large files dominate first-click latency, so we bias the
 //      cache toward keeping them resident.
-//   2. Per-instance project budget (default 8 projects). Project buckets
+//   2. Per-instance project budget (default 24 projects). Project buckets
 //      are kept in a recent-access queue. Any get/put moves that project
-//      to the front; when the 9th project appears, the tail bucket is
-//      dropped.
+//      to the front; when the 25th project appears, the tail bucket is
+//      dropped. 24 is sized above a nested-submodule superproject's bucket
+//      count (kar-qemu routes each of ~20 submodules to its own repoRoot
+//      bucket + the superproject), so a single Diff open no longer thrashes
+//      its own submodule buckets out of the cache between clicks. Override
+//      with env ONWARD_DIFF_CACHE_MAX_PROJECTS.
 //   3. HEAD-change / project-wide invalidation: callers that detect a
 //      commit / checkout / external mutation invoke
 //      `invalidateProject(project)` to wipe the bucket.
@@ -31,7 +35,7 @@
 export interface GitDiffContentCacheOptions {
   /** Per-project byte budget. Default 100 MB. */
   projectByteLimit?: number
-  /** Maximum number of project buckets retained simultaneously. Default 8. */
+  /** Maximum number of project buckets retained simultaneously. Default 24. */
   maxProjects?: number
   /** Single-file hard cap. Entries larger than this are not stored. Default 10 MB. */
   singleFileByteLimit?: number
@@ -42,6 +46,14 @@ export interface GitDiffContentCacheEntry<T> {
   bytes: number
   /** Monotonic access order, used only as a deterministic tie-breaker. */
   touchOrder: number
+  /**
+   * Opaque freshness token captured when the entry was stored (the file's
+   * working-tree stat token for unstaged/untracked diffs, or undefined when not
+   * computable — e.g. index-backed staged content). Used by
+   * `revalidateProject` to evict ONLY entries whose underlying file actually
+   * changed, instead of wiping the whole bucket on every mirror-update.
+   */
+  staleToken?: string
 }
 
 export interface GitDiffContentCacheStats {
@@ -70,7 +82,11 @@ interface ProjectBucket<T> {
 }
 
 const DEFAULT_PROJECT_BYTE_LIMIT = 100 * 1024 * 1024
-const DEFAULT_MAX_PROJECTS = 8
+// 24: sized above a nested-submodule superproject's per-repoRoot bucket count
+// (kar-qemu ≈ 20 submodule buckets + the superproject) so one Diff open does
+// not evict its own submodule buckets mid-session. See the eviction-model note
+// at the top of this file. Override with env ONWARD_DIFF_CACHE_MAX_PROJECTS.
+const DEFAULT_MAX_PROJECTS = 24
 const DEFAULT_SINGLE_FILE_BYTE_LIMIT = 10 * 1024 * 1024
 
 export class GitDiffContentCache<T> {
@@ -114,7 +130,7 @@ export class GitDiffContentCache<T> {
    * skip caching). Returns `true` when stored — the caller does not need to
    * worry about eviction; this method does that internally.
    */
-  put(project: string, key: string, value: T, bytes: number): boolean {
+  put(project: string, key: string, value: T, bytes: number, staleToken?: string): boolean {
     if (!Number.isFinite(bytes) || bytes < 0) return false
     if (bytes > this.singleFileByteLimit) return false
     if (bytes > this.projectByteLimit) return false
@@ -128,12 +144,29 @@ export class GitDiffContentCache<T> {
 
     const previous = bucket.entries.get(key)
     if (previous) bucket.bytes -= previous.bytes
-    bucket.entries.set(key, { value, bytes, touchOrder: this.nextTouchOrder() })
+    bucket.entries.set(key, { value, bytes, touchOrder: this.nextTouchOrder(), staleToken })
     bucket.bytes += bytes
 
     this.evictWithinProjectIfOverLimit(bucket)
     this.evictProjectsIfOverLimit()
     return true
+  }
+
+  /** O(1) count of cached entries for a project (0 when absent). */
+  getProjectEntryCount(project: string): number {
+    return this.projects.get(project)?.entries.size ?? 0
+  }
+
+  /**
+   * Snapshot of the cache keys currently resident in a project bucket. Used by
+   * the scoped revalidator to pre-compute each file's fresh stat token OFF the
+   * main thread (async `fs.stat`) BEFORE calling the synchronous
+   * `revalidateProject` predicate — so the per-file re-stat no longer blocks the
+   * main thread O(n) on EDR-throttled hosts.
+   */
+  getProjectKeys(project: string): string[] {
+    const bucket = this.projects.get(project)
+    return bucket ? [...bucket.entries.keys()] : []
   }
 
   /** Drops a single entry. Returns true when something was actually removed. */
@@ -150,6 +183,45 @@ export class GitDiffContentCache<T> {
       this.bumpProjectGeneration(project)
     }
     return true
+  }
+
+  /**
+   * Scoped invalidation: evict ONLY the entries the caller deems stale, keeping
+   * the rest warm. `isStale(key, staleToken)` is invoked per entry (the caller
+   * does the freshness check — e.g. re-stat the working-tree file and compare to
+   * the stored token). Bumps the project generation once if anything was
+   * evicted (so in-flight fetches of evicted files don't store stale results),
+   * and deletes the bucket if it ends up empty. Returns kept / evicted counts.
+   *
+   * This is the resilient alternative to `invalidateProject` for mirror-update
+   * churn: when one file changes, only that file's content is dropped, so a
+   * click on any other file still hits the cache.
+   */
+  revalidateProject(
+    project: string,
+    isStale: (key: string, staleToken: string | undefined) => boolean
+  ): { kept: number; evicted: number } {
+    const bucket = this.projects.get(project)
+    if (!bucket) return { kept: 0, evicted: 0 }
+    let kept = 0
+    let evicted = 0
+    for (const [key, entry] of [...bucket.entries]) {
+      if (isStale(key, entry.staleToken)) {
+        bucket.entries.delete(key)
+        bucket.bytes -= entry.bytes
+        evicted += 1
+      } else {
+        kept += 1
+      }
+    }
+    if (evicted > 0) {
+      if (bucket.entries.size === 0) {
+        this.deleteProject(project)
+      } else {
+        this.bumpProjectGeneration(project)
+      }
+    }
+    return { kept, evicted }
   }
 
   /** Drops every entry for the given project. Returns count of dropped entries. */

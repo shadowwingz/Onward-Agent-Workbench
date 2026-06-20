@@ -17,6 +17,25 @@ import { performanceTrace } from './performance-trace'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 import { gitDiffCacheInvalidator } from './git-diff-cache-invalidator'
 import { GitDiffRequestCacheController } from './git-diff-request-cache'
+import { isMetaCacheEntryFresh } from './git-meta-cache-policy'
+import { extractGitSubcommand } from './git-exec-subcommand'
+import { parseGitLogRawNumstat, type ParsedDiffStatus } from './git-log-diff-parse'
+import { parseGitlinkPathsFromLsFilesZ } from './git-submodule-disk-discovery'
+import {
+  EMPTY_TREE_HASH,
+  buildHistoryCommitDiffCacheKey,
+  buildHistoryFileContentCacheKey,
+  buildHistoryListCacheKey,
+  cachedHistoryRequest,
+  getHistoryCommitDiffCacheController,
+  getHistoryFileContentCacheController,
+  getHistoryListCacheController
+} from './git-history-cache'
+import { buildGitStatusPorcelainArgs } from './git-status-args'
+// Static circular import (git-cat-file-batch imports getReadonlyExecEnv back):
+// safe because both sides access the imported symbol only inside function
+// bodies, never at module-eval time (lesson #15).
+import { gitCatFileBatch, isMutableIndexRef } from './git-cat-file-batch'
 import {
   GIT_LARGE_FILE_CONFIRM_SIZE,
   gitLargeFileReadMaxBuffer,
@@ -156,7 +175,7 @@ export async function execFileAsync(
     async () => {
       const startMs = Date.now()
       const basePayload: Record<string, unknown> = isGit
-        ? { subcommand: args[0] ?? null }
+        ? { subcommand: extractGitSubcommand(args) }
         : { binary, firstArg: args[0] ?? null }
       basePayload.repoKey = repoKey ?? null
       basePayload.kind = meta.kind || 'git'
@@ -253,6 +272,10 @@ export interface GitDiffLoadOptions {
   // the primary freshness mechanism, but force is the deterministic backstop
   // for subpage entry before the first mirror delta has landed.
   force?: boolean
+  // When true, this getDiff is a BACKGROUND prewarm (precompute scheduler), not
+  // a user-visible request. It runs in a separate low-priority per-repo lane so
+  // it never queues ahead of (and blocks) a foreground enter for the same repo.
+  background?: boolean
 }
 
 export interface GitCommitInfo {
@@ -404,7 +427,19 @@ export const MAX_DIFF_OUTPUT = 10 * 1024 * 1024 // 10MB
 const TERMINAL_CWD_CACHE_TTL = 1200
 const TERMINAL_INFO_CACHE_TTL = 2000
 const GIT_META_CACHE_TTL = 1000
-const GIT_DIFF_REQUEST_CACHE_TTL = 250
+// The Git Diff list cache is EVENT-invalidated, not time-invalidated: the
+// GitStateMirror FS watcher fans out `invalidateGitDiffCache(cwd)` on every
+// real mutation (see `wireGitDiffCacheInvalidatorOnce`). So the TTL is only a
+// long backstop for the pathological "watcher never fired AND the view was
+// never reopened" case — it is NOT the freshness mechanism. A long TTL is what
+// lets a BACKGROUND-warmed entry (warmDiffCache, fired ~2s after a terminal's
+// git state changes) still be resident when the user later opens the Diff
+// panel, so the open is a cache hit (~ms) instead of a multi-second recompute.
+// The old 250 ms value made warming useless: the entry expired before the user
+// could ever reach it. Subpage entry additionally fires a background
+// force-revalidate (stale-while-revalidate) so a missed watcher event self-heals
+// on the next open.
+const GIT_DIFF_REQUEST_CACHE_TTL = 30 * 60 * 1000
 let cachedGitExecutable: string | null | undefined
 let cachedGitAvailable: boolean | null = null
 let cachedGitCheckedAt: number | null = null
@@ -506,6 +541,30 @@ export function getExecEnv(): NodeJS.ProcessEnv {
   ]
   env[pathKey] = Array.from(new Set(merged)).join(delimiter)
   return env
+}
+
+/**
+ * Read-only variant of {@link getExecEnv}: adds `GIT_OPTIONAL_LOCKS=0`.
+ *
+ * By default `git status` / `git diff` against the working tree take
+ * `.git/index.lock` and opportunistically rewrite `.git/index` to refresh its
+ * stat cache. That index write is a real FS mutation the GitStateMirror
+ * watcher observes as a change event, so it schedules a background status
+ * recompute. The net effect on the Diff-open path: the foreground read kicks
+ * off a background mirror recompute that then contends with the very Diff load
+ * that triggered it for the same (EDR-throttled on Windows) process-spawn
+ * lane — a self-inflicted contention loop. `GIT_OPTIONAL_LOCKS=0` makes git
+ * skip the side-effecting refresh while still computing correct output
+ * (maintainer-blessed since git 2.15; this is what VS Code's `extensions/git`
+ * read path and our own mirror worker `hardenReadonlyGitEnv` already do).
+ *
+ * Cross-platform: a plain env var, no `process.platform` branch. Use ONLY for
+ * strictly read-only invocations (status / diff / rev-parse). Write paths
+ * (`apply` / `checkout` / `add` for hunk staging) MUST keep normal locking, so
+ * they continue to use {@link getExecEnv}.
+ */
+export function getReadonlyExecEnv(): NodeJS.ProcessEnv {
+  return { ...getExecEnv(), GIT_OPTIONAL_LOCKS: '0' }
 }
 
 async function isExecutable(filePath: string): Promise<boolean> {
@@ -781,57 +840,15 @@ export async function getTerminalCwd(terminalId: string): Promise<string | null>
   }
 }
 
-/**
- * Check whether the directory is a Git repository
- */
-async function checkGitRepository(cwd: string, gitExecutable: string): Promise<{ isRepo: boolean; error?: string }> {
-  try {
-    await execFileAsync(
-      gitExecutable,
-      ['rev-parse', '--is-inside-work-tree'],
-      {
-        cwd,
-        timeout: EXEC_TIMEOUT,
-        env: getExecEnv()
-      },
-      {
-        repoKey: cwd,
-        priority: 'high',
-        dedupeKey: `repo:check:${resolve(cwd)}`,
-        label: 'git rev-parse --is-inside-work-tree'
-      }
-    )
-    return { isRepo: true }
-  } catch (error) {
-    return {
-      isRepo: false,
-      error: formatGitError(error)
-    }
-  }
-}
-
-async function getGitRoot(cwd: string, gitExecutable: string): Promise<string | null> {
-  try {
-    const { stdout } = await execFileAsync(
-      gitExecutable,
-      ['rev-parse', '--show-toplevel'],
-      {
-        cwd,
-        timeout: EXEC_TIMEOUT,
-        env: getExecEnv()
-      },
-      {
-        repoKey: cwd,
-        priority: 'high',
-        dedupeKey: `repo:root:${resolve(cwd)}`,
-        label: 'git rev-parse --show-toplevel'
-      }
-    )
-    const root = (typeof stdout === 'string' ? stdout : stdout.toString('utf-8')).trim()
-    return root || null
-  } catch {
-    return null
-  }
+// A1 (git-op aggregation): repo-root resolution now has ONE path. This used to
+// run its OWN `rev-parse --show-toplevel` (a second, separately-TTL'd spawn
+// alongside getGitRepoMeta's). It now delegates to getGitRepoMeta, which folds
+// is-inside-work-tree + show-toplevel + git-dir into a single permanently-cached
+// invocation. The `_gitExecutable` arg is kept for call-site compatibility but
+// no longer drives a spawn here (getGitRepoMeta resolves its own).
+async function getGitRoot(cwd: string, _gitExecutable?: string): Promise<string | null> {
+  const meta = await getGitRepoMeta(cwd)
+  return meta.repoRoot
 }
 
 /**
@@ -912,7 +929,15 @@ export async function getGitRepoMeta(cwd: string): Promise<GitRepoMeta> {
   const normalizedCwd = resolve(cwd)
   const now = Date.now()
   const cached = gitMetaCache.get(normalizedCwd)
-  if (cached && now - cached.at < GIT_META_CACHE_TTL) {
+  // A1 (git-op aggregation): a POSITIVE result — `repoRoot` / `gitDir` — is
+  // IMMUTABLE for a given cwd path, so cache it PERMANENTLY. This stops the
+  // `rev-parse` re-spawn storm the short TTL caused on EDR-throttled hosts (a
+  // real session trace showed 85 `rev-parse` spawns × ~3.5s each = ~300s of
+  // pure process-creation tax, all re-resolving the same unchanging root). A
+  // NEGATIVE result (not-a-repo) keeps the short TTL so a directory that is
+  // later `git init`'d is still discovered. `clearGitMetaCache()` is the escape
+  // hatch for the rare repo-deleted / worktree-moved case.
+  if (cached && isMetaCacheEntryFresh(cached, now, GIT_META_CACHE_TTL)) {
     return cached.value
   }
 
@@ -975,6 +1000,21 @@ export async function getGitRepoMeta(cwd: string): Promise<GitRepoMeta> {
 }
 
 /**
+ * Drop the permanently-cached repo meta (A1). Call when a repo could have been
+ * deleted / re-init'd / its worktree moved — the rare cases where the otherwise-
+ * immutable cwd→repoRoot mapping can change. With no argument, clears all.
+ */
+export function clearGitMetaCache(cwd?: string): void {
+  if (cwd) {
+    gitMetaCache.delete(resolve(cwd))
+    gitMetaInFlight.delete(resolve(cwd))
+  } else {
+    gitMetaCache.clear()
+    gitMetaInFlight.clear()
+  }
+}
+
+/**
  * Parse the Git repository root directory corresponding to the specified path.
  * Use getGitRepoMeta's cache to avoid repeated execution of git commands.
  * If it is not a Git repository, the original path is returned.
@@ -1010,6 +1050,43 @@ export async function detectSuperproject(cwd: string, gitExecutable: string): Pr
   } catch {
     superprojectCache.set(normalizedCwd, { value: null, at: Date.now() })
     return null
+  }
+}
+
+/**
+ * List the gitlink (mode `160000`) paths recorded in a repo's index — the
+ * git-AUTHORITATIVE set of nested repos, INCLUDING ones the repo never declared
+ * in `.gitmodules`. `git submodule status` is blind to those (it errors with
+ * "no submodule mapping found in .gitmodules"); `git ls-files -s` reads the
+ * index directly and is not. Paths are relative to `repoRoot`, forward-slash
+ * normalized (see {@link parseGitlinkPathsFromLsFilesZ}).
+ *
+ * Cost: exactly ONE git process. This is deliberately NOT a fork-storm — the
+ * old `submodule status --recursive` it complements forked ~15 shell helpers
+ * per call; `ls-files -s` is a single non-shell process. The snapshot service
+ * folds the result into its no-TTL cache, so this re-runs only when the
+ * structural capture itself does (a `.gitmodules` token change or a watcher
+ * fan-out), never on the cache-hit path. Failure (e.g. a transient git error
+ * or an output larger than {@link MAX_DIFF_OUTPUT}) degrades gracefully to `[]`
+ * — discovery falls back to `.gitmodules`-only, exactly today's behavior.
+ */
+export async function listGitlinkRelPaths(repoRoot: string, gitExecutable: string): Promise<string[]> {
+  const normalizedRoot = resolve(repoRoot)
+  try {
+    const { stdout } = await execFileAsync(
+      gitExecutable,
+      ['ls-files', '-s', '-z'],
+      { cwd: repoRoot, timeout: EXEC_TIMEOUT, env: getExecEnv(), maxBuffer: MAX_DIFF_OUTPUT },
+      {
+        repoKey: normalizedRoot,
+        priority: 'normal',
+        dedupeKey: `repo:gitlinks:${normalizedRoot}`,
+        label: 'git ls-files -s -z (gitlinks)'
+      }
+    )
+    return parseGitlinkPathsFromLsFilesZ(typeof stdout === 'string' ? stdout : stdout.toString('utf-8'))
+  } catch {
+    return []
   }
 }
 
@@ -1111,7 +1188,11 @@ export async function getGitBranchAndStatus(
       {
         cwd: meta.repoRoot,
         timeout: EXEC_TIMEOUT,
-        env: getExecEnv(),
+        // Read-only: terminal git-status polling must NOT take .git/index.lock
+        // and rewrite the index, or the GitStateMirror watcher observes the
+        // index write, recomputes, and invalidates the (warmed) Git Diff cache
+        // — a feedback loop that defeats the warm-on-entry fast path.
+        env: getReadonlyExecEnv(),
         maxBuffer: MAX_DIFF_OUTPUT
       },
       {
@@ -1144,7 +1225,9 @@ export async function getGitStatusSummary(cwd: string): Promise<TerminalGitStatu
       {
         cwd,
         timeout: EXEC_TIMEOUT,
-        env: getExecEnv(),
+        // Read-only (GIT_OPTIONAL_LOCKS=0): see getGitBranchAndStatus — avoid
+        // the index-rewrite → watcher → diff-cache-invalidation feedback loop.
+        env: getReadonlyExecEnv(),
         maxBuffer: MAX_DIFF_OUTPUT
       },
       {
@@ -1527,7 +1610,7 @@ async function getGitDiffNameStatus(
   const { stdout } = await execFileAsync(gitExecutable, args, {
     cwd,
     timeout: EXEC_TIMEOUT,
-    env: getExecEnv(),
+    env: getReadonlyExecEnv(),
     maxBuffer: MAX_DIFF_OUTPUT
   }, meta)
   return typeof stdout === 'string' ? stdout : stdout.toString('utf-8')
@@ -1545,7 +1628,7 @@ async function getGitDiffNumstat(
   const { stdout } = await execFileAsync(gitExecutable, args, {
     cwd,
     timeout: EXEC_TIMEOUT,
-    env: getExecEnv(),
+    env: getReadonlyExecEnv(),
     maxBuffer: MAX_DIFF_OUTPUT
   }, meta)
   return typeof stdout === 'string' ? stdout : stdout.toString('utf-8')
@@ -1556,18 +1639,21 @@ async function getGitStatusPorcelainV2(
   gitExecutable: string,
   meta?: GitTaskMeta
 ): Promise<string> {
-  const { stdout } = await execFileAsync(gitExecutable, [
-    '-c',
-    'core.quotepath=false',
-    'status',
-    '--porcelain=2',
-    '-z',
-    '--find-renames=50',
-    '--untracked-files=all'
-  ], {
+  // kar-qemu Git Diff optimization #2: `--ignore-submodules=dirty` stops the
+  // superproject status from recursively walking submodule working trees (the
+  // dominant cost on large nested-submodule repos). Submodule commit-pointer
+  // changes are still reported (the only signal filterMeaninglessSubmoduleEntries
+  // keeps), and each submodule's own changes still come from its dedicated
+  // per-submodule getSingleRepoDiff pass — so the diff OUTPUT is unchanged.
+  const { stdout } = await execFileAsync(gitExecutable, buildGitStatusPorcelainArgs({
+    z: true,
+    findRenames: 50,
+    untracked: 'all',
+    ignoreSubmodules: 'dirty'
+  }), {
     cwd,
     timeout: EXEC_TIMEOUT,
-    env: getExecEnv(),
+    env: getReadonlyExecEnv(),
     maxBuffer: MAX_DIFF_OUTPUT
   }, meta)
   return typeof stdout === 'string' ? stdout : stdout.toString('utf-8')
@@ -1875,9 +1961,17 @@ async function getSingleRepoDiff(
       }
     }
 
+    // Spawn reduction: `git diff --numstat` only yields stats for tracked
+    // unstaged / staged changes. If the porcelain status shows none of a
+    // given kind, that numstat pass is pure overhead — skip the spawn. On the
+    // common "open Diff on a clean repo" path this removes BOTH numstat
+    // spawns; an untracked-only repo also skips both; each spawn skipped is
+    // one fewer EDR-taxed process on the hot path.
+    const hasUnstaged = parsedFiles.some((file) => file.changeType === 'unstaged')
+    const hasStaged = parsedFiles.some((file) => file.changeType === 'staged')
     const [unstagedNumstatResult, stagedNumstatResult] = await Promise.allSettled([
-      getGitDiffNumstat(repoRoot, gitExecutable, false, diffMeta),
-      getGitDiffNumstat(repoRoot, gitExecutable, true, diffMeta)
+      hasUnstaged ? getGitDiffNumstat(repoRoot, gitExecutable, false, diffMeta) : Promise.resolve(''),
+      hasStaged ? getGitDiffNumstat(repoRoot, gitExecutable, true, diffMeta) : Promise.resolve('')
     ])
 
     if (unstagedNumstatResult.status === 'rejected') {
@@ -1936,7 +2030,16 @@ export async function getGitDiff(cwd: string, options?: GitDiffLoadOptions): Pro
   // main-process non-IPC callers.
   wireGitDiffCacheInvalidatorOnce()
 
-  const cacheKey = getGitDiffRequestKey(cwd, options)
+  // Key the request cache by the RESOLVED repo root, not the caller's cwd.
+  // getGitDiff(<subdir>) resolves up to the repo root and returns the WHOLE-repo
+  // diff, so a subdir call and a root call yield the same result and MUST share
+  // one cache key — the same key the watcher-driven invalidation clears
+  // (invalidateGitDiffCache normalises the mutated path to the repo root). Keying
+  // by the raw subdir cwd left a subdir-entry cache that a root-level edit never
+  // invalidated, so a subdir-entry diff went stale (GDS-15). getGitRepoMeta caches
+  // a positive repoRoot permanently, so this adds no git spawn on the hot path.
+  const meta = await getGitRepoMeta(cwd)
+  const cacheKey = getGitDiffRequestKey(meta.repoRoot || cwd, options)
   const scope = options?.scope === 'root-only' ? 'root-only' : 'full'
   const force = Boolean(options?.force)
   return getGitDiffRequestCacheController().get(cacheKey, {
@@ -1990,17 +2093,23 @@ async function loadGitDiff(cwd: string, options?: GitDiffLoadOptions): Promise<G
     const loadScope = options?.scope === 'root-only' ? 'root-only' : 'full'
     const force = options?.force === true
     // Phase 1 of the lesson #13 follow-up: discovery now goes through the
-    // snapshot service. The service owns ".gitmodules + git submodule
-    // status + getGitRepoMeta validation" as a single atomic structural
-    // answer. We pull the legacy `GitSubmoduleInfo[]` shape from the
-    // snapshot for downstream code (which still expects that shape) until
-    // History / Editor scope / Quick Open are migrated in subsequent
-    // phases. The `force` flag from the request flows into the snapshot
-    // capture too — when the user explicitly bypasses the diff request
-    // cache (subpage entry, etc.), they also want a fresh structural
-    // snapshot, not a 5-second-old one.
+    // snapshot service. The service owns the structural answer (which
+    // submodules exist, recursively) as a single fs-derived, fingerprinted
+    // model. We pull the legacy `GitSubmoduleInfo[]` shape from the snapshot
+    // for downstream code (which still expects that shape) until History /
+    // Editor scope / Quick Open are migrated in subsequent phases.
+    //
+    // Deliberately do NOT forward the request's `force` flag into the
+    // snapshot. `force` is about diff *content* freshness (the user re-opened
+    // the page and wants the latest file changes); repo *structure* is a
+    // different axis that the snapshot validates via its `.gitmodules` token +
+    // watcher invalidation. Forcing here used to re-run structural discovery
+    // on BOTH the root-only and full phases of a single open — twice per
+    // entry — which on EDR-throttled Windows dominated the open time. Letting
+    // both phases reuse one cached structural capture is the whole point of
+    // the no-TTL snapshot cache.
     const [snapshot, superprojectRoot] = await Promise.all([
-      gitRepositorySnapshotService.getSnapshot(repoRoot, { force: options?.force === true }),
+      gitRepositorySnapshotService.getSnapshot(repoRoot),
       detectSuperproject(repoRoot, gitExecutable)
     ])
     const submodules = snapshotToLegacySubmoduleInfos(snapshot)
@@ -2119,7 +2228,8 @@ async function loadGitDiff(cwd: string, options?: GitDiffLoadOptions): Promise<G
 export async function getGitHistory(
   cwd: string,
   limit = 50,
-  skip = 0
+  skip = 0,
+  branchOid?: string
 ): Promise<GitHistoryResult> {
   // Use getGitRepoMeta (single git process) for install + repo + root checks
   const repoMeta = await getGitRepoMeta(cwd)
@@ -2144,9 +2254,36 @@ export async function getGitHistory(
     }
   }
   const gitExecutable = repoMeta.gitExecutable
+  const repoRoot = repoMeta.repoRoot
 
+  // L8 History list cache (prewarm decision ⑦): key resolve(cwd)::branchOid::
+  // limit::skip. A new commit moves branchOid (supplied by main from the
+  // GitStateMirror snapshot), structurally invalidating the page without an
+  // extra spawn. Only SUCCESSFUL loads are cached (cachedHistoryRequest skips
+  // failures so a transient git error never pins the 30 min entry).
+  return cachedHistoryRequest(
+    getHistoryListCacheController(),
+    buildHistoryListCacheKey(cwd, branchOid, limit, skip),
+    () => loadGitHistoryUncached(cwd, repoRoot, gitExecutable, limit, skip),
+    {
+      onCacheHit: (ageMs) => performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_HISTORY_LIST_CACHE_HIT, {
+        cwd: resolve(cwd), branchOid: branchOid ?? null, limit, skip, ageMs
+      }),
+      onMiss: () => performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_HISTORY_LIST_CACHE_MISS, {
+        cwd: resolve(cwd), branchOid: branchOid ?? null, limit, skip
+      })
+    }
+  )
+}
+
+async function loadGitHistoryUncached(
+  cwd: string,
+  repoRoot: string,
+  gitExecutable: string,
+  limit: number,
+  skip: number
+): Promise<GitHistoryResult> {
   try {
-    const repoRoot = repoMeta.repoRoot
     const meta: GitTaskMeta = { repoKey: repoRoot, priority: 'high' }
 
     const format = [
@@ -2269,8 +2406,12 @@ export async function getGitHistoryDiff(
     }
   }
 
-  const repoCheck = await checkGitRepository(cwd, gitExecutable)
-  if (!repoCheck.isRepo) {
+  // A1 reuse: getGitRepoMeta already folds is-inside-work-tree + show-toplevel +
+  // git-dir into ONE permanently-cached spawn and returns isRepo, so the separate
+  // (uncached) checkGitRepository `rev-parse --is-inside-work-tree` was redundant.
+  // The downstream repo-root resolution reads the same cached meta — no re-spawn.
+  const repoMeta = await getGitRepoMeta(cwd)
+  if (!repoMeta.isRepo) {
     return {
       success: false,
       cwd,
@@ -2280,11 +2421,11 @@ export async function getGitHistoryDiff(
       head: options.head,
       patch: '',
       files: [],
-      error: repoCheck.error || 'The current directory is not a Git repository.'
+      error: 'The current directory is not a Git repository.'
     }
   }
 
-  const { base, head, filePath, hideWhitespace = false, includeFiles = true } = options
+  const { base, head } = options
   if (!base || !head) {
     return {
       success: false,
@@ -2299,6 +2440,30 @@ export async function getGitHistoryDiff(
     }
   }
 
+  // L9 commit-diff cache (prewarm decision ⑦): key resolve(cwd)::<stable options>.
+  // A committed diff is IMMUTABLE, so this only evicts on capacity (24 h TTL +
+  // FIFO past 128 entries) and never goes stale. Only successful loads cache.
+  return cachedHistoryRequest(
+    getHistoryCommitDiffCacheController(),
+    buildHistoryCommitDiffCacheKey(cwd, options),
+    () => loadGitHistoryDiffUncached(cwd, gitExecutable, options),
+    {
+      onCacheHit: (ageMs) => performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_HISTORY_COMMIT_DIFF_CACHE_HIT, {
+        cwd: resolve(cwd), base, head, ageMs
+      }),
+      onMiss: () => performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_HISTORY_COMMIT_DIFF_CACHE_MISS, {
+        cwd: resolve(cwd), base, head
+      })
+    }
+  )
+}
+
+async function loadGitHistoryDiffUncached(
+  cwd: string,
+  gitExecutable: string,
+  options: GitHistoryDiffOptions
+): Promise<GitHistoryDiffResult> {
+  const { base, head, filePath, hideWhitespace = false, includeFiles = true } = options
   try {
     const repoRoot = (await getGitRoot(cwd, gitExecutable)) || cwd
     const meta: GitTaskMeta = { repoKey: repoRoot, priority: 'high' }
@@ -2358,6 +2523,91 @@ export async function getGitHistoryDiff(
       error: `Failed to load Git History diff: ${message}`
     }
   }
+}
+
+function parsedDiffStatusToCode(s: ParsedDiffStatus): GitStatusCode {
+  return (s === 'M' || s === 'A' || s === 'D' || s === 'R' || s === 'C') ? s : 'M'
+}
+
+/**
+ * Git-op aggregation A2: warm the L9 commit-diff cache for the most-recent
+ * `limit` commits in a SINGLE `git log --raw --numstat` spawn, instead of the
+ * previous N×2 per-commit `git diff --name-status` + `git diff --numstat`
+ * spawns (the dominant History-prewarm EDR tax). The per-commit results are
+ * keyed identically to what the renderer's single-commit click produces
+ * (`base = parents[0] ?? EMPTY_TREE_HASH`, `head = sha`, `includeFiles:true`,
+ * `hideWhitespace:false`), so a later click is a pure L9 cache HIT.
+ *
+ * Best-effort: any failure returns `{ warmed: 0 }` and the renderer falls back
+ * to a per-commit `getGitHistoryDiff` (cache miss). `patch` is left empty (the
+ * file-list view does not need it; per-file patches load lazily on click).
+ */
+export async function prewarmHistoryCommitDiffs(
+  cwd: string,
+  branchOid: string | undefined,
+  limit: number
+): Promise<{ warmed: number }> {
+  const meta = await getGitRepoMeta(cwd)
+  if (!meta.gitExecutable || !meta.isRepo || !meta.repoRoot) return { warmed: 0 }
+  const ref = branchOid && branchOid !== '(initial)' ? branchOid : 'HEAD'
+  const n = Math.max(1, Math.min(limit, 100))
+  let output: string
+  try {
+    const { stdout } = await execFileAsync(
+      meta.gitExecutable,
+      ['-c', 'core.quotepath=false', 'log', '--raw', '--numstat', '--format=%x1e%H%x1f%P', '-n', String(n), ref],
+      { cwd: meta.repoRoot, timeout: EXEC_TIMEOUT, env: getExecEnv(), maxBuffer: MAX_DIFF_OUTPUT },
+      {
+        // Low-priority background lane so this never blocks a foreground enter.
+        repoKey: `${meta.repoRoot}::history-precompute`,
+        priority: 'low',
+        dedupeKey: `history-batch:${resolve(cwd)}:${branchOid ?? 'nohead'}:${n}`,
+        label: 'git log --raw --numstat (history prewarm batch)'
+      }
+    )
+    output = typeof stdout === 'string' ? stdout : stdout.toString('utf-8')
+  } catch {
+    return { warmed: 0 }
+  }
+
+  const commits = parseGitLogRawNumstat(output)
+  const controller = getHistoryCommitDiffCacheController()
+  let warmed = 0
+  for (const commit of commits) {
+    const base = commit.parents[0] ?? EMPTY_TREE_HASH
+    const head = commit.sha
+    const files: GitHistoryFile[] = commit.files.map((f) => {
+      const isImage = isSupportedImageFile(f.filename) || Boolean(f.originalFilename && isSupportedImageFile(f.originalFilename))
+      const isSvg = f.filename.toLowerCase().endsWith('.svg') || Boolean(f.originalFilename && f.originalFilename.toLowerCase().endsWith('.svg'))
+      const isPdf = isPdfFilename(f.filename) || isPdfFilename(f.originalFilename)
+      const isEpub = isEpubFilename(f.filename) || isEpubFilename(f.originalFilename)
+      return {
+        filename: f.filename,
+        originalFilename: f.originalFilename,
+        status: parsedDiffStatusToCode(f.status),
+        additions: f.additions,
+        deletions: f.deletions,
+        ...(isImage ? { isImage: true } : {}),
+        ...(isSvg ? { isSvg: true } : {}),
+        ...(isPdf ? { isPdf: true } : {}),
+        ...(isEpub ? { isEpub: true } : {})
+      }
+    })
+    const options = { base, head, includeFiles: true, hideWhitespace: false }
+    const result: GitHistoryDiffResult = {
+      success: true,
+      cwd: meta.repoRoot,
+      isGitRepo: true,
+      gitInstalled: true,
+      base,
+      head,
+      patch: '',
+      files
+    }
+    controller.prime(buildHistoryCommitDiffCacheKey(cwd, options), result)
+    warmed += 1
+  }
+  return { warmed }
 }
 
 type GitReaderResult = {
@@ -2473,40 +2723,109 @@ async function readGitFileByRef(
   gitExecutable: string,
   ref: string,
   filename?: string,
-  options?: GitLargeFilePromptOptions
+  options?: GitLargeFilePromptOptions,
+  meta?: GitTaskMeta
 ): Promise<GitReaderResult> {
   const isImage = filename ? isSupportedImageFile(filename) : false
   const isSvg = filename ? filename.toLowerCase().endsWith('.svg') : false
   const isPdf = isPdfFilename(filename)
   const isEpub = isEpubFilename(filename)
 
-  let size: number | null = null
-  try {
-    const sizeResult = await execFileAsync(gitExecutable, ['cat-file', '-s', ref], {
-      cwd,
-      timeout: EXEC_TIMEOUT,
-      env: getExecEnv()
-    })
-    const sizeText = typeof sizeResult.stdout === 'string' ? sizeResult.stdout : sizeResult.stdout.toString('utf-8')
-    const parsedSize = parseInt(sizeText.trim(), 10)
-    if (Number.isFinite(parsedSize)) {
-      size = parsedSize
-    }
-    if (size !== null && requiresGitLargeFileConfirmation(size, options)) {
-      return buildGitLargeFileReaderResult(size)
-    }
-  } catch (error) {
-    throw new Error(`Failed to read Git file metadata: ${String(error)}`)
+  // Carry the caller's scheduling priority (foreground click = 'high',
+  // precompute = 'low') onto BOTH cat-file spawns. Scope the dedupe key BY
+  // priority: same-priority concurrent reads of one blob still coalesce, but a
+  // foreground 'high' read never dedupes onto a QUEUED 'low' precompute task
+  // (which would silently inherit its low priority and re-introduce the
+  // inversion we are fixing).
+  const fetchPriority = meta?.priority ?? 'normal'
+  const refKey = `${fetchPriority}:${resolve(cwd)}:${ref}`
+  const sizeMeta: GitTaskMeta = {
+    repoKey: meta?.repoKey ?? cwd,
+    priority: meta?.priority ?? 'normal',
+    kind: 'git',
+    dedupeKey: `content:size:${refKey}`,
+    label: 'git cat-file -s'
+  }
+  const blobMeta: GitTaskMeta = {
+    repoKey: meta?.repoKey ?? cwd,
+    priority: meta?.priority ?? 'normal',
+    kind: 'git',
+    dedupeKey: `content:blob:${refKey}`,
+    label: 'git cat-file blob'
   }
 
-  const blobResult = await execFileAsync(gitExecutable, ['cat-file', 'blob', ref], {
-    cwd,
-    timeout: EXEC_TIMEOUT,
-    env: getExecEnv(),
-    maxBuffer: gitLargeFileReadMaxBuffer(size),
-    encoding: 'buffer' as BufferEncoding
-  })
-  const buffer = execStdoutToBuffer(blobResult.stdout)
+  let size: number | null = null
+  let buffer: Buffer = Buffer.alloc(0)
+  let resolvedByBatch = false
+  // The MUTABLE index (`:<path>` / `:0:<path>` …) must NOT be served by the
+  // long-running batch: a `git cat-file --batch` process caches the index in
+  // memory at first access, so after a `git add` / stage / partial-stage
+  // changes the index, the batch keeps returning the STALE startup index blob
+  // (confirmed by repro). That surfaced as staged diffs showing HEAD/base
+  // content on both sides (GDS-22/33). Only IMMUTABLE objects (HEAD:path,
+  // <commit>:path, blob oids) are safe for the batch; index refs fall through
+  // to the per-call path below, which re-reads the current index each time.
+  const mutableIndexRef = isMutableIndexRef(ref)
+  // Phase A: long-running `git cat-file --batch` (one process per repo) — no
+  // per-read process spawn, so the EDR per-spawn tax on file-content reads
+  // (~1.3s/file) collapses to a pipe round-trip. Enabled only on win32 + darwin
+  // (gitCatFileBatch.isSupportedPlatform()); other platforms (Linux) skip
+  // straight to the per-call path below, where native spawns are cheap.
+  if (gitCatFileBatch.isSupportedPlatform() && !mutableIndexRef) {
+    try {
+      const batch = await gitCatFileBatch.readObject(cwd, gitExecutable, ref, options)
+      if (batch.largeFile) {
+        return buildGitLargeFileReaderResult(batch.sizeBytes)
+      }
+      if (!batch.found) {
+        throw new Error(`cat-file --batch reported missing object for ref ${ref}`)
+      }
+      size = batch.sizeBytes
+      buffer = batch.data
+      resolvedByBatch = true
+    } catch (batchError) {
+      // Robust fallback: a batch hiccup (process death, protocol desync) must
+      // never break the diff — fall through to the per-call cat-file path,
+      // degrading only to the old, spawn-taxed behavior.
+      // Diagnostic breadcrumb: the silent-perf-regression signal. If a user
+      // reports "Git Diff slow again on Windows", a burst of these in the trace
+      // means the fast path is degrading to per-call (spawn-taxed) reads.
+      performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_CATFILE_BATCH_FALLBACK, {
+        repoRoot: cwd,
+        platform: process.platform,
+        ...performanceTrace.summarizeText('reason', String((batchError as Error)?.message ?? batchError))
+      })
+    }
+  }
+  if (!resolvedByBatch) {
+    // Per-call cat-file path: the pre-Phase-A behavior. Used on platforms where
+    // the batch is not enabled (Linux), or when the batch read failed above.
+    try {
+      const sizeResult = await execFileAsync(gitExecutable, ['cat-file', '-s', ref], {
+        cwd,
+        timeout: EXEC_TIMEOUT,
+        env: getReadonlyExecEnv()
+      }, sizeMeta)
+      const sizeText = typeof sizeResult.stdout === 'string' ? sizeResult.stdout : sizeResult.stdout.toString('utf-8')
+      const parsedSize = parseInt(sizeText.trim(), 10)
+      if (Number.isFinite(parsedSize)) {
+        size = parsedSize
+      }
+      if (size !== null && requiresGitLargeFileConfirmation(size, options)) {
+        return buildGitLargeFileReaderResult(size)
+      }
+    } catch (error) {
+      throw new Error(`Failed to read Git file metadata: ${String(error)}`)
+    }
+    const blobResult = await execFileAsync(gitExecutable, ['cat-file', 'blob', ref], {
+      cwd,
+      timeout: EXEC_TIMEOUT,
+      env: getReadonlyExecEnv(),
+      maxBuffer: gitLargeFileReadMaxBuffer(size),
+      encoding: 'buffer' as BufferEncoding
+    }, blobMeta)
+    buffer = execStdoutToBuffer(blobResult.stdout)
+  }
 
   if (isSvg) {
     const textContent = buffer.toString('utf-8')
@@ -2544,9 +2863,10 @@ async function readGitHeadFile(
   gitExecutable: string,
   gitPath: string,
   filename?: string,
-  options?: GitLargeFilePromptOptions
+  options?: GitLargeFilePromptOptions,
+  meta?: GitTaskMeta
 ): Promise<GitReaderResult> {
-  return readGitFileByRef(cwd, gitExecutable, `HEAD:${gitPath}`, filename, options)
+  return readGitFileByRef(cwd, gitExecutable, `HEAD:${gitPath}`, filename, options, meta)
 }
 
 async function readGitIndexFile(
@@ -2554,9 +2874,10 @@ async function readGitIndexFile(
   gitExecutable: string,
   gitPath: string,
   filename?: string,
-  options?: GitLargeFilePromptOptions
+  options?: GitLargeFilePromptOptions,
+  meta?: GitTaskMeta
 ): Promise<GitReaderResult> {
-  return readGitFileByRef(cwd, gitExecutable, `:${gitPath}`, filename, options)
+  return readGitFileByRef(cwd, gitExecutable, `:${gitPath}`, filename, options, meta)
 }
 
 async function readGitRevisionFile(
@@ -2565,9 +2886,10 @@ async function readGitRevisionFile(
   revision: string,
   gitPath: string,
   filename?: string,
-  options?: GitLargeFilePromptOptions
+  options?: GitLargeFilePromptOptions,
+  meta?: GitTaskMeta
 ): Promise<GitReaderResult> {
-  return readGitFileByRef(cwd, gitExecutable, `${revision}:${gitPath}`, filename, options)
+  return readGitFileByRef(cwd, gitExecutable, `${revision}:${gitPath}`, filename, options, meta)
 }
 
 export async function getGitHistoryFileContent(
@@ -2591,8 +2913,10 @@ export async function getGitHistoryFileContent(
     }
   }
 
-  const repoCheck = await checkGitRepository(cwd, gitExecutable)
-  if (!repoCheck.isRepo) {
+  // A1 reuse (see getGitHistoryDiff): one cached getGitRepoMeta instead of a
+  // separate uncached checkGitRepository spawn.
+  const repoMeta = await getGitRepoMeta(cwd)
+  if (!repoMeta.isRepo) {
     return {
       success: false,
       cwd,
@@ -2602,11 +2926,11 @@ export async function getGitHistoryFileContent(
       originalContent: '',
       modifiedContent: '',
       isBinary: false,
-      error: repoCheck.error || 'The current directory is not a Git repository.'
+      error: 'The current directory is not a Git repository.'
     }
   }
 
-  const { base, head, file } = options
+  const { base, head } = options
   if (!base || !head) {
     return {
       success: false,
@@ -2621,6 +2945,24 @@ export async function getGitHistoryFileContent(
     }
   }
 
+  // History file-content cache (immutable, on-demand — decision ⑦; NOT
+  // prewarmed). Key resolve(cwd)::<stable options>. Only successful loads cache;
+  // the large-file-confirmation / invalid-path {success:false} results pass
+  // through verbatim and are never pinned.
+  return cachedHistoryRequest(
+    getHistoryFileContentCacheController(),
+    buildHistoryFileContentCacheKey(cwd, options),
+    () => loadGitHistoryFileContentUncached(cwd, gitExecutable, options)
+  )
+}
+
+async function loadGitHistoryFileContentUncached(
+  cwd: string,
+  gitExecutable: string,
+  options: GitHistoryFileContentOptions
+): Promise<GitHistoryFileContentResult> {
+  const filename = options.file.filename
+  const { base, head, file } = options
   const repoRoot = (await getGitRoot(cwd, gitExecutable)) || cwd
   const originalTarget = file.originalFilename || filename
   const isImage = isSupportedImageFile(filename) || isSupportedImageFile(originalTarget)
@@ -2859,9 +3201,12 @@ async function getSubmoduleEntryContent(
             cwd: subFullPath, timeout: EXEC_TIMEOUT, env: getExecEnv()
           })
           modifiedHash = (typeof headResult.stdout === 'string' ? headResult.stdout : headResult.stdout.toString('utf-8')).trim()
-          // Check if submodule working tree is dirty
+          // Check if submodule working tree is dirty. Read-only
+          // (GIT_OPTIONAL_LOCKS=0): this `git status` must not take
+          // .git/index.lock and rewrite the submodule index, or the mirror
+          // watcher observes the write and invalidates the diff cache.
           const statusResult = await execFileAsync(gitExecutable, ['status', '--porcelain'], {
-            cwd: subFullPath, timeout: EXEC_TIMEOUT, env: getExecEnv()
+            cwd: subFullPath, timeout: EXEC_TIMEOUT, env: getReadonlyExecEnv()
           })
           const statusOut = typeof statusResult.stdout === 'string' ? statusResult.stdout : statusResult.stdout.toString('utf-8')
           if (statusOut.trim()) {
@@ -2910,16 +3255,25 @@ export async function getGitFileContent(
   }
 
   const effectiveCwd = overrideRepoRoot || cwd
-  const repoCheck = await checkGitRepository(effectiveCwd, gitExecutable)
-  if (!repoCheck.isRepo) {
-    return {
-      success: false,
-      cwd: effectiveCwd,
-      filename: file.filename,
-      originalContent: '',
-      modifiedContent: '',
-      isBinary: false,
-      error: repoCheck.error || 'The current directory is not a Git repository.'
+  // When the caller already resolved the repo root (the Diff list path always
+  // passes `overrideRepoRoot`), trust it and skip the
+  // `git rev-parse --is-inside-work-tree` validation spawn. On EDR-throttled
+  // Windows every avoided process is ~1-3s; a bad root simply makes the
+  // cat-file below fail with a clear error, so the check is redundant.
+  if (!overrideRepoRoot) {
+    // A1 reuse: cached getGitRepoMeta (isRepo) instead of a separate uncached
+    // checkGitRepository spawn; getGitRoot below then reads the same cache.
+    const repoMeta = await getGitRepoMeta(effectiveCwd)
+    if (!repoMeta.isRepo) {
+      return {
+        success: false,
+        cwd: effectiveCwd,
+        filename: file.filename,
+        originalContent: '',
+        modifiedContent: '',
+        isBinary: false,
+        error: 'The current directory is not a Git repository.'
+      }
     }
   }
 
@@ -2927,6 +3281,12 @@ export async function getGitFileContent(
   const filename = file.filename
   const changeType: GitChangeType = file.changeType || 'unstaged'
   const originalTarget = file.status === 'R' && file.originalFilename ? file.originalFilename : filename
+  // Scheduling hint for the cat-file reads below. Foreground clicks default to
+  // 'high' so they preempt the background precompute (which passes 'low');
+  // without this, a click queues FIFO behind the precompute burst and waits
+  // tens of seconds on EDR-throttled hosts (priority inversion).
+  const fetchPriority: GitTaskPriority = options?.priority ?? 'high'
+  const readMeta: GitTaskMeta = { priority: fetchPriority, repoKey: repoRoot, kind: 'git' }
 
   // Handle submodule entries: show Subproject commit hash diff
   if (file.isSubmoduleEntry) {
@@ -2977,7 +3337,7 @@ export async function getGitFileContent(
             error: 'Invalid file path.'
           }
         }
-        const originalResult = await readGitHeadFile(repoRoot, gitExecutable, gitPath, originalTarget, options)
+        const originalResult = await readGitHeadFile(repoRoot, gitExecutable, gitPath, originalTarget, options, readMeta)
         if (isGitLargeFilePromptResult(originalResult)) {
           return buildGitLargeFileContentResult(repoRoot, filename, originalResult.sizeBytes ?? 0)
         }
@@ -3001,7 +3361,7 @@ export async function getGitFileContent(
             error: 'Invalid file path.'
           }
         }
-        const modifiedResult = await readGitIndexFile(repoRoot, gitExecutable, gitPath, filename, options)
+        const modifiedResult = await readGitIndexFile(repoRoot, gitExecutable, gitPath, filename, options, readMeta)
         if (isGitLargeFilePromptResult(modifiedResult)) {
           return buildGitLargeFileContentResult(repoRoot, filename, modifiedResult.sizeBytes ?? 0)
         }
@@ -3025,7 +3385,7 @@ export async function getGitFileContent(
             error: 'Invalid file path.'
           }
         }
-        const originalResult = await readGitIndexFile(repoRoot, gitExecutable, gitPath, originalTarget, options)
+        const originalResult = await readGitIndexFile(repoRoot, gitExecutable, gitPath, originalTarget, options, readMeta)
         if (isGitLargeFilePromptResult(originalResult)) {
           return buildGitLargeFileContentResult(repoRoot, filename, originalResult.sizeBytes ?? 0)
         }

@@ -57,10 +57,17 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import List, Optional
+
+# Live-progress heartbeat: while a runner produces NO output for this many
+# seconds, the orchestrator emits a "still running" pulse so a hung / silently-
+# stuck runner is visible in real time (instead of looking dead). Chatty runners
+# never trigger it; it only fires during genuine output gaps.
+HEARTBEAT_SEC = 30
 
 # Force UTF-8 output so runner logs containing Unicode characters (e.g. ANSI
 # escape sequences or non-ASCII identifiers) do not crash the orchestrator on
@@ -86,11 +93,13 @@ SCRIPTS: List[str] = [
     "test/autotest/run-git-diff-identical-blob-autotest.sh",
     "test/autotest/run-git-diff-recursive-submodules-autotest.sh",
     "test/autotest/run-git-diff-staleness-and-submodule-autotest.sh",
+    "test/autotest/run-git-diff-nested-gitlink-autotest.sh",
     "test/autotest/run-git-large-file-confirmation-autotest.sh",
     "test/autotest/run-git-state-mirror-quit-autotest.sh",
     "test/autotest/run-git-state-mirror-latency-autotest.sh",
     "test/autotest/run-git-diff-subdir-autotest.sh",
     "test/autotest/run-git-diff-submodules-autotest.sh",
+    "test/autotest/run-repo-prewarm-autotest.sh",
     "test/autotest/run-git-history-multi-terminal-scope-autotest.sh",
     "test/autotest/run-git-nested-submodules-autotest.sh",
     "test/autotest/run-global-search-autotest.sh",
@@ -159,14 +168,42 @@ UPDATE_E2E_SCRIPTS: List["tuple[str, str]"] = [
 ]
 
 PER_SCRIPT_TIMEOUT_SEC = 180
-# Per-script timeout overrides for runners whose end-to-end flow legitimately
-# exceeds the 180s default. Add entries here (not by patching the runner) so
-# the orchestrator's authority remains the single source of truth.
+
+# ---------------------------------------------------------------------------
+# Per-runner time budget (the "no test case over 5 minutes" rule).
+#
+# Every runner MUST complete within RUNNER_BUDGET_SEC. This is a DESIGN ceiling,
+# not just a timeout: a suite that needs longer is doing too much in one process
+# and must be SPLIT into multiple sub-5-minute runners (one logical group each),
+# never given a bigger timeout. The orchestrator MONITORS every runner's wall
+# time, and any runner whose elapsed time exceeds this budget is flagged
+# OVER-BUDGET in the duration audit + summary.json (`over_budget`) so it triggers
+# a split review — see the ow_full_regression_test skill § "5-minute budget".
+#
+# Note on EDR/anti-malware hosts: process spawns are taxed 1.3-12.9s, so a
+# well-designed suite can still blow the budget on such a host. The audit FLAGS
+# rather than hard-fails for this reason; the budget is enforced at AUTHORING
+# time (keep each suite small) and verified on a healthy host / CI.
+RUNNER_BUDGET_SEC = 300
+
+# Per-script timeout overrides for runners whose end-to-end flow exceeds the 180s
+# default. Add entries here (not by patching the runner) so the orchestrator's
+# authority remains the single source of truth.
+#
+# HARD RULE: a new override MUST be <= RUNNER_BUDGET_SEC (300s). Any value ABOVE
+# 300 is an OVER-BUDGET BACKLOG entry — a suite that violates the 5-minute rule
+# and is pending a SPLIT into smaller runners. Such entries are listed at startup
+# as "over-budget backlog" so they stay visible until split. Do NOT add new
+# >300s entries; split the suite instead.
 PER_SCRIPT_TIMEOUT_OVERRIDES_SEC = {
     # GitDiff staleness + submodule walks through 46 distinct GDS-* cases.
     # Git operations are slow on Windows; individual steps can exceed 15s.
     # Measured: test was at 317s during a sleep and was killed at 360s.
     "test/autotest/run-git-diff-staleness-and-submodule-autotest.sh": 600,
+    # Nested-gitlink (no .gitmodules) suite: one app session + 3 IPC calls over a
+    # tiny 1-parent + 2-gitlink fixture. Kept deliberately small/fast (NOT amended
+    # into the 600s staleness suite); the 150s in-app watchdog caps a hang.
+    "test/autotest/run-git-diff-nested-gitlink-autotest.sh": 180,
     # GitDiff click-latency suite measures multi-trial first-click vs
     # cache-warm latencies; needs more headroom than 180s allows.
     "test/autotest/run-git-diff-click-latency-autotest.sh": 300,
@@ -190,6 +227,11 @@ PER_SCRIPT_TIMEOUT_OVERRIDES_SEC = {
     # ~10-20s per failure-injection pass, 180s is far below the bottom of
     # the distribution.
     "test/autotest/run-git-state-mirror-latency-autotest.sh": 1500,
+    # Repo prewarm WIRING suite: a single app launch + ~35s dwell to let the
+    # default terminal attach and fire the prewarm trigger event, then a trace
+    # assertion. EDR-independent (the event fires before any git spawn), but the
+    # app start itself can be slow on EDR-throttled hosts — give it headroom.
+    "test/autotest/run-repo-prewarm-autotest.sh": 180,
 }
 INTER_SCRIPT_SLEEP_SEC = 2
 
@@ -204,6 +246,10 @@ class RunResult:
     elapsed_sec: float
     log_file: str
     note: str = ""
+    # True when elapsed_sec exceeded RUNNER_BUDGET_SEC (the 5-min design ceiling).
+    # Independent of pass/fail: a PASS that ran 6 min is still over budget and
+    # must be split. Surfaced in the duration audit + summary.json.
+    over_budget: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -327,6 +373,151 @@ def kill_app(app_name: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Environment pre-flight — fail fast when the installed node_modules has
+# drifted from the committed dependency spec.
+#
+# This is the structural form of the skill's self-heal "install incomplete"
+# rows: instead of discovering a stale / unpatched dependency 30 minutes into a
+# build+run cycle (a red WebGL-atlas assertion, or a runner that can't resolve
+# the Electron binary at runtime), assert the two highest-signal invariants up
+# front and abort in ~1 second with an actionable fix.
+#
+# Scope is deliberately honest: this catches THIS class of drift — the Electron
+# binary and the @xterm/addon-webgl global-monotonic patch — NOT every possible
+# dependency-integrity problem. Add a new (name, fn) row to `preflight_env_check`
+# when a future "the install must look like X" signal is discovered.
+#
+# Cross-platform by construction: pure pathlib + byte search, no shell, no
+# platform branch. Runs identically under `py` on Windows and `python3` on
+# macOS / Linux, so Windows gets the same fast-fail with zero extra wiring.
+# ---------------------------------------------------------------------------
+
+# Sentinel emitted by the global-monotonic AtlasPage version backport
+# (PR #5883) that the @xterm/addon-webgl patch applies: every page version is
+# drawn from a single ever-increasing counter via `constructor._nv`. The
+# UNPATCHED 0.18.0 bundle contains zero occurrences; the patched bundle has
+# several. If the addon is version-bumped and the patch's mechanism changes,
+# update this token to whatever marker the new patch introduces.
+WEBGL_PATCH_SENTINEL = b"_nv"
+
+
+def _check_electron_binary(repo_root: Path) -> Optional[str]:
+    """Failure detail, or None when the Electron binary is present.
+
+    `electron`'s postinstall writes path.txt (the relative path to the platform
+    binary inside dist/) and downloads dist/. pnpm's default "ignored build
+    scripts" can skip that download, leaving require('electron') unresolvable —
+    which silently breaks any runner that resolves the binary at runtime.
+    Platform-neutral: path.txt content differs per OS (Electron.app/… vs
+    electron.exe vs electron) but the "referenced file exists" check is identical.
+    """
+    electron_dir = repo_root / "node_modules" / "electron"
+    if not electron_dir.is_dir():
+        return "node_modules/electron is absent (dependencies not installed)"
+    path_txt = electron_dir / "path.txt"
+    if not path_txt.is_file():
+        return "node_modules/electron/path.txt is missing (electron postinstall did not run)"
+    try:
+        rel = path_txt.read_text(encoding="utf-8").strip()
+    except OSError as e:  # noqa: BLE001
+        return f"could not read node_modules/electron/path.txt: {e}"
+    if not rel:
+        return "node_modules/electron/path.txt is empty"
+    binary = electron_dir / "dist" / rel
+    if not binary.exists():
+        return f"electron binary missing at node_modules/electron/dist/{rel} (postinstall download skipped)"
+    return None
+
+
+def _check_webgl_patch(repo_root: Path) -> Optional[str]:
+    """Failure detail, or None when the addon-webgl patch is applied.
+
+    Only enforced while package.json still declares the @xterm/addon-webgl patch
+    under pnpm.patchedDependencies — removing the patch from the spec therefore
+    retires this invariant automatically, leaving no stale check behind.
+    """
+    pkg = repo_root / "package.json"
+    try:
+        data = json.loads(pkg.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None  # cannot read the spec — do not block on a parse error here
+    patched = (data.get("pnpm") or {}).get("patchedDependencies") or {}
+    if not any(k.startswith("@xterm/addon-webgl@") for k in patched):
+        return None  # spec no longer patches the addon — invariant retired
+    bundle = repo_root / "node_modules" / "@xterm" / "addon-webgl" / "lib" / "addon-webgl.js"
+    if not bundle.is_file():
+        return "node_modules/@xterm/addon-webgl/lib/addon-webgl.js is missing (dependency not installed)"
+    try:
+        blob = bundle.read_bytes()
+    except OSError as e:  # noqa: BLE001
+        return f"could not read the addon-webgl bundle: {e}"
+    if WEBGL_PATCH_SENTINEL not in blob:
+        return (
+            "addon-webgl bundle is UNPATCHED — the global-monotonic atlas "
+            "page-version fix is absent (this ships WebGL terminal corruption "
+            "under multi-task render load)"
+        )
+    return None
+
+
+def _check_native_modules(repo_root: Path) -> Optional[str]:
+    """Failure detail, or None when the app's compiled native module is present.
+
+    The project's own postinstall (`electron-rebuild -w node-pty,better-sqlite3`)
+    rebuilds these against Electron's ABI. If that postinstall was interrupted —
+    or never ran because an earlier dependency build aborted the install — the
+    .node is absent and every SQLite suite fails at runtime with a module-load
+    error. better_sqlite3's output path (build/Release/) is stable across
+    platforms, so a presence check is platform-neutral. Only enforced when
+    better-sqlite3 is actually installed (else the project no longer uses it).
+    """
+    installed = list(repo_root.glob("node_modules/.pnpm/better-sqlite3@*"))
+    if not installed:
+        return None  # dependency absent from this tree — nothing to assert
+    built = list(repo_root.glob(
+        "node_modules/.pnpm/better-sqlite3@*/node_modules/better-sqlite3/build/Release/better_sqlite3.node"
+    ))
+    if not built:
+        return (
+            "better_sqlite3.node is missing — the project postinstall "
+            "(electron-rebuild) did not produce the Electron-ABI native module "
+            "(SQLite suites will fail at runtime with a module-load error)"
+        )
+    return None
+
+
+def preflight_env_check(emit) -> bool:
+    """Assert the installed node_modules matches the committed dependency spec.
+
+    Returns True when healthy. On failure, emits an actionable report and
+    returns False so the caller can abort before the expensive build+run cycle.
+    """
+    invariants = [
+        ("Electron binary installed", _check_electron_binary),
+        ("WebGL addon-webgl patch applied", _check_webgl_patch),
+        ("App native module built", _check_native_modules),
+    ]
+    failures: List["tuple[str, str]"] = []
+    for name, fn in invariants:
+        detail = fn(REPO_ROOT)
+        if detail:
+            failures.append((name, detail))
+    if not failures:
+        return True
+    emit("ERROR: environment pre-flight failed — node_modules has drifted from the committed dependency spec.")
+    for name, detail in failures:
+        emit(f"  ✗ {name}: {detail}")
+    emit("")
+    emit("  Fix (reconcile node_modules to the spec, then re-run):")
+    emit("    pnpm install                              # applies pnpm.patchedDependencies")
+    emit("    node node_modules/electron/install.js     # if the Electron binary is missing")
+    emit("")
+    emit("  Bypass (only after a deliberate version bump that changed a sentinel):")
+    emit("    --skip-env-check   (or set ONWARD_SKIP_ENV_PREFLIGHT=1)")
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Optional pre-build
 # ---------------------------------------------------------------------------
 
@@ -442,12 +633,38 @@ def run_one(
             errors="replace",
         )
         assert proc.stdout is not None
+        # Heartbeat: a daemon thread that, during any gap with NO runner output
+        # >= HEARTBEAT_SEC, prints a "still running (Ns, no output for Ms)" pulse
+        # so a silently-stuck runner is visible live. The lock serializes writes
+        # so the pulse never interleaves mid-line with the streamed output.
+        io_lock = threading.Lock()
+        last_output = time.monotonic()
+        stop_hb = threading.Event()
+        stem = Path(script).stem
+
+        def heartbeat() -> None:
+            while not stop_hb.wait(HEARTBEAT_SEC):
+                now = time.monotonic()
+                silent = now - last_output
+                if silent >= HEARTBEAT_SEC:
+                    pulse = (f"  … {stem} still running "
+                             f"{now - start:.0f}s (no output for {silent:.0f}s; timeout {timeout_sec}s)\n")
+                    with io_lock:
+                        sys.stdout.write(pulse)
+                        sys.stdout.flush()
+                        summary_fh.write(pulse)
+                        summary_fh.flush()
+
+        hb_thread = threading.Thread(target=heartbeat, daemon=True)
+        hb_thread.start()
         try:
             for line in proc.stdout:
-                sys.stdout.write(line)
-                sys.stdout.flush()
-                log_fh.write(line)
-                summary_fh.write(line)
+                with io_lock:
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
+                    log_fh.write(line)
+                    summary_fh.write(line)
+                last_output = time.monotonic()
             rc = proc.wait()
         except KeyboardInterrupt:
             proc.terminate()
@@ -456,6 +673,9 @@ def run_one(
             except subprocess.TimeoutExpired:
                 proc.kill()
             raise
+        finally:
+            stop_hb.set()
+            hb_thread.join(timeout=2)
     finally:
         log_fh.close()
 
@@ -591,6 +811,13 @@ def main() -> int:
         help="Print the planned script list (post-filter) and exit.",
     )
     parser.add_argument(
+        "--skip-env-check", action="store_true",
+        help=(
+            "Skip the node_modules-vs-spec pre-flight. Use only after a "
+            "deliberate version bump that changed a checked sentinel."
+        ),
+    )
+    parser.add_argument(
         "--include-update-e2e", action="store_true",
         help=(
             "Include the update-channel E2E suites (UPDATE_E2E_SCRIPTS) in the "
@@ -616,6 +843,20 @@ def main() -> int:
     if args.repeat < 1:
         sys.stderr.write("ERROR: --repeat must be >= 1.\n")
         return 2
+
+    # Environment pre-flight: abort in ~1s if node_modules drifted from the
+    # committed spec, instead of failing 30 min into a build+run cycle. Skipped
+    # for --list (pure inspection) and when explicitly bypassed. Runs once here
+    # for both the single-run and --repeat paths (the latter spawns children
+    # that would re-check anyway, but failing before any spawn is cheaper).
+    if (
+        not args.list
+        and not args.skip_env_check
+        and os.environ.get("ONWARD_SKIP_ENV_PREFLIGHT") != "1"
+    ):
+        if not preflight_env_check(lambda m: print(m, flush=True)):
+            return 3
+
     if args.repeat > 1:
         return run_repeated(args)
 
@@ -696,10 +937,22 @@ def main() -> int:
     emit(f"App name: {app_name}")
     emit(f"App binary: {app_bin}")
     emit(f"Output dir: {out_dir}")
-    emit(f"Per-script timeout: {PER_SCRIPT_TIMEOUT_SEC}s default, inter-script sleep: {INTER_SCRIPT_SLEEP_SEC}s")
+    emit(f"Per-script timeout: {PER_SCRIPT_TIMEOUT_SEC}s default, "
+         f"5-min budget: {RUNNER_BUDGET_SEC}s, inter-script sleep: {INTER_SCRIPT_SLEEP_SEC}s")
     if PER_SCRIPT_TIMEOUT_OVERRIDES_SEC:
         emit("Per-script timeout overrides:")
         for script, timeout_sec in sorted(PER_SCRIPT_TIMEOUT_OVERRIDES_SEC.items()):
+            emit(f"  {script}: {timeout_sec}s")
+    # Surface the over-budget backlog up front: any configured override above the
+    # 5-min budget is a suite that violates the rule and is pending a SPLIT.
+    backlog = sorted(
+        ((s, t) for s, t in PER_SCRIPT_TIMEOUT_OVERRIDES_SEC.items() if t > RUNNER_BUDGET_SEC),
+        key=lambda x: x[1], reverse=True,
+    )
+    if backlog:
+        emit(f"⚠ OVER-BUDGET BACKLOG: {len(backlog)} runner(s) have a timeout above the "
+             f"{RUNNER_BUDGET_SEC}s budget and MUST be split into sub-5-min runners:")
+        for script, timeout_sec in backlog:
             emit(f"  {script}: {timeout_sec}s")
     emit(f"Bash: {bash}")
     emit(f"Node: {node}")
@@ -724,9 +977,12 @@ def main() -> int:
     interrupted = False
 
     try:
-        for script in scripts:
+        total = len(scripts)
+        for idx, script in enumerate(scripts, 1):
+            timeout_sec = PER_SCRIPT_TIMEOUT_OVERRIDES_SEC.get(script, PER_SCRIPT_TIMEOUT_SEC)
+            over = "  ⚠ over 5-min budget" if timeout_sec > RUNNER_BUDGET_SEC else ""
             emit("")
-            emit(f"=== RUN {script} ===")
+            emit(f"=== RUN [{idx}/{total}] {script} (timeout {timeout_sec}s){over} ===")
 
             # Skip git-diff-submodules cleanly if the fixture generation failed.
             if (
@@ -783,6 +1039,7 @@ def main() -> int:
                 ))
                 break
 
+            over_budget = elapsed > RUNNER_BUDGET_SEC
             if rc == 0:
                 status = "PASS"
                 emit(f"PASS {script} ({elapsed:.0f}s)")
@@ -794,10 +1051,18 @@ def main() -> int:
                 status = "FAIL"
                 emit(f"FAIL {script} (exit={rc}, {elapsed:.0f}s)")
 
+            # 5-minute budget check (the "no test case over 5 min" rule): flag
+            # the instant a runner overruns, so a slow suite is visible inline,
+            # not just in the end-of-run audit.
+            if over_budget:
+                emit(f"  ⚠ OVER 5-MIN BUDGET: {script} ran {elapsed:.0f}s "
+                     f"(> {RUNNER_BUDGET_SEC}s) — split this suite into smaller runners.")
+
             results.append(RunResult(
                 script=script, status=status, exit_code=rc,
                 elapsed_sec=round(elapsed, 1),
                 log_file=str(log_path.relative_to(out_dir)),
+                over_budget=over_budget,
             ))
 
             kill_app(app_name)
@@ -829,6 +1094,26 @@ def main() -> int:
             if r.status in ("FAIL", "TIMEOUT"):
                 tag = "TIMEOUT" if r.status == "TIMEOUT" else f"exit={r.exit_code}"
                 emit(f"  {r.script} ({tag})")
+
+    # ---- Elapsed-time monitor + 5-minute budget check (the "no test case over
+    # 5 min" rule). The duration audit lists every runner slowest-first so slow
+    # suites are always visible; the over-budget list is the split-review trigger.
+    ran = [r for r in results if r.status != "SKIP"]
+    over_budget_results = [r for r in ran if r.over_budget]
+    if ran:
+        emit("")
+        emit(f"=== DURATION AUDIT (slowest first; 5-min budget = {RUNNER_BUDGET_SEC}s) ===")
+        for r in sorted(ran, key=lambda x: x.elapsed_sec, reverse=True):
+            flag = "  ⚠ OVER BUDGET" if r.over_budget else ""
+            emit(f"  {r.elapsed_sec:7.0f}s  {r.status:7s} {Path(r.script).stem}{flag}")
+    if over_budget_results:
+        emit("")
+        emit(f"⚠ OVER 5-MIN BUDGET: {len(over_budget_results)} runner(s) exceeded "
+             f"{RUNNER_BUDGET_SEC}s and MUST be split into smaller sub-5-min runners "
+             "(see the ow_full_regression_test skill § '5-minute budget'):")
+        for r in sorted(over_budget_results, key=lambda x: x.elapsed_sec, reverse=True):
+            emit(f"  {r.elapsed_sec:7.0f}s  {r.script}")
+
     if interrupted:
         emit("Run was interrupted before completion.")
     emit("")
@@ -847,6 +1132,11 @@ def main() -> int:
         "failed": failed,
         "skipped": skipped,
         "errored": errored,
+        "budget_sec": RUNNER_BUDGET_SEC,
+        "over_budget": [
+            {"script": r.script, "elapsed_sec": r.elapsed_sec, "status": r.status}
+            for r in sorted(over_budget_results, key=lambda x: x.elapsed_sec, reverse=True)
+        ],
         "results": [asdict(r) for r in results],
     }, indent=2) + "\n", encoding="utf-8")
 

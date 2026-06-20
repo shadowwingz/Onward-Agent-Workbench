@@ -218,3 +218,24 @@ test('new semantics: add + modify across files → mixed (blue), split out of th
   )
   assert.equal(deriveTerminalGitStatus(categories), 'mixed')
 })
+
+// ---------------------------------------------------------------------------
+// B1 — interaction lock: our --ignore-submodules=dirty (Git Diff path + mirror
+// status) x upstream's 5-state classifier. With --ignore-submodules=dirty a
+// submodule's working-tree dirt/untracked is suppressed, but a commit-pointer
+// bump (the submodule's recorded commit moved) STILL reports in the superproject
+// porcelain as a modified gitlink (XY 'M'). It must classify as 'modified' —
+// unchanged from the old 3-state behavior — never get hidden or mis-bucketed.
+// ---------------------------------------------------------------------------
+
+test('B1: submodule commit-pointer bump (M gitlink under --ignore-submodules=dirty) classifies as modified', () => {
+  // Worktree-side gitlink change (submodule HEAD != recorded index gitlink).
+  assert.deepEqual(xyCategories('.M'), ['mod'])
+  assert.equal(deriveTerminalGitStatus(xyCategories('.M')), 'modified')
+  // Staged gitlink bump (git add <submodule>).
+  assert.deepEqual(xyCategories('M.'), ['mod'])
+  assert.equal(deriveTerminalGitStatus(xyCategories('M.')), 'modified')
+  // The single-code path the legacy mirror also feeds.
+  assert.equal(categorizeGitStatusCode('M'), 'mod')
+  assert.equal(deriveTerminalGitStatus(['mod']), 'modified')
+})

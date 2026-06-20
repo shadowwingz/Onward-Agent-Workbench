@@ -53,6 +53,45 @@
 export const RECONCILE_FOCUSED_INTERVAL_MS = 1000
 export const RECONCILE_VISIBLE_INTERVAL_MS = 3000
 
+// Adaptive backoff (per the "interval must exceed probe duration" principle —
+// cf. Prometheus' scrape_timeout < scrape_interval rule). The heartbeat cadence
+// above is a FIXED gap measured AFTER status completes, so the real period is
+// `statusDuration + interval`. That silently assumes statusDuration << interval.
+// On a host whose EDR/anti-malware minifilter taxes every `git.exe` spawn for
+// SECONDS (a real trace measured `git status` at 1.3 s median / 12.9 s peak),
+// the assumption inverts: a 1 s gap is far smaller than status' own latency, so
+// the heartbeat fires back-to-back and saturates the spawn budget, starving the
+// foreground Diff/precompute. The fix: stretch the effective gap to
+// `lastDurationMs × factor` when status is slow, pinning the git-spawn duty
+// cycle at ~1/(1+factor). On a normal host (status ~50 ms) `max(base, 50×4)`
+// stays at the base 1 s/3 s — ZERO regression — so this only engages under load
+// (which is exactly when freshness is already bounded by the slow status, and
+// the watcher fast path still covers it).
+export const RECONCILE_BACKOFF_FACTOR = 4
+// Sanity ceiling: a one-off multi-second spike can't push the gap arbitrarily
+// far (worst-case heartbeat staleness bounded to 60 s; the watcher covers the
+// gap). Mirrors the 60 s upper bound peers settled on (e.g. kilocode hidden=60 s).
+export const RECONCILE_MAX_BACKOFF_INTERVAL_MS = 60_000
+
+/**
+ * Effective reconcile gap for a repo: never below the base cadence, stretched
+ * to `lastDurationMs × factor` when status is slow, capped at `maxIntervalMs`.
+ * Pure + exported so the worker's diagnostic trace computes the SAME number the
+ * scheduler gates on (both use the exported defaults — keep them in sync).
+ * A non-positive `lastDurationMs` (no prior status / first attach) yields the
+ * base interval, so the very first reconcile is never delayed.
+ */
+export function computeEffectiveIntervalMs(
+  baseIntervalMs: number,
+  lastDurationMs: number,
+  factor: number,
+  maxIntervalMs: number
+): number {
+  if (!(lastDurationMs > 0)) return baseIntervalMs
+  const stretched = Math.min(lastDurationMs * factor, maxIntervalMs)
+  return Math.max(baseIntervalMs, stretched)
+}
+
 export type TaskVisibility = 'focused' | 'visible' | 'hidden'
 
 export type ReconcileReason =
@@ -81,6 +120,9 @@ interface RepoState {
   // ms; NEGATIVE_INFINITY until the first reconcile so a freshly-visible repo
   // is due on the very first tick.
   lastReconcileAt: number
+  // ms; the last status duration the host reported via onReconcileDone, used to
+  // adapt the next gap (0 until the first measured reconcile => no backoff).
+  lastDurationMs: number
 }
 
 // focused beats visible beats hidden when aggregating a repo's tasks.
@@ -89,12 +131,23 @@ const VISIBILITY_RANK: Record<TaskVisibility, number> = { focused: 2, visible: 1
 export class GitReconcileScheduler {
   private readonly focusedIntervalMs: number
   private readonly visibleIntervalMs: number
+  private readonly backoffFactor: number
+  private readonly maxBackoffIntervalMs: number
   private readonly tasks = new Map<string, TaskState>()
   private readonly repos = new Map<string, RepoState>()
 
-  constructor(options: { focusedIntervalMs?: number; visibleIntervalMs?: number } = {}) {
+  constructor(
+    options: {
+      focusedIntervalMs?: number
+      visibleIntervalMs?: number
+      backoffFactor?: number
+      maxBackoffIntervalMs?: number
+    } = {}
+  ) {
     this.focusedIntervalMs = options.focusedIntervalMs ?? RECONCILE_FOCUSED_INTERVAL_MS
     this.visibleIntervalMs = options.visibleIntervalMs ?? RECONCILE_VISIBLE_INTERVAL_MS
+    this.backoffFactor = options.backoffFactor ?? RECONCILE_BACKOFF_FACTOR
+    this.maxBackoffIntervalMs = options.maxBackoffIntervalMs ?? RECONCILE_MAX_BACKOFF_INTERVAL_MS
   }
 
   /**
@@ -139,12 +192,19 @@ export class GitReconcileScheduler {
     state.dirtyReason = null
   }
 
-  /** Host calls this when the git status for `repoKey` has completed. */
-  onReconcileDone(repoKey: string, now: number): void {
+  /**
+   * Host calls this when the git status for `repoKey` has completed.
+   * `durationMs` (the wall time that status took) drives the adaptive backoff:
+   * a slow status stretches the NEXT gap so the heartbeat can't run status
+   * back-to-back. Omitted / non-positive => no backoff (keeps the base cadence,
+   * preserving every existing caller's behaviour).
+   */
+  onReconcileDone(repoKey: string, now: number, durationMs = 0): void {
     const state = this.repos.get(repoKey)
     if (!state) return
     state.inFlight = false
     state.lastReconcileAt = now
+    state.lastDurationMs = durationMs > 0 ? durationMs : 0
   }
 
   /**
@@ -167,10 +227,22 @@ export class GitReconcileScheduler {
       }
       const visibility = visibilityByRepo.get(repoKey) ?? 'hidden'
       const elapsed = now - state.lastReconcileAt
-      if (visibility === 'focused' && elapsed >= this.focusedIntervalMs) {
-        due.push({ repoKey, reason: 'heartbeat-focused' })
-      } else if (visibility === 'visible' && elapsed >= this.visibleIntervalMs) {
-        due.push({ repoKey, reason: 'heartbeat-visible' })
+      if (visibility === 'focused') {
+        const effective = computeEffectiveIntervalMs(
+          this.focusedIntervalMs,
+          state.lastDurationMs,
+          this.backoffFactor,
+          this.maxBackoffIntervalMs
+        )
+        if (elapsed >= effective) due.push({ repoKey, reason: 'heartbeat-focused' })
+      } else if (visibility === 'visible') {
+        const effective = computeEffectiveIntervalMs(
+          this.visibleIntervalMs,
+          state.lastDurationMs,
+          this.backoffFactor,
+          this.maxBackoffIntervalMs
+        )
+        if (elapsed >= effective) due.push({ repoKey, reason: 'heartbeat-visible' })
       }
       // hidden: no heartbeat — only markDirty (tab-switch / activate) wakes it.
     }
@@ -205,7 +277,8 @@ export class GitReconcileScheduler {
           dirty: false,
           dirtyReason: null,
           inFlight: false,
-          lastReconcileAt: Number.NEGATIVE_INFINITY
+          lastReconcileAt: Number.NEGATIVE_INFINITY,
+          lastDurationMs: 0
         })
       }
     }

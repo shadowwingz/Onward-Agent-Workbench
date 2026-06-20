@@ -25,26 +25,33 @@
  * agree on what "is this row a submodule and is it valid?" means.
  *
  * The snapshot service consolidates that decision into one structural
- * model:
- *   - `declaredInGitmodules`   — does `.gitmodules` mention it?
- *   - `initialized`            — does `git submodule status --recursive`
- *                                report it with a non-`-` prefix?
- *   - `isValidRepo`            — does `getGitRepoMeta(path)` validate the
- *                                path as a repo whose toplevel resolves
- *                                to itself (rejects empty deinit-ed
- *                                paths whose resolved root is the parent)?
+ * model, derived ENTIRELY from the filesystem (zero git process spawns —
+ * see `collectSubmoduleSnapshotsFromDisk`):
+ *   - `declaredInGitmodules`   — does a `.gitmodules` along the chain
+ *                                mention it (a single `fs.readFile`)?
+ *   - `initialized`            — does `<path>/.git` exist as a dir or a
+ *                                `gitdir:` gitfile (a single `fs.stat`)?
+ *   - `isValidRepo`            — same as `initialized`: a path that is its
+ *                                own checked-out repo is valid; empty
+ *                                deinit-ed paths have no `.git` and fail.
  *
  * Downstream consumers (Diff today; History / Editor scope / Quick Open
  * later) ask the service rather than re-implementing the discovery.
  *
- * # Cache & invalidation
+ * # Cache & invalidation (no TTL)
  *
- * The service caches one snapshot per resolved repo root. Cache entries
- * are invalidated by the SAME watcher path that drives `gitDiffRequestCache`
- * — `invalidateGitDiffCache(cwd)` calls `invalidateSnapshot(cwd)` so a
- * single FS-event fan-out clears every read-side cache for that cwd. This
- * keeps "watcher fired → next read returns fresh data" as the only
- * freshness invariant the codebase has to maintain.
+ * The service caches one snapshot per resolved repo root with NO time-based
+ * expiry. Freshness comes from two event-driven signals, never a clock:
+ *   1. A cheap `.gitmodules` validity token (`mtimeMs:size`, one `fs.stat`)
+ *      checked on every `getSnapshot` — repo *structure* only changes when
+ *      `.gitmodules` changes, so an unchanged token is a hit.
+ *   2. The watcher fan-out: `invalidateGitDiffCache(cwd)` calls
+ *      `invalidate(cwd)` so a single FS-event clears every read-side cache
+ *      for that cwd (backstop for nested-`.gitmodules` edits the top-level
+ *      token cannot see).
+ * A fixed TTL was removed because it was actively harmful on EDR-throttled
+ * Windows: a single structural capture could outlast the TTL, so the cache
+ * expired before it could ever be reused.
  *
  * Cache lives in BOTH main and the git-ipc-worker (each module instance
  * has its own Map). The watcher fires in main; `gitIpcWorkerClient
@@ -71,63 +78,27 @@
  * deleted now that no caller remains.
  */
 
-import { access, constants } from 'fs/promises'
-import { resolve } from 'path'
+import { stat } from 'fs/promises'
+import { join, resolve } from 'path'
 import { isMainThread } from 'worker_threads'
 
+import {
+  collectSubmoduleSnapshotsFromDisk,
+  type GitSubmoduleSnapshot
+} from './git-submodule-disk-discovery'
 import { performanceTrace } from './performance-trace'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 
 import {
-  EXEC_TIMEOUT,
-  MAX_DIFF_OUTPUT,
-  execFileAsync,
-  getExecEnv,
   getGitRepoMeta,
-  parseSubmoduleStatusOutput,
-  readGitmodulesSubmodulePaths,
+  listGitlinkRelPaths,
   type GitSubmoduleInfo
 } from './git-utils'
 
-/**
- * Structural facts about ONE submodule of a parent repo. This is the
- * service's atomic unit; consumers compose / filter as needed.
- */
-export interface GitSubmoduleSnapshot {
-  /** Path relative to the parent repo root, forward-slash separated. */
-  path: string
-  /** Resolved absolute path on disk. */
-  absolutePath: string
-  /**
-   * True iff the parent repo's `.gitmodules` file declares this path.
-   * Set independently of `initialized` — both can be true (normal),
-   * both false (impossible — we wouldn't see it), or only one.
-   */
-  declaredInGitmodules: boolean
-  /**
-   * True iff `git submodule status --recursive` reports this path with a
-   * status flag other than `-`. `-` indicates the submodule is NOT
-   * initialized in the parent's working tree (no .git pointer file, no
-   * checked-out worktree). Project_Forward's repro shape is
-   * `declaredInGitmodules=true, initialized=false`.
-   */
-  initialized: boolean
-  /**
-   * True iff `getGitRepoMeta(absolutePath)` reports `isRepo===true` AND
-   * the resolved `repoRoot` equals `absolutePath` (i.e. the path is the
-   * toplevel of its OWN repo, not just somewhere inside the parent's
-   * repo). Empty deinit-ed dirs fail this check because their
-   * `rev-parse --show-toplevel` returns the PARENT's toplevel.
-   */
-  isValidRepo: boolean
-  /** Recursion depth: 0 for direct submodules of the parent repo. */
-  depth: number
-  /**
-   * Absolute path of this submodule's parent (the parent repo or another
-   * submodule when nested ≥ 2 levels deep).
-   */
-  parentRoot: string
-}
+// Re-export the structural unit from its leaf home so existing
+// `import { GitSubmoduleSnapshot } from './git-repository-snapshot-service'`
+// call sites keep working.
+export type { GitSubmoduleSnapshot } from './git-submodule-disk-discovery'
 
 /**
  * Immutable structural snapshot of a working-tree path's git world.
@@ -164,19 +135,50 @@ interface CacheEntry {
   snapshot: GitRepositorySnapshot
   /** Pre-computed cache key (= `resolve(cwd)`) for fast invalidation. */
   key: string
+  /**
+   * `.gitmodules` validity token (`mtimeMs:size`, or `none`) captured at the
+   * same time as the snapshot. This replaces the old fixed TTL: the repo's
+   * *structure* (which submodules exist) only changes when `.gitmodules`
+   * changes, so re-stat-ing that one file (a single cheap `fs.stat`, zero
+   * process spawns) is a far more honest freshness signal than a clock. A
+   * fixed TTL was actively harmful here — on EDR-throttled Windows a single
+   * structural capture can take longer than the TTL, so the cache expired
+   * before it could ever be reused (12 captures observed for 5 diff opens).
+   * The watcher fan-out (`invalidate()`) remains the backstop for the rare
+   * nested-`.gitmodules` change the top-level token cannot see.
+   */
+  gitmodulesToken: string
 }
 
-const SNAPSHOT_CACHE_TTL_MS = 5_000
 const SNAPSHOT_CACHE_MAX_ENTRIES = 32
+
+/**
+ * Cheap structural-freshness token for a repo: the `.gitmodules` file's
+ * `mtimeMs:size`, or `none` when it does not exist. Pure `fs.stat`, no git
+ * process — safe to call on every `getSnapshot` even on EDR-throttled hosts.
+ */
+async function readGitmodulesToken(repoRoot: string | null): Promise<string> {
+  if (!repoRoot) return 'no-repo'
+  try {
+    const info = await stat(join(repoRoot, '.gitmodules'))
+    return `${Math.floor(info.mtimeMs)}:${info.size}`
+  } catch {
+    return 'none'
+  }
+}
 
 class GitRepositorySnapshotServiceImpl {
   private cache = new Map<string, CacheEntry>()
   private inFlight = new Map<string, Promise<GitRepositorySnapshot>>()
 
   /**
-   * Return a snapshot for `cwd`. By default uses the per-key cache when
-   * the entry is fresher than `SNAPSHOT_CACHE_TTL_MS`; pass `force: true`
-   * to bypass the cache (Diff's force-on-entry path uses this).
+   * Return a snapshot for `cwd`. By default reuses the cached snapshot as
+   * long as the repo's `.gitmodules` validity token is unchanged (no TTL —
+   * structure is stable until `.gitmodules` changes or the watcher fires).
+   * Pass `force: true` to bypass the cache entirely. NOTE: the Diff
+   * force-on-entry path deliberately does NOT force this — diff freshness is
+   * about file content, not submodule structure, so both the root-only and
+   * full phases reuse one structural capture.
    */
   async getSnapshot(cwd: string, opts?: { force?: boolean }): Promise<GitRepositorySnapshot> {
     const key = resolve(cwd)
@@ -184,14 +186,18 @@ class GitRepositorySnapshotServiceImpl {
 
     if (!force) {
       const cached = this.cache.get(key)
-      if (cached && (Date.now() - cached.snapshot.capturedAt) < SNAPSHOT_CACHE_TTL_MS) {
-        performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_SNAPSHOT_CACHE_HIT, {
-          cwd: key,
-          fingerprint: cached.snapshot.fingerprint,
-          ageMs: Date.now() - cached.snapshot.capturedAt,
-          submoduleCount: cached.snapshot.submodules.length
-        })
-        return cached.snapshot
+      if (cached) {
+        const token = await readGitmodulesToken(cached.snapshot.resolvedRepoRoot)
+        if (token === cached.gitmodulesToken) {
+          performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_SNAPSHOT_CACHE_HIT, {
+            cwd: key,
+            fingerprint: cached.snapshot.fingerprint,
+            ageMs: Date.now() - cached.snapshot.capturedAt,
+            submoduleCount: cached.snapshot.submodules.length,
+            validity: 'gitmodules-token'
+          })
+          return cached.snapshot
+        }
       }
     }
 
@@ -235,7 +241,8 @@ class GitRepositorySnapshotServiceImpl {
 
   private async captureAndStore(cwd: string, key: string): Promise<GitRepositorySnapshot> {
     const snapshot = await captureGitRepositorySnapshot(cwd)
-    this.cache.set(key, { snapshot, key })
+    const gitmodulesToken = await readGitmodulesToken(snapshot.resolvedRepoRoot)
+    this.cache.set(key, { snapshot, key, gitmodulesToken })
     this.evictLRU()
     performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_SNAPSHOT_CAPTURE, {
       cwd: key,
@@ -283,7 +290,31 @@ export async function captureGitRepositorySnapshot(cwd: string): Promise<GitRepo
   }
 
   const repoRoot = meta.repoRoot
-  const submodules = await collectSubmoduleSnapshots(repoRoot, meta.gitExecutable)
+  // Read the index's gitlink (mode 160000) set with ONE `git ls-files -s`, then
+  // fold it into the pure-fs discovery. This surfaces nested repos the parent
+  // tracks as a gitlink but never declared in `.gitmodules` (e.g. a `git add`-ed
+  // nested repo) — the class the `.gitmodules`-only walk was structurally blind
+  // to. Declared paths win on overlap, so a normal submodule does not double.
+  // The single process amortizes against this service's no-TTL cache: it re-runs
+  // only when a capture re-runs, never on a cache hit. A failure degrades to []
+  // → discovery falls back to `.gitmodules`-only (today's behavior).
+  const gitlinkRelPaths = await listGitlinkRelPaths(repoRoot, meta.gitExecutable)
+  const submodules = await collectSubmoduleSnapshotsFromDisk(repoRoot, {
+    extraGitlinkPaths: gitlinkRelPaths
+  })
+  const undeclaredGitlinkCount = submodules.filter((s) => !s.declaredInGitmodules).length
+  if (undeclaredGitlinkCount > 0) {
+    // Diagnostic breadcrumb: a bug report's trace shows whether undeclared
+    // gitlinks were found for this repo (the winWatchRTOS-Build symptom class)
+    // and how the index candidate count compares — without re-running the bug.
+    performanceTrace.record(PERF_TRACE_EVENT.MAIN_GIT_SNAPSHOT_GITLINK_DISCOVERED, {
+      cwd,
+      repoRoot,
+      undeclaredGitlinkCount,
+      gitlinkCandidateCount: gitlinkRelPaths.length,
+      submoduleCount: submodules.length
+    })
+  }
   return {
     cwd,
     resolvedRepoRoot: repoRoot,
@@ -293,124 +324,6 @@ export async function captureGitRepositorySnapshot(cwd: string): Promise<GitRepo
     fingerprint: computeFingerprint(repoRoot, submodules),
     capturedAt: Date.now()
   }
-}
-
-/**
- * Discover every recursive submodule of `repoRoot`, validating each via
- * `getGitRepoMeta`, and return a structured list with the meta-flags
- * required by downstream consumers.
- *
- * Strategy:
- *   1. Read `.gitmodules` to get the DECLARED set.
- *   2. Run `git submodule status --recursive` to get the INITIALIZED set
- *      (filtering out lines that begin with `-`).
- *   3. Take the UNION; for each entry, validate via getGitRepoMeta to
- *      compute `isValidRepo`.
- *   4. Compute depth + parentRoot by walking the union's path tree.
- */
-async function collectSubmoduleSnapshots(
-  repoRoot: string,
-  gitExecutable: string
-): Promise<GitSubmoduleSnapshot[]> {
-  const hasGitmodules = await access(`${repoRoot}/.gitmodules`, constants.F_OK)
-    .then(() => true)
-    .catch(() => false)
-  if (!hasGitmodules) return []
-
-  const [declaredRelPaths, statusInfos] = await Promise.all([
-    readGitmodulesSubmodulePaths(repoRoot),
-    runSubmoduleStatusRecursive(repoRoot, gitExecutable).catch(() => [] as GitSubmoduleInfo[])
-  ])
-
-  // Union by relative path. Status output uses the same path representation
-  // as `.gitmodules` (forward-slash, relative to parent), so a string-key
-  // Set is sufficient.
-  const unionPaths = new Set<string>(declaredRelPaths)
-  for (const info of statusInfos) unionPaths.add(info.path)
-
-  // Sort for stable fingerprint computation downstream.
-  const sortedPaths = Array.from(unionPaths).sort()
-
-  const declaredSet = new Set(declaredRelPaths)
-  const initializedSet = new Set(statusInfos.map((s) => s.path))
-
-  // Validation pass — `getGitRepoMeta` cache makes this cheap on repeat.
-  const enriched = await Promise.all(sortedPaths.map(async (subPath) => {
-    const absolutePath = resolve(repoRoot, subPath)
-    const declaredInGitmodules = declaredSet.has(subPath)
-    const initialized = initializedSet.has(subPath)
-
-    let isValidRepo = false
-    try {
-      // Skip the meta check when the path doesn't exist — saves a fork.
-      await access(absolutePath, constants.F_OK)
-      const subMeta = await getGitRepoMeta(absolutePath)
-      isValidRepo = Boolean(
-        subMeta.isRepo
-        && subMeta.repoRoot
-        && resolve(subMeta.repoRoot) === resolve(absolutePath)
-      )
-    } catch {
-      isValidRepo = false
-    }
-
-    return {
-      path: subPath,
-      absolutePath,
-      declaredInGitmodules,
-      initialized,
-      isValidRepo,
-      // depth + parentRoot computed below in a second pass once the
-      // sorted list lets us walk the path tree deterministically.
-      depth: 0,
-      parentRoot: repoRoot
-    } satisfies GitSubmoduleSnapshot
-  }))
-
-  // Second pass: depth + parentRoot. For each entry, depth = number of
-  // existing entries that are a strict prefix of this one (with a
-  // trailing `/`). parentRoot = the absolute path of the closest such
-  // prefix entry, or repoRoot if there is none.
-  for (let i = 0; i < enriched.length; i += 1) {
-    const me = enriched[i]
-    let depth = 0
-    let parentAbs = repoRoot
-    for (let j = 0; j < i; j += 1) {
-      const candidate = enriched[j]
-      if (me.path.startsWith(`${candidate.path}/`)) {
-        depth += 1
-        parentAbs = candidate.absolutePath
-      }
-    }
-    me.depth = depth
-    me.parentRoot = parentAbs
-  }
-
-  return enriched
-}
-
-async function runSubmoduleStatusRecursive(
-  repoRoot: string,
-  gitExecutable: string
-): Promise<GitSubmoduleInfo[]> {
-  const { stdout } = await execFileAsync(
-    gitExecutable,
-    ['-c', 'core.quotepath=false', 'submodule', 'status', '--recursive'],
-    {
-      cwd: repoRoot,
-      timeout: EXEC_TIMEOUT,
-      env: getExecEnv(),
-      maxBuffer: MAX_DIFF_OUTPUT
-    },
-    {
-      repoKey: repoRoot,
-      priority: 'normal',
-      dedupeKey: `repo:snapshot:status:${resolve(repoRoot)}`,
-      label: 'git submodule status --recursive (snapshot)'
-    }
-  )
-  const output = typeof stdout === 'string' ? stdout : stdout.toString('utf-8')
-  return parseSubmoduleStatusOutput(output, repoRoot)
 }
 
 function computeFingerprint(repoRoot: string, submodules: GitSubmoduleSnapshot[]): string {

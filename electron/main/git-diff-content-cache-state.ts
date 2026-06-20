@@ -46,6 +46,12 @@ export interface GitFileContentRequestOptions {
   force?: boolean
   missReason?: GitDiffContentCacheMissReason
   allowLargeFile?: boolean
+  /**
+   * Git-runtime scheduling priority for the content-fetch spawns. Foreground
+   * clicks omit this (treated as 'high' by `getGitFileContent`) so they
+   * preempt the background precompute, which sets 'low'.
+   */
+  priority?: 'high' | 'normal' | 'low'
 }
 
 /**
@@ -83,6 +89,27 @@ export function buildCacheKey(file: ContentCacheFile): string {
   return `${file.changeType}::${file.status}::${file.originalFilename ?? ''}::${file.filename}`
 }
 
+/**
+ * Inverse of {@link buildCacheKey}. The filename is the 4th `::` segment;
+ * rejoined defensively in case a path itself contained `::` (rare). Used by the
+ * content-cache revalidation path to recover the changeType + filename for a
+ * cached entry so it can re-stat the working-tree file.
+ */
+export function parseCacheKey(key: string): {
+  changeType: string
+  status: string
+  originalFilename: string
+  filename: string
+} {
+  const parts = key.split('::')
+  return {
+    changeType: parts[0] ?? '',
+    status: parts[1] ?? '',
+    originalFilename: parts[2] ?? '',
+    filename: parts.slice(3).join('::')
+  }
+}
+
 export interface FetchFileContentArgs {
   cwd: string
   file: ContentCacheFile
@@ -98,6 +125,13 @@ export interface FetchFileContentDeps<T extends CacheableFetchResult> {
   recentMissReason: (project: string) => GitDiffContentCacheMissReason | null
   rememberMissReason: (project: string, reason: GitDiffContentCacheMissReason) => void
   estimateBytes: (result: T) => number
+  /**
+   * Compute the file's freshness token stored with the cached entry (working-
+   * tree stat for unstaged/untracked/conflict; undefined for index-backed
+   * staged content, which `revalidateProject` then treats as always-stale).
+   * Injected so this module stays fs-free and unit-testable.
+   */
+  computeStaleToken?: (project: string, file: ContentCacheFile) => Promise<string | undefined>
   recordHit?: (info: { project: string; filename: string; changeType: string }) => void
   recordMiss?: (info: { project: string; filename: string; changeType: string; reason: GitDiffContentCacheMissReason; force: boolean }) => void
   recordSkipTooLarge?: (info: { project: string; filename: string; bytes: number }) => void
@@ -197,8 +231,17 @@ export function createFetchFileContentWithCache<T extends CacheableFetchResult>(
     let finalMissReason: GitDiffContentCacheMissReason = result.success ? missReason : 'worker-error'
     if (result.success) {
       bytes = deps.estimateBytes(result)
+      // Capture the file's freshness token (working-tree stat) so a later
+      // mirror-update can re-validate this entry and evict it ONLY if the file
+      // actually changed — instead of wiping the whole project bucket.
+      let staleToken: string | undefined
+      try {
+        staleToken = deps.computeStaleToken ? await deps.computeStaleToken(project, args.file) : undefined
+      } catch {
+        staleToken = undefined
+      }
       if (deps.cache.isProjectGenerationCurrent(project, generationAtFetchStart)) {
-        stored = deps.cache.put(project, key, withoutCacheInfo(result), bytes)
+        stored = deps.cache.put(project, key, withoutCacheInfo(result), bytes, staleToken)
       } else {
         deps.recordSkipStaleGeneration?.({
           project,

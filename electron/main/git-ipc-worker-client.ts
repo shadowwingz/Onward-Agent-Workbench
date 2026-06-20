@@ -9,6 +9,9 @@ import { gitRuntimeManager, type GitTaskPriority } from './git-runtime-manager'
 import {
   buildGitDiffWorkerDedupeKey,
   buildGitFileContentWorkerDedupeKey,
+  diffListLaneKey,
+  fileContentLaneKey,
+  historyLaneKey,
   repoKeyForWorker as repoKeyFor,
   stableStringifyForWorkerKey as stableStringify,
   type GitFileContentWorkerRequestOptions
@@ -43,6 +46,7 @@ type GitIpcWorkerMethod =
   | 'getHistory'
   | 'getHistoryDiff'
   | 'getHistoryFileContent'
+  | 'prewarmHistoryDiffs'
   | 'getFileContent'
   | 'saveFileContent'
   | 'stageFile'
@@ -109,32 +113,65 @@ class GitIpcWorkerClient {
   }
 
   getDiff(cwd: string, options?: GitDiffLoadOptions): Promise<GitDiffResult> {
+    // Background prewarm (precompute scheduler) runs in a SEPARATE low-priority
+    // per-repo lane so it never holds the foreground enter's concurrency-1 slot.
+    // Without this, a slow background `getDiff(force)` recompute blocks the
+    // user's enter for the same repo (measured: foreground enter cache-HITS
+    // queued for seconds behind the prewarm on EDR-throttled hosts).
+    const background = options?.background === true
     return this.enqueueWorkerTask<GitDiffResult>('getDiff', { cwd, options }, {
-      priority: 'high',
-      repoKey: cwd,
+      priority: background ? 'low' : 'high',
+      repoKey: diffListLaneKey(cwd, background),
       repoConcurrencyLimit: 1,
       dedupeKey: buildGitDiffWorkerDedupeKey(cwd, options),
-      label: 'worker git diff'
+      label: background ? 'worker git diff (precompute)' : 'worker git diff'
     })
   }
 
-  getHistory(cwd: string, limit?: number, skip?: number): Promise<GitHistoryResult> {
-    return this.enqueueWorkerTask<GitHistoryResult>('getHistory', { cwd, limit, skip }, {
-      priority: 'normal',
-      repoKey: cwd,
+  getHistory(
+    cwd: string,
+    limit?: number,
+    skip?: number,
+    branchOid?: string,
+    background?: boolean
+  ): Promise<GitHistoryResult> {
+    // branchOid (supplied by main from the GitStateMirror snapshot) is part of
+    // the worker-side L8 list cache key; carry it through and into the dedupe
+    // key so a prewarm and a foreground open at the same HEAD coalesce. The
+    // background History prewarm runs in the low `::history-precompute` lane.
+    const bg = background === true
+    return this.enqueueWorkerTask<GitHistoryResult>('getHistory', { cwd, limit, skip, branchOid }, {
+      priority: bg ? 'low' : 'normal',
+      repoKey: historyLaneKey(cwd, bg),
       repoConcurrencyLimit: 1,
-      dedupeKey: `git-ipc:history:${resolve(cwd)}:${limit ?? 50}:${skip ?? 0}`,
-      label: 'worker git history'
+      dedupeKey: `git-ipc:history:${resolve(cwd)}:${branchOid ?? 'nohead'}:${limit ?? 50}:${skip ?? 0}`,
+      label: bg ? 'worker git history (precompute)' : 'worker git history'
     })
   }
 
-  getHistoryDiff(cwd: string, options: GitHistoryDiffOptions): Promise<GitHistoryDiffResult> {
+  /**
+   * A2: warm the L9 commit-diff cache for the first `limit` commits in ONE
+   * `git log --raw --numstat` spawn (always background, low `::history-precompute`
+   * lane). Returns how many commits were primed.
+   */
+  prewarmHistoryDiffs(cwd: string, branchOid: string | undefined, limit: number): Promise<{ warmed: number }> {
+    return this.enqueueWorkerTask<{ warmed: number }>('prewarmHistoryDiffs', { cwd, branchOid, limit }, {
+      priority: 'low',
+      repoKey: historyLaneKey(cwd, true),
+      repoConcurrencyLimit: 1,
+      dedupeKey: `git-ipc:history-batch:${resolve(cwd)}:${branchOid ?? 'nohead'}:${limit}`,
+      label: 'worker git history prewarm batch'
+    })
+  }
+
+  getHistoryDiff(cwd: string, options: GitHistoryDiffOptions, background?: boolean): Promise<GitHistoryDiffResult> {
+    const bg = background === true
     return this.enqueueWorkerTask<GitHistoryDiffResult>('getHistoryDiff', { cwd, options }, {
-      priority: 'high',
-      repoKey: cwd,
+      priority: bg ? 'low' : 'high',
+      repoKey: historyLaneKey(cwd, bg),
       repoConcurrencyLimit: 1,
       dedupeKey: `git-ipc:history-diff:${resolve(cwd)}:${stableStringify(options)}`,
-      label: 'worker git history diff'
+      label: bg ? 'worker git history diff (precompute)' : 'worker git history diff'
     })
   }
 
@@ -154,12 +191,23 @@ class GitIpcWorkerClient {
     repoRoot?: string,
     options?: GitFileContentWorkerRequestOptions
   ): Promise<GitFileContentResult> {
+    // Foreground clicks default to 'high'; the background precompute passes
+    // 'low'. CRITICAL: give the 'low' lane its OWN per-repo key so a foreground
+    // click never queues behind the prewarm. Previously both used the same
+    // repoKey + concurrency-1 slot AND a hardcoded 'high' priority, so the
+    // precompute's burst (enqueued first during enter/list) blocked the later
+    // click FIFO — measured 18-29s first-click latency on EDR-throttled hosts.
+    const priority: GitTaskPriority = options?.priority === 'low' || options?.priority === 'normal'
+      ? options.priority
+      : 'high'
+    const baseRepoKey = repoKeyFor(cwd, repoRoot)
+    const repoKey = fileContentLaneKey(baseRepoKey, priority)
     return this.enqueueWorkerTask<GitFileContentResult>('getFileContent', { cwd, file, repoRoot, options }, {
-      priority: 'high',
-      repoKey: repoKeyFor(cwd, repoRoot),
+      priority,
+      repoKey,
       repoConcurrencyLimit: 1,
       dedupeKey: buildGitFileContentWorkerDedupeKey(cwd, file, repoRoot, options),
-      label: 'worker git file content'
+      label: priority === 'low' ? 'worker git file content (precompute)' : 'worker git file content'
     })
   }
 
@@ -225,7 +273,10 @@ class GitIpcWorkerClient {
   warmDiffCache(cwd: string): Promise<{ success: boolean }> {
     return this.enqueueWorkerTask<{ success: boolean }>('warmDiffCache', { cwd }, {
       priority: 'low',
-      repoKey: cwd,
+      // Separate background lane: the warm is slow (full recompute) and must not
+      // hold the foreground enter's concurrency-1 slot for the same repo. Shares
+      // the prewarm diff-list lane (it IS a full-list recompute).
+      repoKey: diffListLaneKey(cwd, true),
       repoConcurrencyLimit: 1,
       dedupeKey: `git-ipc:warm-diff:${resolve(cwd)}`,
       label: 'worker warm git diff cache'

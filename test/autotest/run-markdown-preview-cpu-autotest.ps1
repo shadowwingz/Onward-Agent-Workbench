@@ -6,7 +6,7 @@ $ErrorActionPreference = 'Stop'
 $RepoRoot = if ($env:REPO_ROOT) { $env:REPO_ROOT } else { (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path }
 . (Join-Path $RepoRoot 'test\autotest\Resolve-DevAppBin.ps1')
 
-$AppBin = if ($args.Count -ge 1 -and $args[0]) { $args[0] } else { Resolve-DevAppBin -RepoRoot $RepoRoot }
+$AppBin = if ($args.Count -ge 1 -and $args[0]) { $args[0] } else { Resolve-DevAppBin -RootDir $RepoRoot }
 $LogFile = if ($args.Count -ge 2 -and $args[1]) { $args[1] } else { Join-Path $RepoRoot 'traces\test-logs\markdown-preview-cpu-autotest.log' }
 $ResultFile = if ($args.Count -ge 3 -and $args[2]) { $args[2] } else { Join-Path $RepoRoot 'traces\analysis\markdown-preview-cpu-autotest.json' }
 $FixtureRootWasCreated = $false

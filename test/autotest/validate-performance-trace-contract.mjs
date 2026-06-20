@@ -4,26 +4,48 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFileSync } from 'node:fs'
+import { readFileSync, statSync, readdirSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 
-const traceFile = process.argv[2]
-if (!traceFile) {
-  console.error('Usage: node test/autotest/validate-performance-trace-contract.mjs <trace-file>')
+const traceArg = process.argv[2]
+if (!traceArg) {
+  console.error('Usage: node test/autotest/validate-performance-trace-contract.mjs <trace-file-or-dir>')
   process.exit(2)
 }
 
-const raw = readFileSync(traceFile, 'utf8')
+// Accept either a single chunk file or a directory. The store rotates a session
+// across multiple `perf-*.jsonl` chunks once a chunk passes CHUNK_BYTE_LIMIT, and
+// session-scoped events (e.g. `main:trace-start`) live in the FIRST chunk — so
+// validating only the newest chunk would miss them. Read EVERY chunk in the
+// directory and concatenate, making the contract robust to chunk rotation.
+const traceDir = statSync(traceArg).isDirectory() ? traceArg : dirname(traceArg)
+const chunkFiles = readdirSync(traceDir)
+  .filter((f) => /^perf-.*\.jsonl$/.test(f))
+  .sort()
+  .map((f) => join(traceDir, f))
+const traceFile = chunkFiles.length > 0 ? `${traceDir} (${chunkFiles.length} chunk(s))` : traceArg
+const raw = (chunkFiles.length > 0 ? chunkFiles : [traceArg]).map((f) => readFileSync(f, 'utf8')).join('\n')
 // Support both the legacy single-file JSON format { traceEvents: [...] } and
 // the current NDJSON chunked format where each line is one Chrome Trace Event.
+// NOTE: an NDJSON file ALSO starts with '{' (its first line is a JSON object),
+// so the format cannot be detected by the leading character — doing so routed
+// NDJSON into the single-JSON parser and threw "Unexpected non-whitespace
+// character after JSON". Parse as NDJSON first (each line a JSON value); only
+// fall back to the single-file wrapper when that fails (a pretty-printed
+// multi-line { traceEvents: [...] }).
 let events
 const trimmed = raw.trim()
-if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
-  const parsed = JSON.parse(trimmed)
-  events = Array.isArray(parsed.traceEvents) ? parsed.traceEvents : []
-} else {
-  events = trimmed.split('\n')
-    .filter((line) => line.trim())
-    .map((line) => JSON.parse(line))
+const unwrap = (parsed) =>
+  Array.isArray(parsed) ? parsed
+    : Array.isArray(parsed?.traceEvents) ? parsed.traceEvents
+    : [parsed]
+try {
+  const lines = trimmed.split('\n').filter((line) => line.trim())
+  const parsedLines = lines.map((line) => JSON.parse(line))
+  // Guard against a single-line legacy wrapper { traceEvents: [...] }.
+  events = parsedLines.length === 1 ? unwrap(parsedLines[0]) : parsedLines
+} catch {
+  events = unwrap(JSON.parse(trimmed))
 }
 const failures = []
 const rows = []
@@ -97,7 +119,9 @@ function flowContinuityOk() {
 }
 
 addCheck('TC-00', 'traceEvents array exists', events.length > 0, `events=${events.length}`)
-checkEvent('TC-01', 'trace.session.start', {
+// Session-start event was renamed `trace.session.start` -> `main:trace-start`
+// (PERF_TRACE_EVENT.MAIN_TRACE_START) by the trace-store refactor; same args.
+checkEvent('TC-01', 'main:trace-start', {
   args: ['schema', 'platform', 'appVersion', 'contentCaptured'],
   visible: ['schema', 'platform', 'appVersion', 'contentCaptured']
 })

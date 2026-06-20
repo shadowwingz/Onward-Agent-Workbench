@@ -10,6 +10,8 @@ import assert from 'node:assert/strict'
 
 import {
   GitDiffPrecomputeScheduler,
+  orderPrecomputeCandidates,
+  isPrecomputeEligible,
   type DiffFile,
   type PrecomputeSchedulerOptions
 } from '../../electron/main/git-diff-precompute-scheduler.ts'
@@ -101,12 +103,16 @@ test('debounce collapses multiple invalidations into one burst', async () => {
   assert.deepEqual(fetched.map((f) => f.filename).sort(), ['a.ts', 'b.ts'])
 })
 
-test('candidates are sorted by additions+deletions descending', async () => {
+test('candidates are sorted by additions+deletions descending (viewportPriorityCount=0)', async () => {
+  // viewportPriorityCount=0 selects the pure size-descending path (the tail
+  // ordering). The default now front-loads the first list-order files first
+  // (see the viewport-first tests below + orderPrecomputeCandidates).
   const fetched: string[] = []
   const fakeTimer = new FakeTimer()
   const scheduler = new GitDiffPrecomputeScheduler({
     debounceMs: 0,
     concurrency: 1,
+    viewportPriorityCount: 0,
     timer: fakeTimer,
     fetchFile: async (_p, f) => { fetched.push(f.filename) },
     loadWorkingSet: async () => [
@@ -119,6 +125,29 @@ test('candidates are sorted by additions+deletions descending', async () => {
   fakeTimer.flushAll()
   await nextTick()
   assert.deepEqual(fetched, ['big.ts', 'medium.ts', 'small.ts'])
+})
+
+test('default ordering warms the first list-order file FIRST (first-click-miss fix)', async () => {
+  // The viewer auto-selects the first list-order file on open; it must be warmed
+  // first so that click is a cache hit (not a cold miss racing the size-sorted
+  // bulk). Default viewportPriorityCount (8) keeps the small top file first.
+  const fetched: string[] = []
+  const fakeTimer = new FakeTimer()
+  const scheduler = new GitDiffPrecomputeScheduler({
+    debounceMs: 0,
+    concurrency: 1,
+    timer: fakeTimer,
+    fetchFile: async (_p, f) => { fetched.push(f.filename) },
+    loadWorkingSet: async () => [
+      file('top-selected.ts', 1, 0), // small, auto-selected on open
+      file('huge.ts', 5000, 0),
+      file('mid.ts', 40, 0)
+    ]
+  })
+  scheduler.onProjectInvalidated('/p')
+  fakeTimer.flushAll()
+  await nextTick()
+  assert.equal(fetched[0], 'top-selected.ts', 'auto-selected first file warmed first')
 })
 
 test('isEligible filter is applied before sorting', async () => {
@@ -392,4 +421,80 @@ test('cancelProject clears pending / in-flight timestamps but preserves lastBurs
   assert.deepEqual(after.lastBurst, before.lastBurst, 'lastBurst preserved across cancel')
   assert.equal(after.pendingSince, null)
   assert.equal(after.inFlightSince, null)
+})
+
+// ---------------------------------------------------------------------------
+// orderPrecomputeCandidates — viewport-first ordering (first-click-miss fix)
+// ---------------------------------------------------------------------------
+
+function f(filename: string, churn: number): DiffFile {
+  return { filename, additions: churn, deletions: 0, changeType: 'unstaged', status: 'M' }
+}
+
+test('orderPrecomputeCandidates warms the first K in LIST order, then the rest size-descending', () => {
+  // List order: A(small) B(huge) C(small) D(med) E(small). The viewer auto-selects A.
+  const eligible = [f('A', 1), f('B', 900), f('C', 2), f('D', 100), f('E', 3)]
+  const ordered = orderPrecomputeCandidates(eligible, 2).map((x) => x.filename)
+  // First 2 stay in list order (A, B) so the auto-selected A is warmed first;
+  // the remaining (C,D,E) are size-descending (D=100 > E=3 > C=2).
+  assert.deepEqual(ordered, ['A', 'B', 'D', 'E', 'C'])
+})
+
+test('orderPrecomputeCandidates with count 0 is pure size-descending (back-compat)', () => {
+  const eligible = [f('A', 1), f('B', 900), f('C', 2), f('D', 100)]
+  const ordered = orderPrecomputeCandidates(eligible, 0).map((x) => x.filename)
+  assert.deepEqual(ordered, ['B', 'D', 'C', 'A'])
+})
+
+test('orderPrecomputeCandidates: count >= length keeps full list order (no sort)', () => {
+  const eligible = [f('A', 1), f('B', 900), f('C', 2)]
+  const ordered = orderPrecomputeCandidates(eligible, 10).map((x) => x.filename)
+  assert.deepEqual(ordered, ['A', 'B', 'C'])
+})
+
+test('orderPrecomputeCandidates does NOT mutate the input array', () => {
+  const eligible = [f('A', 1), f('B', 900), f('C', 2)]
+  const before = eligible.map((x) => x.filename)
+  orderPrecomputeCandidates(eligible, 1)
+  assert.deepEqual(eligible.map((x) => x.filename), before, 'input order preserved')
+})
+
+test('orderPrecomputeCandidates: the auto-selected first file is always at index 0 (the click target)', () => {
+  const eligible = [f('top.ts', 1), f('big.ts', 5000), f('mid.ts', 50)]
+  // Default-ish viewport count (>=1) must keep the first list file first.
+  assert.equal(orderPrecomputeCandidates(eligible, 8)[0].filename, 'top.ts')
+})
+
+// ---------------------------------------------------------------------------
+// isPrecomputeEligible — coverage policy (warm ALL visible, incl. submodule)
+// ---------------------------------------------------------------------------
+
+function ef(over: Partial<DiffFile>): DiffFile {
+  return { filename: 'a.ts', additions: 1, deletions: 0, changeType: 'unstaged', status: 'M', ...over }
+}
+
+test('isPrecomputeEligible: submodule files ARE eligible now (warm all visible incl submodule)', () => {
+  assert.equal(isPrecomputeEligible(ef({ filename: 'sub/x.c', isSubmoduleEntry: true })), true)
+  assert.equal(isPrecomputeEligible(ef({ filename: 'sub/x.c', isSubmoduleEntry: false })), true)
+})
+
+test('isPrecomputeEligible: deleted / ignored-removed files are skipped (no body to warm)', () => {
+  assert.equal(isPrecomputeEligible(ef({ status: 'D' })), false)
+  assert.equal(isPrecomputeEligible(ef({ status: '!' })), false)
+})
+
+test('isPrecomputeEligible: binary-ish extensions skipped, text/code warmed', () => {
+  for (const ext of ['png', 'pdf', 'zip', 'mp4', 'so', 'woff2', 'wasm']) {
+    assert.equal(isPrecomputeEligible(ef({ filename: `asset.${ext}` })), false, ext)
+  }
+  for (const ext of ['ts', 'c', 'py', 'html', 'md', 'json', 'ux']) {
+    assert.equal(isPrecomputeEligible(ef({ filename: `src.${ext}` })), true, ext)
+  }
+  // Extensionless + dotfiles are warmed (treated as text).
+  assert.equal(isPrecomputeEligible(ef({ filename: 'Makefile' })), true)
+  assert.equal(isPrecomputeEligible(ef({ filename: '.gitignore' })), true)
+})
+
+test('isPrecomputeEligible: a submodule binary asset is still skipped (binary rule wins)', () => {
+  assert.equal(isPrecomputeEligible(ef({ filename: 'sub/logo.png', isSubmoduleEntry: true })), false)
 })

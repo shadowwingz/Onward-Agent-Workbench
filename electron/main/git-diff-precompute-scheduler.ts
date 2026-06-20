@@ -51,6 +51,15 @@ export interface PrecomputeSchedulerOptions {
   /** Hard cap on candidates per burst. Default 50. */
   maxCandidatesPerBurst?: number
   /**
+   * How many leading files (in working-set / list order) to warm FIRST, before
+   * the size-descending bulk. The Git Diff viewer auto-selects and loads the
+   * first file in list order on open, so warming the top-of-list files first
+   * makes that first click a cache HIT (and spawns the cat-file batch early)
+   * instead of racing the size-sorted bulk that warms small top files last.
+   * Default 8 (roughly the first visible page). 0 = pure size-descending.
+   */
+  viewportPriorityCount?: number
+  /**
    * Decides whether a file is eligible (e.g. excludes binary-ish extensions).
    * Mirrors the renderer's `shouldPrefetchFileBody` filter.
    */
@@ -77,6 +86,63 @@ interface PendingProject {
 const DEFAULT_CONCURRENCY = 3
 const DEFAULT_DEBOUNCE_MS = 200
 const DEFAULT_MAX_CANDIDATES = 50
+const DEFAULT_VIEWPORT_PRIORITY_COUNT = 8
+
+/**
+ * Extensions whose diff bodies the viewer renders specially (image/pdf/binary)
+ * rather than as text — no point precompute-warming their content.
+ */
+const PREFETCH_SKIP_EXTENSIONS = new Set<string>([
+  'png', 'jpg', 'jpeg', 'gif', 'webp', 'ico', 'bmp', 'tiff',
+  'pdf', 'epub',
+  'zip', 'tar', 'gz', 'bz2', 'xz', '7z', 'rar',
+  'mp3', 'mp4', 'mov', 'avi', 'wav', 'ogg', 'flac',
+  'so', 'dll', 'dylib', 'exe', 'class', 'jar',
+  'woff', 'woff2', 'ttf', 'otf', 'eot',
+  'wasm'
+])
+
+/**
+ * Whether a changed file should be precompute-warmed. Pure + exported for unit
+ * testing.
+ *
+ * Coverage policy (user directive): pre-cache EVERY visible modification under
+ * the project, INCLUDING submodule files. Submodule entries route to their own
+ * per-repoRoot bucket and warm just like parent files — so the first click into
+ * a submodule file is a cache hit, not a cold read. We still skip files with no
+ * readable text body to warm: deleted (`D`) / ignored-removed (`!`), and
+ * binary-ish extensions the diff viewer renders specially rather than as text.
+ */
+export function isPrecomputeEligible(file: DiffFile): boolean {
+  if (file.status === 'D' || file.status === '!') return false
+  const leaf = file.filename.split(/[\\/]/).pop() ?? file.filename
+  const dot = leaf.lastIndexOf('.')
+  if (dot <= 0 || dot === leaf.length - 1) return true
+  const extension = leaf.slice(dot + 1).toLowerCase()
+  return !PREFETCH_SKIP_EXTENSIONS.has(extension)
+}
+
+/**
+ * Order precompute candidates so the files the user sees first are warmed first.
+ *
+ * The Git Diff viewer auto-selects and loads the FIRST file (list order) on
+ * open. Pure size-descending warming put small top-of-list files LAST, so that
+ * first auto-selected file raced (and usually lost to) the user's click → a
+ * cold content-cache miss (and the one-time `cat-file --batch` spawn) on the
+ * first file every time. Warming the leading `viewportPriorityCount` files in
+ * LIST ORDER first, then the rest size-descending, makes the first click a hit
+ * while still front-loading the largest remaining diffs (worst-case win).
+ *
+ * Pure + non-mutating (input array untouched) so it is unit-testable.
+ */
+export function orderPrecomputeCandidates(eligible: DiffFile[], viewportPriorityCount: number): DiffFile[] {
+  const k = Math.max(0, Math.min(viewportPriorityCount, eligible.length))
+  const head = eligible.slice(0, k) // list order — the likely first-viewed files
+  const tail = eligible
+    .slice(k)
+    .sort((a, b) => (b.additions + b.deletions) - (a.additions + a.deletions))
+  return [...head, ...tail]
+}
 
 export interface PrecomputeBurstSummary {
   /** ms epoch when this burst finished. */
@@ -134,6 +200,7 @@ export class GitDiffPrecomputeScheduler {
       concurrency: options.concurrency ?? DEFAULT_CONCURRENCY,
       debounceMs: options.debounceMs ?? DEFAULT_DEBOUNCE_MS,
       maxCandidatesPerBurst: options.maxCandidatesPerBurst ?? DEFAULT_MAX_CANDIDATES,
+      viewportPriorityCount: options.viewportPriorityCount ?? DEFAULT_VIEWPORT_PRIORITY_COUNT,
       isEligible: options.isEligible,
       timer: options.timer,
       fetchFile: options.fetchFile,
@@ -244,9 +311,10 @@ export class GitDiffPrecomputeScheduler {
       const eligible = workingSet
         .filter((file) => (this.options.isEligible ? this.options.isEligible(file) : true))
       eligibleCount = eligible.length
-      const candidates = eligible
-        .sort((a, b) => (b.additions + b.deletions) - (a.additions + a.deletions))
-        .slice(0, this.options.maxCandidatesPerBurst)
+      const candidates = orderPrecomputeCandidates(
+        eligible,
+        this.options.viewportPriorityCount
+      ).slice(0, this.options.maxCandidatesPerBurst)
       candidateCount = candidates.length
 
       // Bounded-concurrency worker loop. Plain index pointer so we don't

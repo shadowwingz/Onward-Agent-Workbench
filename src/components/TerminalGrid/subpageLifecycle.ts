@@ -9,6 +9,11 @@ import type { SubpageSnapshot } from './subpageStateMemory'
 
 export interface SubpageLifecycleContext {
   command: SubpageRouteCommand
+  // Populated ONLY for `afterEnter` when a subpage is RE-ENTERED via a switch
+  // and a previously-saved snapshot exists for this scope; null/undefined for a
+  // fresh open (so the entered subpage restores on switch-back but opens blank
+  // on a fresh open). `beforeLeave` ignores it.
+  restoredSnapshot?: SubpageSnapshot | null
 }
 
 export interface SubpageLifecycleController {

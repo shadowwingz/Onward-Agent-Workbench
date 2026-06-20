@@ -164,6 +164,10 @@ export interface PerformanceTraceStatus {
   filePath: string | null
   eventCount: number
   droppedEvents: number
+  // Of droppedEvents, the subset dropped by the per-name rate limiter (EXPECTED
+  // decimation of high-frequency events). droppedEvents - rateLimitedDropped is
+  // genuine store-failure loss.
+  rateLimitedDropped: number
 }
 
 export interface DebugApiTerminalWriteResult {
@@ -432,6 +436,7 @@ export interface GitDiffResult {
 export interface GitDiffLoadOptions {
   scope?: 'root-only' | 'full'
   force?: boolean
+  background?: boolean
 }
 
 export interface GitCommitInfo {
@@ -537,6 +542,7 @@ export interface GitFileContentRequestOptions {
   force?: boolean
   missReason?: GitDiffContentCacheMissReason
   allowLargeFile?: boolean
+  priority?: 'high' | 'normal' | 'low'
 }
 
 export interface GitFileContentResult {
@@ -1202,6 +1208,7 @@ export interface DebugAPI {
   profile: boolean
   profileCwd: string | null
   autotest: boolean
+  autotestRealFileChoice: boolean
   autotestCwd: string | null
   autotestSuite: string | null
   autotestExit: boolean
@@ -2121,6 +2128,12 @@ const debugAutotestEnabled = process.env.ONWARD_AUTOTEST === '1'
 const debugAutotestCwd = process.env.ONWARD_AUTOTEST_CWD || null
 const debugAutotestSuite = process.env.ONWARD_AUTOTEST_SUITE || null
 const debugAutotestExit = process.env.ONWARD_AUTOTEST_EXIT === '1'
+// Opt-OUT of the autotest "auto-resolve file-open-choice to text" shortcut so a
+// suite that explicitly tests the binary choice dialog (project-editor-large-file
+// PLF-11..15) gets the REAL dialog. Default (unset) keeps the safe auto-text
+// behaviour for every other suite (navigation-marker .txt files appear binary on
+// Windows and must never block).
+const debugAutotestRealFileChoice = debugAutotestEnabled && process.env.ONWARD_AUTOTEST_REAL_FILE_CHOICE === '1'
 const debugAutotestFixtureExtra = process.env.ONWARD_AUTOTEST_FIXTURE_EXTRA || null
 const debugAutotestHtmlFixturePath = process.env.ONWARD_AUTOTEST_HTML_FIXTURE_PATH || null
 const debugAutotestHtmlExpectedTitle = process.env.ONWARD_AUTOTEST_HTML_EXPECTED_TITLE || null
@@ -2150,6 +2163,7 @@ const debugAPI: DebugAPI = {
   profile: debugProfileEnabled,
   profileCwd: debugProfileCwd,
   autotest: debugAutotestEnabled,
+  autotestRealFileChoice: debugAutotestRealFileChoice,
   autotestCwd: debugAutotestCwd,
   autotestSuite: debugAutotestSuite,
   autotestExit: debugAutotestExit,

@@ -139,6 +139,12 @@ test('parseStatusPorcelainV2Z handles empty output', () => {
   assert.deepEqual(result.files, [])
 })
 
+test('parseStatusPorcelainV2Z returns null branchOid when no header is present', () => {
+  // P0 freshness signal: absent header (e.g. empty output) → null oid so the
+  // History cache key falls back rather than keying on a stale value.
+  assert.equal(parseStatusPorcelainV2Z('', '/repo').branchOid, null)
+})
+
 test('parseStatusPorcelainV2Z parses branch header from concatenated chunk', () => {
   // Porcelain v2 header chunks are LF-separated and packed before the
   // first NUL; we accept either pattern.
@@ -146,6 +152,25 @@ test('parseStatusPorcelainV2Z parses branch header from concatenated chunk', () 
   const result = parseStatusPorcelainV2Z(out, '/repo')
   assert.equal(result.branch, 'main')
   assert.equal(result.status, 'clean')
+  // P0: full HEAD oid surfaced as the History cache's third freshness signal.
+  assert.equal(result.branchOid, 'abc123def')
+})
+
+test('parseStatusPorcelainV2Z surfaces the FULL oid even when branch is a short-sha fallback', () => {
+  // Detached HEAD: `branch` collapses to a 7-char display sha, but branchOid
+  // must still carry the complete object id so the History key stays exact.
+  const out = '# branch.oid abcdef0123456789\n# branch.head (detached)\n\0'
+  const result = parseStatusPorcelainV2Z(out, '/repo')
+  assert.equal(result.branch, 'abcdef0')
+  assert.equal(result.branchOid, 'abcdef0123456789')
+})
+
+test('parseStatusPorcelainV2Z carries the literal (initial) oid for a commit-less repo', () => {
+  // A brand-new repo: `# branch.oid (initial)`. The literal is a stable
+  // discriminator until the first commit lands (then branchOid moves).
+  const out = '# branch.oid (initial)\n# branch.head (initial)\n\0'
+  const result = parseStatusPorcelainV2Z(out, '/repo')
+  assert.equal(result.branchOid, '(initial)')
 })
 
 test('parseStatusPorcelainV2Z reports short SHA for detached HEAD', () => {

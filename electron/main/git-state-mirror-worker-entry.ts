@@ -46,8 +46,18 @@ import {
   type MirrorWorkerEntryCore
 } from './git-state-mirror-worker-core'
 import { buildMirrorChangeFingerprint } from './git-state-mirror-change-fingerprint'
-import { GitReconcileScheduler, type ReconcileReason } from './git-reconcile-scheduler'
+import {
+  GitReconcileScheduler,
+  RECONCILE_FOCUSED_INTERVAL_MS,
+  RECONCILE_VISIBLE_INTERVAL_MS,
+  RECONCILE_BACKOFF_FACTOR,
+  RECONCILE_MAX_BACKOFF_INTERVAL_MS,
+  computeEffectiveIntervalMs,
+  type ReconcileReason
+} from './git-reconcile-scheduler'
 import { parseStatusPorcelainV2Z } from './git-porcelain-parse'
+import { buildGitStatusPorcelainArgs } from './git-status-args'
+import { gitignoreToWatchIgnoreGlobs } from './git-gitignore-watch-globs'
 import { performanceTrace } from './performance-trace'
 import { PERF_TRACE_EVENT } from '../../src/utils/perf-trace-names'
 
@@ -379,15 +389,20 @@ async function computeMirrorState(cwd: string): Promise<MirrorState> {
   })()
 
   try {
+    // kar-qemu Git Diff optimization #2: `--ignore-submodules=dirty` stops this
+    // superproject status from recursively walking each submodule's working tree
+    // (the dominant cost — measured at up to 12.2s for one recompute on
+    // kar-qemu). The parent still reports a submodule whose recorded commit
+    // pointer changed (new commits / staged gitlink), so the terminal git-state
+    // dot still flips for meaningful submodule changes; only submodule
+    // working-tree dirt/untracked no longer forces the recursive enumeration.
     const stdout = await spawnGit(
-      [
-        '-c', 'core.quotepath=false',
-        'status',
-        '--porcelain=2',
-        '--branch',
-        '-z',
-        '--untracked-files=all'
-      ],
+      buildGitStatusPorcelainArgs({
+        branch: true,
+        z: true,
+        untracked: 'all',
+        ignoreSubmodules: 'dirty'
+      }),
       meta.repoRoot
     )
     const parsed = parseStatusPorcelainV2Z(stdout, meta.repoRoot)
@@ -404,6 +419,7 @@ async function computeMirrorState(cwd: string): Promise<MirrorState> {
       repoRoot: meta.repoRoot,
       repoName,
       branch: parsed.branch,
+      branchOid: parsed.branchOid ?? undefined,
       status: parsed.status,
       files: parsed.files,
       capturedAt,
@@ -748,6 +764,7 @@ function resolveFocusedRepoRootKey(cwd: string | null): string | null {
 
 async function runGroupReconcile(group: MirrorWatcherGroup, reason: ReconcileReason): Promise<void> {
   reconcileScheduler.onReconcileStart(group.repoRootKey)
+  const startedAt = Date.now()
   let changed = false
   try {
     const results = await Promise.all(
@@ -760,7 +777,36 @@ async function runGroupReconcile(group: MirrorWatcherGroup, reason: ReconcileRea
       error: error instanceof Error ? error.message : String(error)
     })
   } finally {
-    reconcileScheduler.onReconcileDone(group.repoRootKey, Date.now())
+    // Feed the measured status duration back so the scheduler adapts the next
+    // gap (Prometheus "interval > probe duration" principle). On an EDR host
+    // where status takes seconds this stretches the heartbeat so it can't run
+    // back-to-back; on a fast host duration×factor stays under the base, so the
+    // cadence is unchanged.
+    const durationMs = Date.now() - startedAt
+    reconcileScheduler.onReconcileDone(group.repoRootKey, Date.now(), durationMs)
+    // Diagnostic: surface WHEN/by-how-much the backoff engaged, so a future
+    // "Diff still slow on EDR" trace shows whether the heartbeat stopped
+    // saturating the spawn budget. Off the hot path (per reconcile completion,
+    // only when the gap actually stretched). base picked by current focus.
+    const baseIntervalMs =
+      group.repoRootKey === focusedRepoRootKey
+        ? RECONCILE_FOCUSED_INTERVAL_MS
+        : RECONCILE_VISIBLE_INTERVAL_MS
+    const nextIntervalMs = computeEffectiveIntervalMs(
+      baseIntervalMs,
+      durationMs,
+      RECONCILE_BACKOFF_FACTOR,
+      RECONCILE_MAX_BACKOFF_INTERVAL_MS
+    )
+    if (nextIntervalMs > baseIntervalMs) {
+      performanceTrace.record(PERF_TRACE_EVENT.WORKER_GIT_STATE_MIRROR_RECONCILE_BACKOFF, {
+        repoRoot: group.repoRoot,
+        lastStatusMs: durationMs,
+        baseIntervalMs,
+        nextIntervalMs,
+        factor: RECONCILE_BACKOFF_FACTOR
+      })
+    }
   }
   // Drift: a heartbeat reconcile produced a real change while the watcher had
   // been silent — the watcher silently missed the event. Make it observable so
@@ -886,6 +932,20 @@ async function handleWatcherFault(
   scheduleWatcherRestart(group, failureKind)
 }
 
+// Read the repo-root .gitignore and convert its directory patterns into
+// parcel-watcher ignore globs. Error-safe: a missing/unreadable .gitignore
+// yields no extra globs (watcher behaves exactly as before). Only the root
+// .gitignore is consulted (the common case); nested .gitignores are not parsed
+// in this pass — those paths still fire and recompute as before.
+async function readGitignoreWatchGlobs(repoRoot: string): Promise<string[]> {
+  try {
+    const content = await fs.readFile(join(repoRoot, '.gitignore'), 'utf-8')
+    return gitignoreToWatchIgnoreGlobs(content)
+  } catch {
+    return []
+  }
+}
+
 async function startWatcherForGroup(group: MirrorWatcherGroup): Promise<() => Promise<void>> {
   if (shuttingDown) {
     throw new Error('worker is shutting down')
@@ -894,6 +954,19 @@ async function startWatcherForGroup(group: MirrorWatcherGroup): Promise<() => Pr
     autotestSubscribeFailurePending = false
     throw new Error('autotest subscribe failure')
   }
+  // Suppress churning git-IGNORED directories at the watcher level. kar-qemu (a
+  // running QEMU emulator) continuously rewrites gitignored build artifacts
+  // (build/framebuffer.raw, build/serial_output.txt); without this, every write
+  // fired a watcher event and a debounced `git status` recompute that found
+  // nothing changed but re-walked the huge worktree. We convert ONLY directory
+  // patterns (negation-immune) from the repo's .gitignore into parcel ignore
+  // globs, so those paths never produce an event in the first place.
+  const gitignoreGlobs = await readGitignoreWatchGlobs(group.repoRoot)
+  performanceTrace.record(PERF_TRACE_EVENT.WORKER_GIT_STATE_MIRROR_GITIGNORE_GLOBS, {
+    repoRoot: group.repoRoot,
+    globCount: gitignoreGlobs.length
+  })
+
   // Single parcel-watcher subscription covering both working tree and
   // .git/**. The callback uses classifyEventPath to drop noise (objects,
   // lockfiles, tmpfiles) and keep state-relevant paths.
@@ -936,7 +1009,7 @@ async function startWatcherForGroup(group: MirrorWatcherGroup): Promise<() => Pr
       lastWatcherFireAt.set(group.repoRootKey, Date.now())
       scheduleGroupRecompute(group, keptPaths)
     }
-  }, { ignore: [...MIRROR_WATCHER_IGNORE] })
+  }, { ignore: [...MIRROR_WATCHER_IGNORE, ...gitignoreGlobs] })
 
   // Subscription is live — count it for the shutdown quiesce barrier.
   activeWatcherSubscriptions += 1
@@ -1248,7 +1321,10 @@ async function readFileBody(cwd: string, fileKey: string, force: boolean): Promi
   let statToken = '-'
   try {
     const st = await fs.stat(absPath, { bigint: true })
-    statToken = `${st.mtimeNs}:${st.ctimeNs}:${st.size}:${st.mode}`
+    // Exclude ctime — see git-state-mirror-change-fingerprint.ts: on NTFS a
+    // metadata-only touch bumps ctime without mtime, which would needlessly
+    // invalidate a cached file body. mtimeNs + size + mode track real content.
+    statToken = `${st.mtimeNs}:${st.size}:${st.mode}`
   } catch {
     statToken = 'missing'
   }

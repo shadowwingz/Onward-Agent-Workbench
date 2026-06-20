@@ -145,7 +145,15 @@
     },
     "patchedDependencies": {
       "@xterm/addon-webgl@0.18.0": "patches/@xterm__addon-webgl@0.18.0.patch"
-    }
+    },
+    "onlyBuiltDependencies": [
+      "@parcel/watcher",
+      "@vscode/ripgrep",
+      "electron",
+      "electron-winstaller",
+      "esbuild",
+      "node-pty"
+    ]
   },
   "devDependencies": {
     "@electron/rebuild": "^4.0.3",

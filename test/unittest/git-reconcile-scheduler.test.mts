@@ -19,6 +19,9 @@ import {
   GitReconcileScheduler,
   RECONCILE_FOCUSED_INTERVAL_MS,
   RECONCILE_VISIBLE_INTERVAL_MS,
+  RECONCILE_BACKOFF_FACTOR,
+  RECONCILE_MAX_BACKOFF_INTERVAL_MS,
+  computeEffectiveIntervalMs,
   type DueRepo
 } from '../../electron/main/git-reconcile-scheduler.ts'
 
@@ -196,4 +199,105 @@ test('custom intervals are honored', () => {
   s.onReconcileStart(REPO_A); s.onReconcileDone(REPO_A, 0)
   assert.deepEqual(s.tick(499), [])
   assert.deepEqual(dueKeys(s.tick(500)), [REPO_A])
+})
+
+// ---------------------------------------------------------------------------
+// Adaptive backoff (EDR-slow-status fix): the effective gap stretches to
+// lastDurationMs × factor when status is slow, so the heartbeat can't run
+// back-to-back. On a fast host it stays at the base 1 s/3 s (zero regression).
+// ---------------------------------------------------------------------------
+
+test('computeEffectiveIntervalMs: base when status is fast, stretched when slow, capped, floored', () => {
+  const F = RECONCILE_BACKOFF_FACTOR
+  const MAX = RECONCILE_MAX_BACKOFF_INTERVAL_MS
+  // No prior status (0 / negative) => base, so the first reconcile is never delayed.
+  assert.equal(computeEffectiveIntervalMs(1000, 0, F, MAX), 1000)
+  assert.equal(computeEffectiveIntervalMs(1000, -5, F, MAX), 1000)
+  // Fast status (50 ms): 50×4=200 < 1000 base => stays at base (NORMAL host, no regression).
+  assert.equal(computeEffectiveIntervalMs(1000, 50, F, MAX), 1000)
+  // Status at the floor boundary: 250×4=1000 == base.
+  assert.equal(computeEffectiveIntervalMs(1000, 250, F, MAX), 1000)
+  // Slow status (1300 ms, EDR median): 1300×4=5200 => stretches.
+  assert.equal(computeEffectiveIntervalMs(1000, 1300, F, MAX), 5200)
+  assert.equal(computeEffectiveIntervalMs(3000, 1300, F, MAX), 5200)
+  // Peak spike (12900 ms): 12900×4=51600 < 60000 cap => 51600.
+  assert.equal(computeEffectiveIntervalMs(1000, 12900, F, MAX), 51600)
+  // Pathological (20000 ms): 20000×4=80000 capped at 60000.
+  assert.equal(computeEffectiveIntervalMs(1000, 20000, F, MAX), MAX)
+})
+
+test('backoff: a slow focused status pushes the next gap to duration × factor, not 1 s', () => {
+  const s = new GitReconcileScheduler()
+  s.setTaskState('t1', REPO_A, 'focused')
+  s.onReconcileStart(REPO_A)
+  // Status took 1300 ms (EDR) -> next effective gap = max(1000, 1300×4) = 5200.
+  s.onReconcileDone(REPO_A, 1300, 1300)
+  assert.deepEqual(s.tick(1300 + 1000), [], 'NOT due at the base 1 s gap — backoff engaged')
+  assert.deepEqual(s.tick(1300 + 5199), [], 'not due just before the stretched gap')
+  const due = s.tick(1300 + 5200)
+  assert.deepEqual(dueKeys(due), [REPO_A], 'due exactly at lastReconcileAt + 5200')
+  assert.equal(due[0].reason, 'heartbeat-focused')
+})
+
+test('backoff: a fast status keeps the base cadence (zero regression on a normal host)', () => {
+  const s = new GitReconcileScheduler()
+  s.setTaskState('t1', REPO_A, 'focused')
+  s.onReconcileStart(REPO_A)
+  s.onReconcileDone(REPO_A, 50, 50) // 50 ms status: 50×4=200 < 1000 -> still 1 s
+  assert.deepEqual(s.tick(50 + 999), [])
+  assert.deepEqual(dueKeys(s.tick(50 + 1000)), [REPO_A], 'base 1 s cadence preserved')
+})
+
+test('backoff: omitting durationMs (legacy callers) keeps the base cadence', () => {
+  const s = new GitReconcileScheduler()
+  s.setTaskState('t1', REPO_A, 'visible')
+  s.onReconcileStart(REPO_A)
+  s.onReconcileDone(REPO_A, 100) // no duration arg -> no backoff
+  assert.deepEqual(s.tick(100 + 3000 - 1), [])
+  assert.deepEqual(dueKeys(s.tick(100 + 3000)), [REPO_A])
+})
+
+test('backoff: cadence recovers to base after status speeds back up', () => {
+  const s = new GitReconcileScheduler()
+  s.setTaskState('t1', REPO_A, 'focused')
+  // Slow once -> stretched gap.
+  s.onReconcileStart(REPO_A)
+  s.onReconcileDone(REPO_A, 1000, 2000) // 2000×4=8000
+  assert.deepEqual(s.tick(1000 + 1000), [], 'still backed off')
+  const due1 = s.tick(1000 + 8000)
+  assert.deepEqual(dueKeys(due1), [REPO_A])
+  // Next status is fast -> gap returns to base 1 s.
+  s.onReconcileStart(REPO_A)
+  s.onReconcileDone(REPO_A, 9000, 40)
+  assert.deepEqual(dueKeys(s.tick(9000 + 1000)), [REPO_A], 'recovered to the 1 s base')
+})
+
+test('backoff is per-repo independent: a slow repo does not stall a fast repo', () => {
+  const s = new GitReconcileScheduler()
+  s.setTaskState('t1', REPO_A, 'focused') // slow
+  s.setTaskState('t2', REPO_B, 'focused') // fast
+  s.onReconcileStart(REPO_A); s.onReconcileDone(REPO_A, 0, 1300) // A stretched to 5200
+  s.onReconcileStart(REPO_B); s.onReconcileDone(REPO_B, 0, 30)   // B stays at 1000
+  // At 1 s: only the fast repo B is due; the slow repo A is still backed off.
+  assert.deepEqual(dueKeys(s.tick(1000)), [REPO_B])
+  s.onReconcileStart(REPO_B); s.onReconcileDone(REPO_B, 1000, 30)
+  // At 5200: A finally due (B not — it last ran at 1000, fast cadence 1 s, so also due).
+  assert.deepEqual(dueKeys(s.tick(5200)), [REPO_A, REPO_B])
+})
+
+test('backoff: explicit dirty (watcher) still fires immediately even while backed off', () => {
+  const s = new GitReconcileScheduler()
+  s.setTaskState('t1', REPO_A, 'focused')
+  s.onReconcileStart(REPO_A); s.onReconcileDone(REPO_A, 0, 5000) // stretched to 20000
+  assert.deepEqual(s.tick(1000), [], 'heartbeat backed off')
+  // A real file change must NOT wait for the stretched heartbeat.
+  s.markDirty(REPO_A, 'watcher')
+  const due = s.tick(1100)
+  assert.deepEqual(dueKeys(due), [REPO_A])
+  assert.equal(due[0].reason, 'watcher', 'dirty bypasses backoff — freshness preserved on real events')
+})
+
+test('exported backoff constants match the agreed design (factor 4, 60 s ceiling)', () => {
+  assert.equal(RECONCILE_BACKOFF_FACTOR, 4)
+  assert.equal(RECONCILE_MAX_BACKOFF_INTERVAL_MS, 60_000)
 })

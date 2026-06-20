@@ -103,6 +103,17 @@ export function getFieldAfterSpaceCount(record: string, spacesBeforeField: numbe
 
 export interface ParsedStatus {
   branch: string | null
+  /**
+   * Full HEAD object id from `# branch.oid`. Already parsed for the
+   * detached-HEAD short-sha fallback below; surfaced here as the History
+   * cache's third freshness signal (a new commit / amend / checkout moves it,
+   * which is how the History list cache + prewarm commit set know to
+   * recompute). Carries the raw header value verbatim — including the literal
+   * `(initial)` git emits for a brand-new repo with no commit (still a stable
+   * cache discriminator until the first commit lands). `null` only when the
+   * header is absent (empty output / `--branch` not requested).
+   */
+  branchOid: string | null
   status: TerminalGitStatus
   files: GitFileStatus[]
 }
@@ -119,7 +130,7 @@ export function parseStatusPorcelainV2Z(output: string, repoRoot: string): Parse
   let branch: string | null = null
   let branchOid: string | null = null
   const categories = new Set<GitChangeCategory>()
-  if (!output) return { branch, status: 'clean', files }
+  if (!output) return { branch, branchOid, status: 'clean', files }
 
   const tokens = output.split('\0')
   let i = 0
@@ -241,5 +252,5 @@ export function parseStatusPorcelainV2Z(output: string, repoRoot: string): Parse
     branch = branchOid ? branchOid.slice(0, 7) : null
   }
 
-  return { branch, status: deriveTerminalGitStatus(categories), files }
+  return { branch, branchOid, status: deriveTerminalGitStatus(categories), files }
 }

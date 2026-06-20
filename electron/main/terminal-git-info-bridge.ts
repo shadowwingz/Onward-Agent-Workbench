@@ -29,8 +29,36 @@ import {
   mirrorStateToTerminalGitInfo
 } from './terminal-git-info-helpers'
 import type { MirrorState } from './git-state-mirror-types'
+import type { RepoPrewarmReason, RepoPrewarmRequest } from './git-repo-prewarm'
 
 export type TerminalInfoEmitter = (terminalId: string, info: TerminalGitInfo) => void
+
+/**
+ * Repo prewarm hooks the bridge invokes on its two trigger edges. Kept as a
+ * thin facade (not a direct import of the coordinator) so the bridge stays
+ * decoupled and the wiring in ipc-handlers owns the coordinator instance.
+ */
+export interface BridgePrewarmHooks {
+  /**
+   * Leading edge of a NEW cwd — terminal subscribe (cold start) or `cd` into
+   * another repo. Warms Diff (once per cwd) + History (once per cwd::branchOid).
+   */
+  onCwdAttached(req: RepoPrewarmRequest): void
+  /**
+   * Every mirror-update for a subscribed cwd. Warms History ONLY (and only when
+   * branchOid actually moved — the coordinator's cwd::branchOid dedup makes the
+   * common working-tree-edit update a no-op). The Diff lane is never re-warmed
+   * here (decision ⑥).
+   */
+  onMirrorUpdated(req: RepoPrewarmRequest): void
+  /**
+   * A terminal left `cwd` (cd away / terminal closed) and no OTHER live terminal
+   * still subscribes it. The coordinator schedules a grace-windowed cancel of the
+   * abandoned cwd's background precompute (a quick return aborts it). Optional so
+   * tests / callers without the scheduler wired can omit it.
+   */
+  onCwdDetached?(cwd: string): void
+}
 
 interface TerminalEntry {
   terminalId: string
@@ -58,7 +86,17 @@ export class TerminalGitInfoBridge {
   // 1 s focused cadence at the new repo — focus events alone do not fire on `cd`.
   private focusedTerminalId: string | null = null
 
-  constructor(private emit: TerminalInfoEmitter) {
+  constructor(
+    private emit: TerminalInfoEmitter,
+    /**
+     * Repo prewarm hooks. `onCwdAttached` fires on the leading edge of a new cwd
+     * (attach); `onMirrorUpdated` fires on every mirror-update (History re-warm
+     * on branchOid change). Optional so tests / callers that don't want prewarm
+     * can omit it. Fire-and-forget; the coordinator owns dedup + error guards,
+     * so neither hook throws back into the emit path.
+     */
+    private prewarm?: BridgePrewarmHooks
+  ) {
     this.offMirrorUpdate = gitStateMirrorRouter.onMirrorUpdate((cwd, state) => {
       this.handleMirrorUpdate(cwd, state)
     })
@@ -156,10 +194,21 @@ export class TerminalGitInfoBridge {
   // Internal
   // ---------------------------------------------------------------------
 
-  private attachMirror(entry: TerminalEntry, cwd: string): void {
+  private attachMirror(entry: TerminalEntry, cwd: string, reason: RepoPrewarmReason = 'attach'): void {
     const subscribedCwd = gitStateMirrorRouter.canonicaliseCwd(cwd)
     const snapshot = gitStateMirrorRouter.internalSubscribe(subscribedCwd)
     entry.subscribedCwd = subscribedCwd
+    // Prewarm-on-cwd-switch: the moment a terminal resolves a (new) cwd, front-
+    // run the Git Diff + History work the UI would otherwise pay on open. Fired
+    // here — the leading edge of attach. The coordinator dedups Diff by cwd and
+    // History by cwd::branchOid; if the snapshot has no branchOid yet (cold
+    // attach), History waits for the first mirror-update below to carry it.
+    this.prewarm?.onCwdAttached({
+      cwd: subscribedCwd,
+      repoRoot: snapshot?.repoRoot ?? null,
+      branchOid: snapshot?.branchOid,
+      reason
+    })
     // Emit immediately if router already had the latest snapshot for this
     // cwd (e.g. another terminal at the same cwd is already subscribed).
     if (snapshot) {
@@ -172,18 +221,49 @@ export class TerminalGitInfoBridge {
   }
 
   private detachMirror(entry: TerminalEntry): void {
-    if (entry.subscribedCwd) {
-      gitStateMirrorRouter.internalUnsubscribe(entry.subscribedCwd)
+    const detachedCwd = entry.subscribedCwd
+    if (detachedCwd) {
+      gitStateMirrorRouter.internalUnsubscribe(detachedCwd)
       entry.subscribedCwd = null
+      // If no OTHER live terminal is still subscribed to this cwd, it is now
+      // abandoned — let the coordinator schedule a grace-period cancel of its
+      // background precompute. Skipped on full dispose (reset() handles teardown)
+      // and when another terminal keeps the cwd alive (its warm is still useful).
+      if (!this.disposed && !this.anyEntrySubscribed(detachedCwd)) {
+        this.prewarm?.onCwdDetached?.(detachedCwd)
+      }
     }
+  }
+
+  /** True when any live terminal entry is currently subscribed to `cwd`. */
+  private anyEntrySubscribed(cwd: string): boolean {
+    for (const e of this.entries.values()) {
+      if (e.subscribedCwd === cwd) return true
+    }
+    return false
   }
 
   private handleMirrorUpdate(cwd: string, state: MirrorState): void {
     if (this.disposed) return
+    let matched = false
     for (const entry of this.entries.values()) {
       if (entry.subscribedCwd === cwd) {
+        matched = true
         this.tryEmit(entry, stateToInfo(state, entry.cwd ?? cwd))
       }
+    }
+    // History re-warm on branchOid change (decision ⑦). The coordinator dedups
+    // by cwd::branchOid, so this is a cheap no-op on the common working-tree-edit
+    // update and only does real work when a new commit / amend / checkout moved
+    // HEAD. Gated on `matched` so updates for repos no terminal watches are
+    // ignored, and on a non-null branchOid (the History cache's freshness key).
+    if (matched && state.branchOid) {
+      this.prewarm?.onMirrorUpdated({
+        cwd,
+        repoRoot: state.repoRoot,
+        branchOid: state.branchOid,
+        reason: 'branch-change'
+      })
     }
   }
 
@@ -208,7 +288,7 @@ export class TerminalGitInfoBridge {
     this.detachMirror(entry)
     entry.cwd = nextCwd
     if (nextCwd) {
-      this.attachMirror(entry, nextCwd)
+      this.attachMirror(entry, nextCwd, 'cwd-change')
     } else {
       this.tryEmit(entry, emptyInfo(null))
     }

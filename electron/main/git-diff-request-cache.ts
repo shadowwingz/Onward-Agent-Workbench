@@ -135,6 +135,19 @@ export class GitDiffRequestCacheController<T> {
     return cleared
   }
 
+  /**
+   * Directly store a pre-computed value (batch warming). Used by the History
+   * prewarm (git-op aggregation A2) to prime MANY commit-diff entries from a
+   * SINGLE `git log --raw --numstat` parse, instead of running one `get(load)`
+   * — and thus one git spawn — per commit. The value is cloned on store like
+   * any other entry, so callers may reuse their object.
+   */
+  prime(key: string, value: T): void {
+    const at = this.now()
+    this.cache.set(key, { value: this.options.clone(value), at })
+    this.prune(at)
+  }
+
   clear(): void {
     this.cache.clear()
     this.inFlight.clear()
@@ -165,10 +178,23 @@ export class GitDiffRequestCacheController<T> {
 
   private prune(now: number): void {
     if (this.cache.size <= this.options.maxEntries) return
+    // First drop time-expired entries.
     for (const [key, entry] of this.cache) {
       if (now - entry.at > this.options.ttlMs) {
         this.cache.delete(key)
       }
+    }
+    // With an event-driven (watcher-invalidated) cache the TTL is deliberately
+    // long, so age-based pruning may free nothing. Fall back to insertion-order
+    // (FIFO ≈ LRU) eviction of the oldest entries until we are back under the
+    // cap, so the resident set stays bounded regardless of TTL.
+    if (this.cache.size <= this.options.maxEntries) return
+    const overflow = this.cache.size - this.options.maxEntries
+    let dropped = 0
+    for (const key of this.cache.keys()) {
+      if (dropped >= overflow) break
+      this.cache.delete(key)
+      dropped += 1
     }
   }
 }

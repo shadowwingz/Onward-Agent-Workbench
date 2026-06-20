@@ -505,7 +505,11 @@ class PerformanceTrace {
       initialized: this.initialized,
       filePath: traceStore.getCurrentChunkPath(),
       eventCount: this.acceptedEvents,
-      droppedEvents: this.droppedEvents
+      droppedEvents: this.droppedEvents,
+      // Of `droppedEvents`, how many were EXPECTED rate-limit decimation (a
+      // high-frequency event exceeding the per-name 100/sec cap). The remainder
+      // (droppedEvents - rateLimitedDropped) is genuine store-failure loss.
+      rateLimitedDropped: traceStore.getRateLimitedDropped()
     }
   }
 

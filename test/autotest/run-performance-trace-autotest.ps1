@@ -73,26 +73,42 @@ if ($content -match "\[AutoTest\] FAIL") {
   exit 1
 }
 
-if ($content -notmatch "PT-09-no-dropped-events") {
+if ($content -notmatch "PT-09-no-silent-event-loss") {
   Write-Host "Missing PT-09 result; the test may not have executed correctly" -ForegroundColor Yellow
   Get-Content $LogFile -Tail 40
   exit 1
 }
 
-$traceLine = Select-String -Path $LogFile -Pattern "\[PerfTrace\] Active \(ONWARD_PERF_TRACE=1\): " | Select-Object -Last 1
+# The log emits: [PerfTrace] enabled format=ndjson-chunked dir=<dir> (<kind>)
+# (.sh parity). Extract <dir>, stripping the trailing ' (<kind>)' suffix — the
+# regex MUST include the closing paren, matching the .sh fix.
+$traceLine = Select-String -Path $LogFile -Pattern "\[PerfTrace\] enabled format=ndjson-chunked dir=" | Select-Object -Last 1
 if (-not $traceLine) {
-  Write-Host "Performance trace file path was not logged" -ForegroundColor Red
+  Write-Host "Performance trace directory not found in log (expected [PerfTrace] enabled ...)" -ForegroundColor Red
+  Get-Content $LogFile -Tail 40
   exit 1
 }
 
-$TraceFile = $traceLine.Line -replace '^.*\[PerfTrace\] Active \(ONWARD_PERF_TRACE=1\): ', ''
-if (-not (Test-Path $TraceFile)) {
-  Write-Host "Performance trace file was not written: $TraceFile" -ForegroundColor Red
+$TraceDir = $traceLine.Line -replace '^.*\[PerfTrace\] enabled format=ndjson-chunked dir=', '' -replace ' \([^)]*\)$', ''
+if (-not (Test-Path -PathType Container $TraceDir)) {
+  Write-Host "Performance trace directory not found: $TraceDir" -ForegroundColor Red
   exit 1
 }
 
-node (Join-Path $RootDir "test\autotest\validate-performance-trace-contract.mjs") $TraceFile
+# Pick the most recently written chunk; the validator reads ALL chunks in the
+# directory (session-start lives in the first chunk), so any chunk path works.
+$TraceFile = Get-ChildItem -Path $TraceDir -Filter 'perf-*.jsonl' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+if (-not $TraceFile) {
+  Write-Host "No performance trace chunks found in $TraceDir" -ForegroundColor Red
+  exit 1
+}
+
+node (Join-Path $RootDir "test\autotest\validate-performance-trace-contract.mjs") $TraceFile.FullName
+if ($LASTEXITCODE -ne 0) {
+  Write-Host "Performance trace contract FAILED" -ForegroundColor Red
+  exit 1
+}
 
 Write-Host "Performance Trace autotest PASSED" -ForegroundColor Green
 Write-Host "  Log:   $LogFile"
-Write-Host "  Trace: $TraceFile"
+Write-Host "  Trace: $($TraceFile.FullName)"

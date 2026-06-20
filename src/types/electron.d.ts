@@ -98,6 +98,10 @@ export interface PerformanceTraceStatus {
   filePath: string | null
   eventCount: number
   droppedEvents: number
+  // Of droppedEvents, the subset dropped by the per-name rate limiter (EXPECTED
+  // decimation of high-frequency events). droppedEvents - rateLimitedDropped is
+  // genuine store-failure loss.
+  rateLimitedDropped: number
 }
 
 export interface DebugApiTerminalWriteResult {
@@ -293,6 +297,7 @@ export interface GitDiffResult {
 export interface GitDiffLoadOptions {
   scope?: 'root-only' | 'full'
   force?: boolean
+  background?: boolean
 }
 
 export interface GitCommitInfo {
@@ -392,6 +397,7 @@ export interface GitFileContentRequestOptions {
   force?: boolean
   missReason?: GitDiffContentCacheMissReason
   allowLargeFile?: boolean
+  priority?: 'high' | 'normal' | 'low'
 }
 
 export interface TerminalGitInfo {
@@ -412,6 +418,13 @@ export interface GitStateMirrorSnapshot {
   repoRoot: string | null
   repoName: string | null
   branch: string | null
+  /**
+   * Full HEAD object id (`# branch.oid`). Third freshness signal — moves on
+   * commit / amend / checkout. The renderer History view keys its list cache
+   * on `repoRoot::branchOid::limit::skip`, so a new commit invalidates the
+   * cached page without an extra git spawn. Undefined on non-repo / unknown.
+   */
+  branchOid?: string
   status: TerminalGitStatus | null
   files: GitFileStatus[]
   repos?: GitRepoContext[]
@@ -1038,6 +1051,7 @@ export interface DebugAPI {
   profile: boolean
   profileCwd: string | null
   autotest: boolean
+  autotestRealFileChoice: boolean
   autotestCwd: string | null
   autotestSuite: string | null
   autotestExit: boolean

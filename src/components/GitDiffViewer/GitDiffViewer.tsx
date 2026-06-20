@@ -63,6 +63,11 @@ import {
   type DiffViewMemory,
   type DiffViewMemoryEntry
 } from './diffViewMemory'
+import {
+  emptySubmoduleLoadObservation,
+  foldSubmoduleLoadObservation,
+  type SubmoduleLoadObservation
+} from './submoduleLoadObservation'
 import { resolveGitDiffSplitViewMode, type GitDiffSplitViewMode } from './diffSplitViewMode'
 import { GitDiffDebugPanel } from './GitDiffDebugPanel'
 import { LargeFileConfirmDialog } from '../LargeFileConfirmDialog/LargeFileConfirmDialog'
@@ -734,6 +739,7 @@ type GitDiffDebugApi = {
   getCwd: () => string | null
   getRepoRoot: () => string | null
   isSubmodulesLoading: () => boolean
+  getSubmoduleLoadObservation: () => SubmoduleLoadObservation
   getTiming: () => {
     openRequestedAt: number | null
     shellShownAt: number | null
@@ -1194,6 +1200,10 @@ export function GitDiffViewer({
   const [fileContents, setFileContents] = useState<Record<string, FileContentState>>({})
   const [largeFileConfirmState, setLargeFileConfirmState] = useState<LargeFileConfirmState | null>(null)
   const diffResultRef = useRef<GitDiffResult | null>(null)
+  // Latches whether the root-only outline was shown while submodules were still
+  // loading (DSM-03 / RSM-03). Captured at apply-time in applyLoadedDiffResult so
+  // the autotest reads a deterministic latch instead of racing the transient.
+  const submoduleLoadObservationRef = useRef<SubmoduleLoadObservation>(emptySubmoduleLoadObservation())
   const fileContentsRef = useRef<Record<string, FileContentState>>({})
   const largeFileConfirmRef = useRef<LargeFileConfirmState | null>(null)
   const allowedLargeFileKeysRef = useRef<Set<string>>(new Set())
@@ -2599,6 +2609,21 @@ export function GitDiffViewer({
     previousSelection: GitFileStatus | null
   ) => {
     setDiffResult(result)
+    // Latch the "outline visible while submodules loading" observation
+    // (DSM-03 / RSM-03): the root-only pass arrives with submodulesLoading:true
+    // + repos still loading; the settled full pass leaves the peak unchanged.
+    submoduleLoadObservationRef.current = foldSubmoduleLoadObservation(
+      submoduleLoadObservationRef.current,
+      result
+    )
+    if (result.submodulesLoading === true) {
+      perfTrace(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_SUBMODULE_OUTLINE_OBSERVED, {
+        terminalId,
+        maxLoadingRepoCount: submoduleLoadObservationRef.current.maxLoadingRepoCount,
+        maxNestedLoadingRepoCount: submoduleLoadObservationRef.current.maxNestedLoadingRepoCount,
+        fileCount: result.files?.length ?? 0
+      })
+    }
     lastDiffRef.current = {
       cwd: result.cwd || sourceCwd,
       originalCwd: sourceCwd,
@@ -2833,17 +2858,16 @@ export function GitDiffViewer({
       const initialResult = await window.electronAPI.git.getDiff(cwd, { scope: initialScope, force: Boolean(options?.force) })
       if (loadTokenRef.current !== currentToken) return
 
-      // When submodules are still loading, defer UI update to avoid an
-      // intermediate flash (placeholder → root-only list → full list).
-      // Instead, show placeholder until the full result arrives.
-      const deferForSubmodules = stagedLoad && initialResult.success && initialResult.submodulesLoading
-      if (!deferForSubmodules) {
-        applyLoadedDiffResult(initialResult, cwd, previousSelection)
-      } else {
-        // Expose the nested repository outline while suppressing the partial
-        // root-only file list until the full recursive diff is ready.
-        setDiffResult({ ...initialResult, files: [] })
-      }
+      // Submodule two-stage DECOUPLE (prewarm-cache audit fix #3): paint the
+      // fast root-only superproject file list IMMEDIATELY instead of suppressing
+      // it behind the slowest submodule. Previously, when submodules were still
+      // resolving, the root-only files were hidden (empty list) until the full
+      // recursive diff landed — so a nested-submodule repo (kar-qemu: an 8-10 s
+      // submodule walk) blocked the superproject's own changed files from
+      // painting for seconds. Now root-only renders in ~ms and the full pass
+      // merges in-place when ready; the root-only files stay visible/clickable
+      // throughout.
+      applyLoadedDiffResult(initialResult, cwd, previousSelection)
       debugLog('diff:load:done', {
         cwd: initialResult.cwd || cwd,
         token: currentToken,
@@ -2851,27 +2875,23 @@ export function GitDiffViewer({
         success: initialResult.success,
         fileCount: initialResult.files?.length ?? 0,
         duration: Math.round(performance.now() - start),
-        submodulesLoading: Boolean(initialResult.submodulesLoading),
-        deferred: deferForSubmodules
+        submodulesLoading: Boolean(initialResult.submodulesLoading)
+      })
+      markDiffLoadedForTiming('initial-load', {
+        cwd: initialResult.cwd || cwd,
+        stage: initialScope,
+        fileCount: initialResult.files?.length ?? 0,
+        durationMs: Math.round(performance.now() - start)
       })
 
-      if (!deferForSubmodules) {
-        markDiffLoadedForTiming('initial-load', {
-          cwd: initialResult.cwd || cwd,
-          stage: initialScope,
-          fileCount: initialResult.files?.length ?? 0,
-          durationMs: Math.round(performance.now() - start)
-        })
-      }
-
-      if (deferForSubmodules) {
+      // Second stage: the root-only pass reported submodules still resolving →
+      // fetch the full recursive diff and merge it in-place (root-only files
+      // remain on screen the whole time).
+      const needsFullPass = stagedLoad && initialResult.success && Boolean(initialResult.submodulesLoading)
+      if (needsFullPass) {
         const fullResult = await window.electronAPI.git.getDiff(cwd, { scope: 'full', force: Boolean(options?.force) })
         if (loadTokenRef.current !== currentToken) return
-        applyLoadedDiffResult(
-          fullResult,
-          cwd,
-          previousSelection
-        )
+        applyLoadedDiffResult(fullResult, cwd, previousSelection)
         markDiffLoadedForTiming('full-submodule-load', {
           cwd: fullResult.cwd || cwd,
           stage: 'full',
@@ -2985,6 +3005,11 @@ export function GitDiffViewer({
       if (openingFromClosed) {
         suppressSelectionRestoreOnNextLoadRef.current = true
         suppressMemorySelectionRestoreUntilSelectionRef.current = true
+        // Fresh observation per OPEN (not per loadDiff) — re-loads within the
+        // same open (watcher refresh, force-refresh that skips the root-only
+        // stage) must not clear the latched "outline-while-loading" peak the
+        // initial staged load captured (DSM-03 / RSM-03).
+        submoduleLoadObservationRef.current = emptySubmoduleLoadObservation()
       }
       timingRef.current = {
         openRequestedAt,
@@ -3025,7 +3050,22 @@ export function GitDiffViewer({
     if (isOpen) {
       const reset = resetDiffOnNextLoadRef.current
       resetDiffOnNextLoadRef.current = false
-      loadDiff({ reset, force: reset })
+      // Serve the BACKGROUND-warmed list cache WITHOUT force so the panel paints
+      // instantly (~ms) instead of paying a multi-second cold recompute on the
+      // visible path — the whole point of warmDiffCache + the event-invalidated
+      // (long-TTL) request cache.
+      //
+      // Do NOT fire an unconditional force-revalidate on open. A forced getDiff
+      // routes through the GIT_GET_DIFF handler's `invalidateContentCacheForProject`
+      // (ipc-handlers.ts), which WIPES every prewarmed per-file body for the
+      // project. On EDR-throttled Windows that made the user's first click
+      // cold-miss right after the warm had filled the content cache (RC-2).
+      // Freshness is watcher-driven instead: the `onDiffCacheInvalidated`
+      // subscription below fires a silent force reload whenever a REAL mutation
+      // lands (mtime change), which covers "subpage entry shows fresh data"
+      // (GDS-08) — including the open-panel refresh path — without the
+      // self-inflicted prewarm wipe on every open.
+      loadDiff({ reset, force: false })
     }
   }, [isOpen, loadDiff])
 
@@ -3432,6 +3472,20 @@ export function GitDiffViewer({
         },
         durationMs: 0
       }
+      // Diagnostic: a selected file was served from the renderer's in-memory
+      // fileContents cache WITHOUT a fetch. Records the changeType + content
+      // lengths so a "Git Diff shows stale/base content for a staged entry"
+      // report (GDS-22/33) is root-causable — a staged hit whose modifiedLen
+      // equals its originalLen (both == HEAD/base length) is a stale-slot hit.
+      perfTrace(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_FILE_LOAD_MEMORY_HIT, {
+        terminalId,
+        fileKey,
+        filename: file.filename,
+        changeType: file.changeType,
+        reason,
+        originalLen: cached.originalContent?.length ?? -1,
+        modifiedLen: cached.modifiedContent?.length ?? -1
+      })
       syncCurrentDiffEditorModels(file, cached, reason)
       const editor = diffEditorRef.current
       if (editor) {
@@ -3495,7 +3549,14 @@ export function GitDiffViewer({
         const requestOptions = {
           force,
           missReason: cacheMissReasonForLoad(force, reason),
-          allowLargeFile: allowedLargeFileKeysRef.current.has(fileKey)
+          allowLargeFile: allowedLargeFileKeysRef.current.has(fileKey),
+          // Audit fix #2 (decision ⑧a): the background whole-list prefetch runs
+          // in the LOW git-runtime lane so a foreground select / refresh /
+          // auto-refresh (priority omitted → 'high' in the worker client) always
+          // preempts it. Previously the prefetch defaulted to 'high' and tied
+          // with the user's click, so the selected file queued behind the whole
+          // prefetch burst (measured 18-29 s first-click latency on EDR hosts).
+          ...(reason === 'prefetch' ? { priority: 'low' as const } : {})
         }
         let result: GitFileContentResult = await window.electronAPI.git.getFileContent(activeCwd, requestFile, file.repoRoot, requestOptions)
         if (result.requiresLargeFileConfirmation) {
@@ -5543,6 +5604,7 @@ export function GitDiffViewer({
       getCwd: () => activeCwd || null,
       getRepoRoot: () => diffResult?.cwd || null,
       isSubmodulesLoading: () => Boolean(diffResult?.submodulesLoading),
+      getSubmoduleLoadObservation: () => ({ ...submoduleLoadObservationRef.current }),
       getTiming: () => {
         const timing = timingRef.current
         return {
@@ -6938,6 +7000,37 @@ export function GitDiffViewer({
           scrollTop: diffEditorRef.current?.getModifiedEditor().getScrollTop() ?? null,
           splitRatio: diffSplitRatioRef.current
         }
+      },
+      afterEnter: async (context) => {
+        // Restore the previously selected file ONLY when re-entering via a
+        // subpage switch (TerminalGrid passes the saved DiffSubpageSnapshot as
+        // restoredSnapshot; a fresh open passes null → stays blank, GDS-31). The
+        // open path suppresses auto-restore (openingFromClosed), so this explicit
+        // select overrides the blank for the switch-back case (SN-07 / CDP-06).
+        const snap = context.restoredSnapshot
+        const wantedPath = snap?.subpage === 'diff' ? snap.selectedFilePath : null
+        if (!wantedPath) {
+          perfTrace(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_SUBPAGE_RESTORE, {
+            terminalId, hadSnapshot: Boolean(snap), restoredFile: null,
+            fileFoundInList: false, fileCount: diffResultRef.current?.files?.length ?? 0
+          })
+          return
+        }
+        // The diff list may still be loading when the switch completes; poll
+        // briefly for the file to appear, then select it.
+        const deadline = Date.now() + 2500
+        let target: GitFileStatus | null = null
+        for (;;) {
+          const files = diffResultRef.current?.files ?? []
+          target = files.find((f) => f.filename === wantedPath || f.originalFilename === wantedPath) ?? null
+          if (target || Date.now() >= deadline) break
+          await new Promise((resolve) => setTimeout(resolve, 80))
+        }
+        if (target) handleFileSelect(target)
+        perfTrace(PERF_TRACE_EVENT.RENDERER_GIT_DIFF_SUBPAGE_RESTORE, {
+          terminalId, hadSnapshot: true, restoredFile: wantedPath,
+          fileFoundInList: Boolean(target), fileCount: diffResultRef.current?.files?.length ?? 0
+        })
       }
     },
     workingDirectoryLabel: t('gitDiff.workingDirectory'),
@@ -6956,11 +7049,13 @@ export function GitDiffViewer({
     externalPanelActions,
     externalPanelMetaExtra,
     handleCwdDblClick,
+    handleFileSelect,
     handleSelectSubpage,
     persistCurrentDiffSplitRatio,
     selectedFileKey,
     t,
-    taskTitle
+    taskTitle,
+    terminalId
   ])
 
   useLayoutEffect(() => {

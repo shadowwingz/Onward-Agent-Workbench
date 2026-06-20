@@ -78,6 +78,29 @@ test('worktree lock files are allowed while git-internal lock files are filtered
   })
 })
 
+test('atomic-save temp files are dropped while the real file is allowed (kar-qemu kar_air_control.py churn)', () => {
+  // `.tmp.<pid>.<hash>` write-temp-then-rename artifacts (observed: a background
+  // process rewriting tools/kar_air_control.py fired 11 events from these temps).
+  assert.deepEqual(
+    classifyEventPath('/repo/tools/kar_air_control.py.tmp.7432.3fe8206c1a01', '/repo'),
+    { drop: true, reason: 'tmpfile' }
+  )
+  assert.deepEqual(
+    classifyEventPath('C:\\repo\\tools\\kar_air_control.py.tmp.7432.9ccfbe7edbb5', 'C:\\repo'),
+    { drop: true, reason: 'tmpfile' }
+  )
+  // The REAL file (the rename target) must still be allowed -> triggers recompute.
+  assert.deepEqual(
+    classifyEventPath('/repo/tools/kar_air_control.py', '/repo'),
+    { drop: false, reason: 'allowed' }
+  )
+  // Legitimate files that merely contain "tmp" or digits must NOT be dropped.
+  assert.deepEqual(classifyEventPath('/repo/config.tmp.json', '/repo'), { drop: false, reason: 'allowed' })
+  assert.deepEqual(classifyEventPath('/repo/foo.tmp', '/repo'), { drop: false, reason: 'allowed' })
+  assert.deepEqual(classifyEventPath('/repo/v2.0.1.md', '/repo'), { drop: false, reason: 'allowed' })
+  assert.deepEqual(classifyEventPath('/repo/main.c', '/repo'), { drop: false, reason: 'allowed' })
+})
+
 test('git watcher allowlist still permits durable git state files', () => {
   assert.deepEqual(classifyEventPath('/repo/.git/index', '/repo'), {
     drop: false,
@@ -107,6 +130,38 @@ test('git watcher allowlist still permits durable git state files', () => {
     drop: true,
     reason: 'lockfile'
   })
+})
+
+test('classifyEventPath filters NESTED submodule .git churn (Windows invalidation-storm fix)', () => {
+  // A submodule with a classic-layout .git directory: its index.lock churn
+  // (from the user's git, or our own probes) must NOT fire the parent watcher.
+  assert.deepEqual(
+    classifyEventPath('/repo/src/third_party/KAR/.git/index.lock', '/repo'),
+    { drop: true, reason: 'lockfile' }
+  )
+  assert.deepEqual(
+    classifyEventPath('C:\\repo\\src\\third_party\\KAR\\.git\\index.lock', 'C:\\repo'),
+    { drop: true, reason: 'lockfile' }
+  )
+  assert.deepEqual(
+    classifyEventPath('/repo/sub/.git/objects/ab/cdef', '/repo'),
+    { drop: true, reason: 'gitObjects' }
+  )
+  // A real submodule state change (HEAD / index) is still allowed to fire.
+  assert.deepEqual(
+    classifyEventPath('/repo/sub/.git/HEAD', '/repo'),
+    { drop: false, reason: 'allowed' }
+  )
+  // A submodule WORKING-TREE file change is a real change → must still fire.
+  assert.deepEqual(
+    classifyEventPath('/repo/src/third_party/KAR/lib/widget.c', '/repo'),
+    { drop: false, reason: 'allowed' }
+  )
+  // The submodule .git entry node itself is internal noise.
+  assert.deepEqual(
+    classifyEventPath('/repo/sub/.git', '/repo'),
+    { drop: true, reason: 'gitInternal' }
+  )
 })
 
 test('Parcel ignore list keeps durable git state files visible', () => {

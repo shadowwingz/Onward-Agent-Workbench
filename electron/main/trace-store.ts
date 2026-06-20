@@ -134,6 +134,13 @@ class TraceStore {
   private currentChunkBytes = 0
   private initialized = false
   private rateLimits = new Map<string, RateState>()
+  // Process-lifetime count of events the per-name 100/sec rate limiter dropped.
+  // This is EXPECTED telemetry decimation (a bursty high-frequency event like
+  // `terminal.render.receive` legitimately exceeds the cap), not data loss.
+  // Exposed so consumers can subtract it from the total dropped count and assert
+  // that the REMAINDER (store-not-initialized / write-failure drops) is zero —
+  // the honest "no silent event loss" invariant. See PT-09.
+  private rateLimitedDropped = 0
   private droppedSummaryTimer: ReturnType<typeof setInterval> | null = null
   private rootKind: ResolvedRoot['kind'] | null = null
 
@@ -255,6 +262,15 @@ class TraceStore {
 
   getRootKind(): ResolvedRoot['kind'] | null {
     return this.rootKind
+  }
+
+  /**
+   * Process-lifetime count of events dropped by the per-name rate limiter.
+   * EXPECTED decimation of high-frequency events, not data loss — consumers
+   * subtract this from total drops to isolate genuine store-failure drops.
+   */
+  getRateLimitedDropped(): number {
+    return this.rateLimitedDropped
   }
 
   // ---- internals ----
@@ -413,6 +429,7 @@ class TraceStore {
     }
     if (state.count >= RATE_LIMIT_PER_SECOND) {
       state.dropped += 1
+      this.rateLimitedDropped += 1
       return false
     }
     state.count += 1
